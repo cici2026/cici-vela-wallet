@@ -248,6 +248,41 @@ pub fn query_by_public_key(public_key_hex: &str) -> Result<KeyStatus> {
     })
 }
 
+/// One index record, of which the identity waterfall wants exactly one field.
+#[derive(Debug, Deserialize)]
+struct WalletRefRecord {
+    #[serde(default)]
+    name: String,
+}
+
+/// The Vela name behind an address, if the index knows one.
+///
+/// `walletRef` is the address left-padded to 32 bytes, which is how the index
+/// stores it (`public-key-index.ts:174`).
+///
+/// Every failure — unreachable, timed out, 404, unparseable, an empty name — is
+/// `None`. This is best-effort enrichment for a badge; it must never be the
+/// reason something else does not happen.
+pub fn query_by_wallet_ref(address: &str) -> Option<String> {
+    let stripped = address.trim_start_matches("0x").to_lowercase();
+    if stripped.len() != 40 || !stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    // The zero address has no entry, and asking is a doomed 404
+    // (`public-key-index.ts:180`).
+    if stripped.bytes().all(|b| b == b'0') {
+        return None;
+    }
+    let wallet_ref = format!("0x{stripped:0>64}");
+    let record: WalletRefRecord = get_json(
+        &format!("/api/query?walletRef={}", urlencode(&wallet_ref)),
+        "Query",
+        READ_TIMEOUT,
+    )
+    .ok()?;
+    (!record.name.trim().is_empty()).then(|| record.name)
+}
+
 #[derive(Debug, Deserialize)]
 struct UnitResponse {
     unit: UnitMeta,

@@ -23,7 +23,7 @@ use vela_core::app::activity_feed::{
     ActivityFeed, Event, FeedOperation, FeedShellResult, FeedTxKind, FeedTxRecord, FeedTxStatus,
 };
 
-use crate::executor::storage;
+use crate::executor::{identity, storage};
 use crate::resident::{Answer, Machine};
 use crate::session;
 
@@ -113,19 +113,6 @@ fn read_records() -> Vec<FeedTxRecord> {
     rows.iter().filter_map(to_record).collect()
 }
 
-/// The person's own accounts, by lowercased address → name.
-///
-/// Checked BEFORE any network lookup, because the answer is already on disk and
-/// because "my other wallet" is a better label than an ENS name for the same
-/// address.
-fn own_account_name(address: &str) -> Option<String> {
-    let wanted = address.to_lowercase();
-    storage::load_accounts()
-        .ok()?
-        .into_iter()
-        .find_map(|account| (account.address.to_lowercase() == wanted).then_some(account.name))
-}
-
 impl Machine for ActivityFeed {
     const LABEL: &'static str = "activity_feed";
 
@@ -182,15 +169,15 @@ impl Machine for ActivityFeed {
 
             FeedOperation::ResolveRecipientIdentity { addr } => {
                 let addr = addr.clone();
-                // The local half only. The core says "the shell checks the
-                // user's OWN accounts first (local name, no network), then
-                // ENS/.bnb/Vela" — the second half is the same waterfall
-                // `contacts::resolve_identity` still owes, and they should land
-                // together rather than be written twice.
-                Answer::Now(FeedShellResult::AliasResolved {
-                    name: own_account_name(&addr),
+                // The whole waterfall, in `executor::identity`: own accounts
+                // first (local, no network), then the cache, the passkey index
+                // and the name services. It is the SAME function
+                // `contacts::resolve_identity` calls — the core describes one
+                // lookup and two machines ask for it, so there is one.
+                Answer::Blocking(Box::new(move || FeedShellResult::AliasResolved {
+                    name: identity::resolve(&addr).map(|identity| identity.name),
                     addr,
-                })
+                }))
             }
 
             FeedOperation::Timer { ms, generation } => Answer::After(
@@ -326,31 +313,6 @@ mod tests {
                 Answer::Now(FeedShellResult::DeleteFailed { id }) => assert_eq!(id, "gone"),
                 _ => unreachable!("deleting nothing must report failure"),
             }
-        });
-    }
-
-    /// The person's own account is named from disk, with no network involved.
-    #[test]
-    fn an_own_account_resolves_locally() {
-        storage::tests::with_temp_state("feed-own-account", || {
-            let account = vela_core::app::Account {
-                id: "cred0".to_owned(),
-                name: "Everyday wallet".to_owned(),
-                address: "0xABCdef0000000000000000000000000000000001".to_owned(),
-                public_key_hex: "04aa".to_owned(),
-                created_at_iso: "2026-09-04T00:00:00.000Z".to_owned(),
-                keys: Vec::new(),
-            };
-            if storage::save_account(&account).is_err() {
-                unreachable!("could not save");
-            }
-            // Asked in a different case: the address is the key, and a wallet
-            // that misses its own account on casing labels it a stranger.
-            assert_eq!(
-                own_account_name("0xabcdef0000000000000000000000000000000001").as_deref(),
-                Some("Everyday wallet")
-            );
-            assert_eq!(own_account_name("0xsomeone-else"), None);
         });
     }
 }

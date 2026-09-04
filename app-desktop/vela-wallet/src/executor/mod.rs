@@ -35,6 +35,7 @@ pub mod chain_tokens;
 pub mod chainlink;
 pub mod contacts;
 pub mod display_currency;
+pub mod identity;
 pub mod manage_tokens;
 pub mod network_admin;
 pub mod passkey;

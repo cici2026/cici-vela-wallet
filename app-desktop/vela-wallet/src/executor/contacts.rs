@@ -33,7 +33,7 @@ use vela_core::app::contacts::{
     ContactTombstone, Contacts, Event,
 };
 
-use crate::executor::{pool, storage};
+use crate::executor::{identity, pool, storage};
 use crate::resident::{Answer, Machine};
 use crate::session;
 
@@ -257,12 +257,15 @@ impl Machine for Contacts {
                 Answer::Now(ContactShellResult::HistoryLoaded { txs: Vec::new() })
             }
 
-            // live in 031 — the identity waterfall needs the index and a route.
+            // Live since 031: the waterfall in `executor::identity`, shared with
+            // `activity_feed`'s twin operation so one screen cannot learn a
+            // name the other never does.
             ContactOperation::ResolveIdentity { address } => {
-                Answer::Now(ContactShellResult::IdentityResolved {
-                    address: address.clone(),
-                    identity: None,
-                })
+                let address = address.clone();
+                Answer::Blocking(Box::new(move || {
+                    let identity = identity::resolve(&address);
+                    ContactShellResult::IdentityResolved { address, identity }
+                }))
             }
 
             // Live since 031: `eth_getCode` through the pool, which is what
