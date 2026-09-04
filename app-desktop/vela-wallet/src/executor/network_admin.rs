@@ -629,12 +629,17 @@ impl Machine for NetworkAdmin {
                 }))
             }
 
-            // Acknowledged no-ops. There is no pool and no bundler client on the
-            // desktop until specs 031 and 032, so there is nothing to drop — but
-            // an unanswered operation leaves the core waiting forever, which is
-            // the cardinal sin of this contract. Answered, and marked.
-            // live in 031
-            NetOperation::InvalidatePools { .. } => Answer::Now(NetShellResult::Invalidated),
+            // Live since 031. Editing an endpoint in Settings must drop what
+            // the pool measured about the old one — otherwise the new URL
+            // inherits the old one's latency, its failures and its ban.
+            NetOperation::InvalidatePools { chain_id } => {
+                crate::executor::pool::refresh(*chain_id);
+                Answer::Now(NetShellResult::Invalidated)
+            }
+            // Still a no-op: there is no bundler client until 032, so there is
+            // nothing to drop — but an unanswered operation leaves the core
+            // waiting forever, which is the cardinal sin of this contract.
+            // live in 032
             // live in 032
             NetOperation::ClearBundlerCache { .. } => {
                 Answer::Now(NetShellResult::BundlerCacheCleared)

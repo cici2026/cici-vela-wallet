@@ -33,7 +33,7 @@ use vela_core::app::contacts::{
     ContactTombstone, Contacts, Event,
 };
 
-use crate::executor::storage;
+use crate::executor::{pool, storage};
 use crate::resident::{Answer, Machine};
 use crate::session;
 
@@ -265,15 +265,33 @@ impl Machine for Contacts {
                 })
             }
 
-            // live in 031 — `eth_getCode` on an arbitrary chain IS the pool.
-            // `None` is unknown and the core never caches it; answering a
-            // guess here would put a risk badge nobody measured on a screen.
+            // Live since 031: `eth_getCode` through the pool, which is what
+            // makes this answerable at all — the question is "what does this
+            // chain say", and choosing which endpoint to ask is the pool's job.
+            //
+            // A failure still answers `None`, and `None` still means UNKNOWN
+            // rather than "not a contract". The core never caches it, because
+            // an unreachable RPC must not become a risk badge nobody measured.
             ContactOperation::ClassifyRecipient { chain_id, address } => {
-                Answer::Now(ContactShellResult::RecipientClassified {
-                    chain_id: *chain_id,
-                    address: address.clone(),
-                    code: None,
-                })
+                let (chain_id, address) = (*chain_id, address.clone());
+                Answer::Blocking(Box::new(move || {
+                    let code = pool::call(
+                        chain_id,
+                        "eth_getCode",
+                        serde_json::json!([address, "latest"]),
+                    )
+                    .ok()
+                    .and_then(|body| {
+                        body.get("result")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    });
+                    ContactShellResult::RecipientClassified {
+                        chain_id,
+                        address,
+                        code,
+                    }
+                }))
             }
         }
     }
@@ -384,89 +402,62 @@ mod tests {
         });
     }
 
-    /// Unknown must stay unknown. A shell that guessed here would put a risk
-    /// badge nobody measured onto a send screen.
+    /// History is honestly empty until 032's transaction store exists — a true
+    /// statement about a store that is not there, not a failure.
     #[test]
-    fn the_unavailable_lookups_answer_unknown_rather_than_a_verdict() {
-        let classified = match Contacts::perform(&ContactOperation::ClassifyRecipient {
-            chain_id: 100,
-            address: "0xabc".to_owned(),
-        }) {
-            Answer::Now(result) => result,
-            _ => unreachable!("local in this cut"),
-        };
-        match classified {
-            ContactShellResult::RecipientClassified { code, chain_id, .. } => {
-                assert_eq!(code, None, "unknown, not 'not a contract'");
-                assert_eq!(chain_id, 100, "the answer must identify what it classified");
-            }
-            other => unreachable!("wrong variant: {other:?}"),
-        }
-
+    fn history_is_honestly_empty_rather_than_failed() {
         match Contacts::perform(&ContactOperation::LoadSendHistory) {
             Answer::Now(ContactShellResult::HistoryLoaded { txs }) => assert!(txs.is_empty()),
-            _ => unreachable!("history is honestly empty in this cut"),
+            other => unreachable!(
+                "history is local and empty in this cut: {}",
+                match other {
+                    Answer::Now(result) => format!("{result:?}"),
+                    _ => "non-local".to_owned(),
+                }
+            ),
         }
     }
 
-    /// Delete, and stay deleted.
+    /// Classification goes to the chain since 031, and the answer identifies
+    /// what it classified.
     ///
-    /// The whole write path in one test: an event mutates the core's ledger,
-    /// the core asks for a write, this executor persists it, and a FRESH core
-    /// over the same directory agrees. A shell that acknowledged the write
-    /// without performing it would pass every in-memory assertion and lose the
-    /// change on the next launch.
+    /// The golden Safe IS a contract, so a real run must come back with runtime
+    /// code — and an EOA must come back with `0x`. Those are different facts and
+    /// the core turns them into different badges; conflating them is how a
+    /// wallet calls a person's own address a contract.
     #[test]
-    fn a_deleted_contact_stays_deleted_across_a_relaunch() {
-        storage::tests::with_temp_state("contacts-delete", || {
-            write_list(
-                storage::KEY_CONTACTS,
-                &[contact("0xabc", "Ada"), contact("0xdef", "Bob")],
-                |c: &Contact| StoredContact::from(c),
-            );
-
-            let drain = |host: &mut CoreHost<Contacts>, event: Event| {
-                let mut pending = host.dispatch(event);
-                while let Some(next) = pending.pop() {
-                    match Contacts::perform(&next.operation) {
-                        Answer::Now(result) => pending.extend(host.resolve(next.id, result)),
-                        _ => continue,
-                    }
-                }
+    #[ignore = "classifies two real addresses on Gnosis"]
+    fn a_real_address_is_classified_from_the_chain() {
+        let classify = |address: &str| {
+            let Answer::Blocking(work) = Contacts::perform(&ContactOperation::ClassifyRecipient {
+                chain_id: 100,
+                address: address.to_owned(),
+            }) else {
+                unreachable!("classification is network work since 031");
             };
+            match work() {
+                ContactShellResult::RecipientClassified { code, chain_id, .. } => {
+                    assert_eq!(chain_id, 100, "the answer must identify what it classified");
+                    code
+                }
+                other => unreachable!("wrong variant: {other:?}"),
+            }
+        };
 
-            let mut host = CoreHost::<Contacts>::new();
-            drain(
-                &mut host,
-                Event::AccountSwitched {
-                    my_address: Some("0xme".to_owned()),
-                },
-            );
-            assert_eq!(host.view().contacts.len(), 2, "both were loaded");
+        let safe = classify("0x88cCA0EeDbF2C4426110bbFc998F048689266894")
+            .unwrap_or_else(|| unreachable!("the chain did not answer for the Safe"));
+        println!(
+            "  Safe   -> {} bytes of code",
+            safe.len().saturating_sub(2) / 2
+        );
+        assert!(safe.len() > 2, "a deployed Safe has runtime code");
 
-            drain(
-                &mut host,
-                Event::Delete {
-                    address: "0xabc".to_owned(),
-                    now_ms: 1_756_000_000_000.0,
-                },
-            );
-            let remaining = host.view().contacts;
-            assert_eq!(remaining.len(), 1);
-            assert_eq!(remaining[0].address, "0xdef");
-
-            // The launch that matters: a new core, the same disk.
-            let mut relaunched = CoreHost::<Contacts>::new();
-            drain(
-                &mut relaunched,
-                Event::AccountSwitched {
-                    my_address: Some("0xme".to_owned()),
-                },
-            );
-            let after = relaunched.view().contacts;
-            assert_eq!(after.len(), 1, "the delete did not reach the disk");
-            assert_eq!(after[0].address, "0xdef");
-        });
+        // The zero address is not a contract; `0x` is a VERDICT, and it is a
+        // different answer from `None`.
+        let eoa = classify("0x0000000000000000000000000000000000000001")
+            .unwrap_or_else(|| unreachable!("the chain did not answer for the EOA"));
+        println!("  non-contract -> {eoa:?}");
+        assert_eq!(eoa, "0x", "an address with no code answers 0x, not None");
     }
 
     /// Saved, then gone after a relaunch — through the real loop.

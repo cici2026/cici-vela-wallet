@@ -210,10 +210,21 @@ mod tests {
                 .iter()
                 .find(|t| t.chain_id == 100)
                 .unwrap_or_else(|| unreachable!("Gnosis did not answer: failed={failed:?}"));
-            assert_eq!(
-                gnosis.balance, "769970000000000000",
-                "the golden Safe's known Gnosis balance"
+            // NOT an exact figure. The first version of this test pinned
+            // 769970000000000000 and went red when the Safe's balance moved
+            // on-chain — a wallet balance is not a constant, and a test that
+            // fails when the world changes is reporting the wrong thing. What
+            // must hold is that Gnosis ANSWERED with a real, non-zero quantity.
+            let wei: u128 = gnosis
+                .balance
+                .parse()
+                .unwrap_or_else(|_| unreachable!("not a quantity: {}", gnosis.balance));
+            assert!(
+                wei > 0,
+                "the golden Safe is funded; zero means we read nothing"
             );
+            assert_eq!(gnosis.symbol, "xDAI");
+            assert_eq!(gnosis.decimals, 18);
             assert_eq!(gnosis.price_usd, None, "no price source in this cut");
 
             // The two lists are disjoint by construction, and that is the

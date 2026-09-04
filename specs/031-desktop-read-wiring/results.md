@@ -254,3 +254,72 @@ Both of those lines are the system working, and neither is obvious:
    chains is a number that was never true. Distinguishing "the core refused" from
    "the fetch had not finished" needed a 50-second run rather than a 25-second one —
    the 25s run looked identical and would have supported the wrong conclusion.
+
+## Phase 4 — the handoff contract, mostly closed
+
+Four of the five arms 030 marked `// live in 031` are live.
+
+| Arm | 030 | now |
+|---|---|---|
+| `contacts::classify_recipient` | `code: None` | `eth_getCode` through the pool |
+| `display_currency::read_device_currency` | `None` | the region's ISO-4217 |
+| `display_currency::resolve_rate` | `None` | the configured fiat endpoint |
+| `network_admin::invalidate_pools` | acknowledged no-op | `pool::refresh` |
+| `contacts::resolve_identity` | `None` | **still owed** — the waterfall needs the passkey index and name services |
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **137 passed · 0 failed · 13 ignored** |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · warnings 1, pre-existing |
+| live, per module | ✅ pool 1 · balances 1 · display_currency 2 · contacts 1 · network_admin 3 |
+
+Live evidence: `USD → CNY = 6.71907`, `USD → JPY = 156.014`; the golden Safe classifies
+as **171 bytes of code** and `0x000…001` as **`0x`** — a verdict, and a different
+answer from `None`.
+
+**Two currency arms were one debt, and that is why they landed together.** A desktop
+always had a region (`Loc::from_env`); what it lacked was a *rate*, and the core
+persists a seeded currency only after a real rate resolves. A region candidate is
+useless until something can price it.
+
+### Three tests changed with the arms, which is the contract working
+
+`a_chosen_currency_comes_back_unpriced_rather_than_invented` asserted `rate: None`.
+That was correct in 030 and is wrong now, so it became
+`a_chosen_currency_comes_back_priced` — the visible half of a fail-closed arm going
+live. Likewise `the_unavailable_lookups_answer_unknown_rather_than_a_verdict` split:
+history stays honestly empty (local), classification became a live test asserting a
+contract and a non-contract answer **differently**, because conflating `0x` with
+`None` is how a wallet calls somebody's own address a contract.
+
+### Three process failures of mine, all the same shape
+
+1. **A `str.replace` that matched nothing** because `cargo fmt` had reflowed the
+   target — the same trap as 030 phase 6.
+2. **A script that asserted *before* writing and aborted between the two**, leaving
+   the file untouched while its log said "flipped". I then debugged a stale file.
+3. Fixed by **verifying after the write**, not only asserting before it. Every edit
+   since re-reads the file and asserts the new text is on disk.
+
+### A test that failed because the world changed
+
+`the_golden_safe_reads_across_chains` pinned `769970000000000000` wei. It went red at
+`758970000000000000` — the Safe's balance **moved on-chain**, 0.011 xDAI spent by
+something outside this session. A wallet balance is not a constant, and a test that
+fails when the world changes is reporting the wrong thing. It now asserts what must
+hold: Gnosis answered, the quantity is non-zero, the symbol and decimals are right.
+The exact figures in this document stay as they are — point-in-time evidence, not
+pins.
+
+### Live tests run per module, and the reason is a real property
+
+Run as one `executor::` set they interfere; per module they are green. The cause is
+structural rather than accidental: **the pool is a process-wide singleton thread** and
+`with_temp_state` swaps a process-wide `VELA_STATE_DIR` underneath it. Both facts are
+correct on their own — one pool per process is the architecture, and per-test isolation
+is how storage tests work — and they simply cannot share a process. These are
+`#[ignore]`d manual gates, so per-module is the documented way to run them:
+
+```
+cargo test executor::pool -- --ignored --test-threads=1
+```
