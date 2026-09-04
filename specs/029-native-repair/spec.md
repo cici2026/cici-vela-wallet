@@ -95,19 +95,32 @@ been observed to fail. Landing the guards first, red, is the only way to know th
 bite. This story alone is a viable deliverable: it converts an invisible defect into
 a visible one on three platforms.
 
-**Independent Test**: On an unmodified checkout, run the module-graph check and the
-two nav-coverage tests. All three fail with a message naming `explore` and `signing`.
+**Independent Test**: On an unmodified checkout, run the reachability guard. It
+exits non-zero and names the orphans on all three platforms.
+
+**One guard, not three.** The three platforms fail differently — an undeclared
+module, a missing route constant, a missing enum case — but they fail *identically*
+in the only way that matters: a screen family exists and its navigation root does not
+name it. One instrument that reads all three navigation roots is therefore the honest
+shape, and it has a decisive practical advantage: it needs **no toolchain**, so it
+runs in the `app` job in under a second rather than behind a 25-minute native build.
+A guard that is expensive to run is a guard somebody eventually skips — which is the
+failure mode it exists to prevent. The per-platform build jobs (US3) catch a
+different class: code that is routed but does not compile.
 
 **Acceptance Scenarios**:
 
-1. **Given** an unmodified `main`, **When** the desktop module-graph check runs,
-   **Then** it exits non-zero and names exactly `explore` and `signing` as present
-   on disk but absent from `main.rs`.
-2. **Given** an unmodified `main`, **When** the Android nav-coverage test runs,
-   **Then** it fails naming `ExploreScreen` as a feature screen no `VelaNavHost`
-   destination reaches.
-3. **Given** an unmodified `main`, **When** the iOS nav-coverage test runs, **Then**
-   it fails naming `ExploreScreen` as unreachable from `RootView`.
+1. **Given** an unmodified `main`, **When** the guard runs, **Then** it exits
+   non-zero and reports, for desktop, `explore` and `signing` as present on disk but
+   absent from `main.rs`'s `mod` list.
+2. **Given** an unmodified `main`, **When** the guard runs, **Then** it reports
+   `explore` and `signing` as Android feature packages no `VelaNavHost` destination
+   reaches.
+3. **Given** an unmodified `main`, **When** the guard runs, **Then** it reports
+   `Explore` and `Signing` as iOS `Features/` folders `RootView.swift` never
+   instantiates.
+4. **Given** the guard, **When** its exemption list is read, **Then** it is empty —
+   and any future entry names both the screen and the reason it has no route.
 
 ---
 
