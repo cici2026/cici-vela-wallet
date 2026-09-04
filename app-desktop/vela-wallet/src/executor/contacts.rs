@@ -29,8 +29,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use vela_core::app::contacts::{
-    Contact, ContactGroup, ContactKind, ContactOperation, ContactShellResult, ContactSource,
-    ContactTombstone, Contacts, Event,
+    Contact, ContactGroup, ContactHistoryTx, ContactKind, ContactOperation, ContactShellResult,
+    ContactSource, ContactTombstone, ContactTxKind, Contacts, Event,
 };
 
 use crate::executor::{identity, pool, storage};
@@ -213,6 +213,60 @@ fn write_tombstones(tombstones: &[ContactTombstone]) {
     let _ = storage::write_value(storage::KEY_CONTACTS_DISMISSED, Value::Object(map));
 }
 
+/// `vela.transactionHistory` — the shared local store, spelled once per reader.
+const TX_KEY: &str = "vela.transactionHistory";
+
+/// The send history behind the suggestion list, from the store the activity
+/// feed writes.
+///
+/// One file, one shape, two readers. `activity_feed`'s mapper is the fuller one
+/// (it needs amounts, status and day keys); this needs four fields, and reading
+/// them here rather than borrowing that mapper keeps each machine's vocabulary
+/// its own.
+fn read_send_history() -> Vec<ContactHistoryTx> {
+    let Ok(Some(Value::Array(rows))) = storage::read_value(TX_KEY) else {
+        // A storage failure yields NO suggestions, which is the core's own
+        // reading of `loadTransactions().catch(() => [])` — an empty book, not
+        // a broken one.
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|row| ContactHistoryTx {
+            // Absent means a record older than the field. The core reads that
+            // as "not a suggestion, but still prior interaction", and
+            // substituting `Send` here would invent a recipient nobody sent to.
+            kind: row
+                .get("type")
+                .and_then(Value::as_str)
+                .and_then(|kind| match kind {
+                    "send" => Some(ContactTxKind::Send),
+                    "receive" => Some(ContactTxKind::Receive),
+                    "dapp_tx" => Some(ContactTxKind::DappTx),
+                    "sign_message" => Some(ContactTxKind::SignMessage),
+                    "sign_typed_data" => Some(ContactTxKind::SignTypedData),
+                    "connect" => Some(ContactTxKind::Connect),
+                    _ => None,
+                }),
+            to: row
+                .get("to")
+                .and_then(Value::as_str)
+                .filter(|to| !to.is_empty())
+                .map(str::to_owned),
+            to_name: row
+                .get("toName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_owned),
+            // Stored in SECONDS; the core wants milliseconds, and getting this
+            // wrong dates every suggestion to 1970.
+            timestamp_ms: row
+                .get("timestamp")
+                .and_then(Value::as_f64)
+                .map(|seconds| seconds * 1000.0),
+        })
+        .collect()
+}
+
 impl Machine for Contacts {
     const LABEL: &'static str = "contacts";
 
@@ -251,11 +305,21 @@ impl Machine for Contacts {
                 Answer::Now(ContactShellResult::Written)
             }
 
-            // live in 032 — there is no local transaction store yet. Honestly
-            // empty, which is a true statement, not a failure.
-            ContactOperation::LoadSendHistory => {
-                Answer::Now(ContactShellResult::HistoryLoaded { txs: Vec::new() })
-            }
+            // Live since 031. The marker this replaced said "there is no local
+            // transaction store yet" — which stopped being true the moment the
+            // activity feed's receipt discovery started writing to
+            // `vela.transactionHistory`. Left alone it would have kept the
+            // suggestion list empty for a reason that had gone away.
+            //
+            // Every row is handed over, `receive` and `dapp_tx` included: which
+            // of them may become a suggestion is the CORE's rule (only
+            // `type: 'send'`, so a router or a token contract never pollutes the
+            // trust signal) and its risk half counts prior interaction more
+            // widely. Filtering here would answer one of those questions on the
+            // core's behalf and get the other wrong.
+            ContactOperation::LoadSendHistory => Answer::Now(ContactShellResult::HistoryLoaded {
+                txs: read_send_history(),
+            }),
 
             // Live since 031: the waterfall in `executor::identity`, shared with
             // `activity_feed`'s twin operation so one screen cannot learn a
@@ -324,6 +388,59 @@ mod tests {
 
     /// The cross-client contract, on the RAW JSON. Optionals must be OMITTED,
     /// not written as null: `services/contacts.ts` produces a record without
+    /// The suggestion source: every row handed over, with the CORE deciding
+    /// which of them is a recipient.
+    #[test]
+    fn the_history_is_handed_over_whole_and_the_core_picks_the_recipients() {
+        storage::tests::with_temp_state("contacts-history", || {
+            let rows = serde_json::json!([
+                {
+                    "id": "a",
+                    "type": "send",
+                    "to": "0xAbC",
+                    "toName": "Alice",
+                    "timestamp": 1_788_500_000.0,
+                },
+                // A dApp call. The core drops it from suggestions — a router or
+                // a token contract is not somebody you paid — but the SHELL
+                // must not make that call, because the risk half counts prior
+                // interaction more widely.
+                { "id": "b", "type": "dapp_tx", "to": "0xRouter", "timestamp": 1.0 },
+                // A receipt, written by the activity feed's discovery.
+                { "id": "c", "type": "receive", "to": "0xMe", "timestamp": 2.0 },
+                // A record older than the `type` field.
+                { "id": "d", "to": "0xLegacy", "timestamp": 3.0 },
+                // A blank name is not a name.
+                { "id": "e", "type": "send", "to": "0xDef", "toName": "  " },
+            ]);
+            if storage::write_value(TX_KEY, rows).is_err() {
+                unreachable!("could not seed");
+            }
+
+            let history = read_send_history();
+            assert_eq!(history.len(), 5, "every row, not a filtered subset");
+            assert_eq!(history[0].kind, Some(ContactTxKind::Send));
+            assert_eq!(history[0].to.as_deref(), Some("0xAbC"));
+            assert_eq!(history[0].to_name.as_deref(), Some("Alice"));
+            // SECONDS on disk, milliseconds to the core. Getting this wrong
+            // dates every suggestion to 1970.
+            assert_eq!(history[0].timestamp_ms, Some(1_788_500_000_000.0));
+
+            assert_eq!(history[1].kind, Some(ContactTxKind::DappTx));
+            assert_eq!(history[2].kind, Some(ContactTxKind::Receive));
+            // Absent `type` stays absent: the core reads it as "not a
+            // suggestion, but still prior interaction".
+            assert_eq!(history[3].kind, None);
+            assert_eq!(history[4].to_name, None, "a blank name is not a name");
+
+            // An unreadable store yields no suggestions, not a broken book.
+            if storage::write_value(TX_KEY, serde_json::json!("nonsense")).is_err() {
+                unreachable!("could not seed");
+            }
+            assert!(read_send_history().is_empty());
+        });
+    }
+
     /// the key, and a `null` there reads back as "explicitly cleared".
     #[test]
     fn a_stored_contact_matches_what_other_clients_write() {
@@ -405,20 +522,38 @@ mod tests {
         });
     }
 
-    /// History is honestly empty until 032's transaction store exists — a true
-    /// statement about a store that is not there, not a failure.
+    /// The operation READS the store now.
+    ///
+    /// This asserted `txs.is_empty()` while the marker said "no transaction
+    /// store yet", and it kept passing after one appeared — because it read
+    /// whatever state directory the process happened to point at rather than a
+    /// seeded one. A test that cannot tell an empty store from an unread one
+    /// cannot notice the arm going live, which is exactly what it was there to
+    /// watch.
     #[test]
-    fn history_is_honestly_empty_rather_than_failed() {
-        match Contacts::perform(&ContactOperation::LoadSendHistory) {
-            Answer::Now(ContactShellResult::HistoryLoaded { txs }) => assert!(txs.is_empty()),
-            other => unreachable!(
-                "history is local and empty in this cut: {}",
-                match other {
-                    Answer::Now(result) => format!("{result:?}"),
-                    _ => "non-local".to_owned(),
+    fn the_history_operation_reads_the_store_rather_than_answering_empty() {
+        storage::tests::with_temp_state("contacts-history-op", || {
+            // A genuinely empty store is still empty — that half was always
+            // true and stays true.
+            match Contacts::perform(&ContactOperation::LoadSendHistory) {
+                Answer::Now(ContactShellResult::HistoryLoaded { txs }) => assert!(txs.is_empty()),
+                _ => unreachable!("history is local"),
+            }
+
+            let rows = serde_json::json!([
+                { "id": "a", "type": "send", "to": "0xAbC", "timestamp": 1.0 }
+            ]);
+            if storage::write_value(TX_KEY, rows).is_err() {
+                unreachable!("could not seed");
+            }
+            match Contacts::perform(&ContactOperation::LoadSendHistory) {
+                Answer::Now(ContactShellResult::HistoryLoaded { txs }) => {
+                    assert_eq!(txs.len(), 1, "the store has a row and it must arrive");
+                    assert_eq!(txs[0].to.as_deref(), Some("0xAbC"));
                 }
-            ),
-        }
+                _ => unreachable!("history is local"),
+            }
+        });
     }
 
     /// Classification goes to the chain since 031, and the answer identifies
