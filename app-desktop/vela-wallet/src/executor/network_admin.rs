@@ -199,6 +199,102 @@ fn encode_list<T, S: Serialize>(items: &[T], to_stored: impl Fn(&T) -> S) -> Val
     )
 }
 
+/// Flatten `/chains/eip155-{id}.json` into the shape the core reads.
+///
+/// The served document is the community chain-list format: `chainId`,
+/// `nativeCurrency` as a nested object, `explorers` as objects carrying a `url`.
+/// `NetRawChainData` is flat, so this is the flattening — and it is the SHELL's
+/// job by the core's own instruction: "All parsing decisions (defaults, HTTPS
+/// filtering, placeholder rejection) happen in the core."
+///
+/// Deserializing the document straight into `NetRawChainData` looks like it
+/// works and silently yields defaults, which is how the first version of this
+/// file could not add a network at all while every unit test passed. Only the
+/// live test saw it.
+fn decode_raw_chain_data(value: &Value) -> Option<NetRawChainData> {
+    let object = value.as_object()?;
+    let native = object.get("nativeCurrency").and_then(Value::as_object);
+    let text = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    Some(NetRawChainData {
+        chain_id: object
+            .get("chainId")
+            .and_then(Value::as_u64)
+            .and_then(|id| u32::try_from(id).ok()),
+        name: text(object.get("name")),
+        short_name: text(object.get("shortName")),
+        native_currency_name: native.and_then(|n| text(n.get("name"))),
+        native_currency_symbol: native.and_then(|n| text(n.get("symbol"))),
+        native_currency_decimals: native
+            .and_then(|n| n.get("decimals"))
+            .and_then(Value::as_u64)
+            .and_then(|d| u32::try_from(d).ok()),
+        // Unfiltered on purpose: ws://, http:// and placeholder URLs all pass
+        // through, because filtering them is the core's invariant ⑧.
+        rpc: object
+            .get("rpc")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        // Each explorer's `url`, or an empty string where an entry has none —
+        // the position matters, so a missing url is a blank, not a skip.
+        explorers: object
+            .get("explorers")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        item.get("url")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        testnet: object.get("testnet") == Some(&Value::Bool(true)),
+    })
+}
+
+/// The search index rows, skipping any without a usable chain id.
+fn decode_search_index(value: &Value) -> Vec<NetChainIndexEntry> {
+    let Some(rows) = value.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let object = row.as_object()?;
+            let chain_id = object
+                .get("chainId")
+                .and_then(Value::as_u64)
+                .and_then(|id| u32::try_from(id).ok())?;
+            let text = |key: &str| {
+                object
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            Some(NetChainIndexEntry {
+                chain_id,
+                name: text("name"),
+                short_name: text("shortName"),
+                native_currency_symbol: text("nativeCurrencySymbol"),
+                has_logo: object.get("hasLogo") == Some(&Value::Bool(true)),
+            })
+        })
+        .collect()
+}
+
 fn read_store() -> NetShellResult {
     let endpoints = storage::read_value(storage::KEY_SERVICE_ENDPOINTS)
         .ok()
@@ -427,7 +523,8 @@ impl Machine for NetworkAdmin {
             NetOperation::FetchSearchIndex => Answer::Blocking(Box::new(|| {
                 let url = format!("{}/index/fuse-chains.json", data_base());
                 let chains = get_json(&url, DATA_TIMEOUT)
-                    .and_then(|value| serde_json::from_value::<Vec<NetChainIndexEntry>>(value).ok())
+                    .as_ref()
+                    .map(decode_search_index)
                     .unwrap_or_default();
                 NetShellResult::SearchIndex { chains }
             })),
@@ -438,9 +535,9 @@ impl Machine for NetworkAdmin {
                     let url = format!("{}/chains/eip155-{chain_id}.json", data_base());
                     NetShellResult::ChainInfo {
                         chain_id,
-                        data: get_json(&url, DATA_TIMEOUT).and_then(|value| {
-                            serde_json::from_value::<NetRawChainData>(value).ok()
-                        }),
+                        data: get_json(&url, DATA_TIMEOUT)
+                            .as_ref()
+                            .and_then(decode_raw_chain_data),
                     }
                 }))
             }
@@ -764,6 +861,111 @@ mod tests {
                 ),
                 other => unreachable!("wrong variant: {other:?}"),
             }
+        });
+    }
+
+    /// Drive the machine to quiescence, performing every operation for real.
+    ///
+    /// Unlike the local-only drivers elsewhere in this file, this one performs
+    /// `Blocking` work inline and takes `After` answers immediately — it is the
+    /// whole stack minus gpui's scheduling, which is what an end-to-end claim
+    /// needs.
+    fn drive_fully(host: &mut CoreHost<NetworkAdmin>, event: Event) {
+        let mut pending = host.dispatch(event);
+        while let Some(next) = pending.pop() {
+            // What the core asked for, in order. The only readable record of a
+            // live run, and the thing that turned "it did not add" into "it never
+            // got past FetchChainInfo" in one line.
+            eprintln!("[op] {:?}", next.operation);
+            let result = match NetworkAdmin::perform(&next.operation) {
+                Answer::Now(result) => result,
+                Answer::Blocking(work) => work(),
+                // A debounce answers instantly here; no test should sit through
+                // a timer it did not come to measure.
+                Answer::After(_, result) => result,
+            };
+            pending.extend(host.resolve(next.id, result));
+        }
+    }
+
+    /// SC-001, end to end: a network added against the REAL chain index and the
+    /// REAL endpoint survives a relaunch.
+    ///
+    /// `AddByChainIdRequested` is the same pipeline the wizard's Add button
+    /// runs — resolve the chain, probe its RPC, gate on the core's
+    /// compatibility verdict, dedup, persist — with the UI's confirmation step
+    /// removed. So this exercises every rule and every operation that matters,
+    /// against the network, and the only thing it does not cover is which
+    /// button a person pressed.
+    ///
+    /// `#[ignore]`d with the probes, for the same reason.
+    #[test]
+    #[ignore = "hits the real chain index and a real RPC"]
+    fn a_network_added_against_the_real_chain_survives_a_relaunch() {
+        storage::tests::with_temp_state("net-live-add", || {
+            let mut host = CoreHost::<NetworkAdmin>::new();
+            drive_fully(&mut host, Event::Started);
+            let before = host.view().networks.len();
+
+            // Zora, NOT Gnosis. The first version of this test used chain 100
+            // and failed in the most useful way available: the count stayed at
+            // 12 and the "added" row turned out to be the BUILT-IN Gnosis,
+            // because the core's dedup gate (invariant ①) refuses to add a
+            // chain the wallet already ships. The test was wrong; the core was
+            // right. Zora is a real chain that is not a default, which is what
+            // makes this an add rather than a no-op.
+            const ZORA: u32 = 7_777_777;
+            drive_fully(
+                &mut host,
+                Event::AddByChainIdRequested {
+                    chain_id: ZORA,
+                    now_iso: "2026-09-04T00:00:00.000Z".to_owned(),
+                },
+            );
+
+            let view = host.view();
+            println!("  networks: {before} -> {}", view.networks.len());
+            println!(
+                "  wizard: phase={:?} error={:?} can_add={}",
+                view.wizard.phase, view.wizard.error, view.wizard.can_add
+            );
+            println!("  chain_info: {:?}", view.wizard.chain_info);
+            println!("  compat: {:?}", view.wizard.compat);
+            let added = view
+                .networks
+                .iter()
+                .find(|row| row.chain_id == ZORA)
+                .unwrap_or_else(|| unreachable!("chain {ZORA} was not added: {:?}", view.networks));
+            println!("  added: {} ({})", added.display_name, added.rpc_url);
+            assert!(
+                added.is_custom,
+                "a chain the wallet does not ship must arrive as CUSTOM"
+            );
+            assert!(
+                !added.rpc_url.is_empty(),
+                "an added network must carry an endpoint"
+            );
+
+            // What actually reached the disk.
+            let stored =
+                decode_list::<StoredNetwork, NetCustomNetwork>(storage::KEY_CUSTOM_NETWORKS);
+            assert!(
+                stored.iter().any(|n| n.chain_id == ZORA),
+                "the network did not reach storage"
+            );
+
+            // The launch that matters: a fresh core over the same directory.
+            let mut relaunched = CoreHost::<NetworkAdmin>::new();
+            drive_fully(&mut relaunched, Event::Started);
+            assert!(
+                relaunched
+                    .view()
+                    .networks
+                    .iter()
+                    .any(|row| row.chain_id == ZORA),
+                "the added network did not survive the relaunch"
+            );
+            println!("  survived the relaunch");
         });
     }
 

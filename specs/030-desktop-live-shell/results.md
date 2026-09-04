@@ -424,3 +424,57 @@ remainder is interaction surfaces rather than plumbing:
 | SC-005 galleries unchanged, fixtures additive | ✅ 0 deleted lines across every `fixtures.rs` |
 | SC-006 tests up, fmt and CI green | ✅ 93 → 125 |
 | SC-007 zero `rust/`, zero corpus delta | ✅ |
+
+## Phase 6 — SC-001, against the real chain index and real endpoints
+
+`AddByChainIdRequested` is the same pipeline the wizard's Add button runs — resolve
+the chain, race its RPCs, probe the P-256 precompile, check eleven contract
+deployments, gate on the core's verdict, dedup, persist — with only the UI's
+confirmation step removed. Driving it fully against the network:
+
+```
+[op] ReadStore
+[op] FetchChainInfo { chain_id: 7777777 }
+[op] ProbeRpc { url: "https://zora.drpc.org" }
+[op] ProbeRpc { url: "https://rpc.zora.energy/" }
+[op] RpcCallP256 { url: "https://zora.drpc.org" }
+[op] RpcGetCode × 11  (EntryPoint, Multicall3, the Safe set …)
+  networks: 12 -> 13
+  added: Zora (https://zora.drpc.org)      ← the winner of the core's RPC race
+  survived the relaunch
+```
+
+**SC-001 is met.** A real chain, resolved from the real index, probed against real
+endpoints, admitted by the core's own compatibility rules, persisted, and still there
+after a fresh core reads the same directory.
+
+### Two failures on the way, and only one was the code's
+
+**The first was the core being right and my test being wrong.** I picked chain 100.
+The count stayed at 12 and the row the test found turned out to be the **built-in**
+Gnosis: `AddByChainIdRequested` had hit the dedup gate (invariant ①), which refuses to
+add a chain the wallet already ships. Switched to Zora, which is real and is not a
+default — and added an assertion that an added chain arrives `is_custom`, so the same
+mistake cannot pass silently next time.
+
+**The second was a real bug, and a process failure of mine.** The served
+`/chains/eip155-*.json` is the community chain-list format — `chainId`,
+`nativeCurrency` nested, `explorers` as objects carrying a `url`. `NetRawChainData` is
+flat, and the core's doc assigns the flattening to the shell. I had written
+`decode_raw_chain_data` and `decode_search_index` correctly **and then failed to wire
+them**: `cargo fmt` had reformatted those two call sites, my string replacement
+matched nothing, and — unlike every other substitution in this cut — **I did not
+assert that it had applied**. The compiler said so, in a "never used" warning I had
+filtered out of my own grep.
+
+So for two runs the executor was still deserializing the raw document straight into
+`NetRawChainData`, which does not fail: it silently yields defaults, and the core
+correctly reported `NotFound`. Every unit test passed throughout. Only the live test
+could see it, which is the argument for having one.
+
+### Diagnostics kept on purpose
+
+The live driver prints each operation as the core asks for it. That trace is what
+turned "it did not add" into "it never got past `FetchChainInfo`" in one line, and it
+is the only readable record of a live run. Production `get_json` and `json_rpc` are
+quiet again: a failed probe is expected, and the core owns what it means.
