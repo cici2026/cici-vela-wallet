@@ -478,12 +478,25 @@ pub fn storage_groups(s: &SettingsStrings) -> Vec<StorageGroup> {
 
 // -- about --------------------------------------------------------------------
 
+/// The mock's version. NOT the app's — see [`about_version`].
 pub const APP_VERSION: &str = "1.0.0";
 pub const APP_COMMIT: &str = "6ab8f";
 
-pub fn about_version(s: &SettingsStrings) -> SharedString {
+/// The version line.
+///
+/// `live` reads `CARGO_PKG_VERSION`, because the panel said **v1.0.0 (6ab8f)**
+/// while the crate was 0.1.1 — and a bug report that quotes a version names one
+/// that does not exist. The COMMIT stays the mock's for now: there is no
+/// build-time git hash in this crate, and a made-up one is the half of that
+/// line that was already wrong.
+pub fn about_version(s: &SettingsStrings, live: bool) -> SharedString {
+    let version = if live {
+        env!("CARGO_PKG_VERSION")
+    } else {
+        APP_VERSION
+    };
     SharedString::from(fill(
-        &fill(&s.about_version, "version", APP_VERSION),
+        &fill(&s.about_version, "version", version),
         "commit",
         APP_COMMIT,
     ))

@@ -4090,10 +4090,23 @@ impl WalletPage {
     /// DST7 — how much of this device Vela is using, and what can be given back.
     fn settings_storage(&mut self, theme: &Theme) -> Div {
         let s = &self.settings;
+        // Live since 031. The panel told everybody 2.4 MB / 216 records, and a
+        // person deciding whether to clear a cache deserves their own number.
+        let (amount, unit, records) = if self.identity.is_some() {
+            let (bytes, records) = crate::executor::storage::usage();
+            let (amount, unit) = human_bytes(bytes);
+            (amount, unit, records)
+        } else {
+            (
+                gpui::SharedString::from(settings_fixtures::STORAGE_AMOUNT),
+                gpui::SharedString::from(settings_fixtures::STORAGE_UNIT),
+                settings_fixtures::STORAGE_RECORDS,
+            )
+        };
         let summary = gpui::SharedString::from(crate::wallet::fill(
             &s.storage_summary,
             "count",
-            &settings_fixtures::STORAGE_RECORDS.to_string(),
+            &records.to_string(),
         ));
         let mut col = div()
             .flex()
@@ -4109,14 +4122,14 @@ impl WalletPage {
                             .text_size(theme::text_balance_hero())
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.fg_base)
-                            .child(settings_fixtures::STORAGE_AMOUNT),
+                            .child(amount),
                     )
                     .child(
                         div()
                             .text_size(theme::text_row_title())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(theme.fg_base)
-                            .child(settings_fixtures::STORAGE_UNIT),
+                            .child(unit),
                     )
                     .child(
                         div()
@@ -4145,6 +4158,10 @@ impl WalletPage {
     /// DST8 — the build, the technical inventory, the three links.
     fn settings_about(&mut self, theme: &Theme) -> Div {
         let s = &self.settings;
+        // A signed-in window states the crate's OWN version. The panel said
+        // v1.0.0 while the crate was 0.1.1, and a bug report that quotes it
+        // names a version that does not exist.
+        let live = self.identity.is_some();
         let mut col = div()
             .flex()
             .flex_col()
@@ -4173,7 +4190,7 @@ impl WalletPage {
                                     .font_family(theme::font_mono())
                                     .text_size(theme::text_row_sub())
                                     .text_color(theme.fg_subtle)
-                                    .child(settings_fixtures::about_version(s)),
+                                    .child(settings_fixtures::about_version(s, live)),
                             ),
                     ),
             )
@@ -5677,4 +5694,31 @@ mod tests {
             assert_eq!(crate::settings::fixtures::network(id).id, id);
         }
     }
+}
+
+/// Bytes as the figure and the unit the hero draws them as.
+///
+/// KB and MB at 1024, because that is what a file manager on this machine will
+/// say and a person comparing the two numbers should not have to know which
+/// convention each used. One decimal past KB, none below: "1536 B" is a real
+/// number and "1.5 KB" of it is noise.
+fn human_bytes(bytes: u64) -> (SharedString, SharedString) {
+    #[allow(clippy::cast_precision_loss, reason = "a file size, for display")]
+    let value = bytes as f64;
+    if bytes < 1024 {
+        return (
+            SharedString::from(bytes.to_string()),
+            SharedString::from("B"),
+        );
+    }
+    if bytes < 1024 * 1024 {
+        return (
+            SharedString::from(format!("{:.1}", value / 1024.0)),
+            SharedString::from("KB"),
+        );
+    }
+    (
+        SharedString::from(format!("{:.1}", value / (1024.0 * 1024.0))),
+        SharedString::from("MB"),
+    )
 }
