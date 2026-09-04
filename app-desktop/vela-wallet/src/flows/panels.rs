@@ -238,6 +238,15 @@ fn receive_qr(
         model.account.name.clone(),
         model.account.seed.as_ref(),
         model.account.lines.clone(),
+        // The whole address, rejoined from the two halves the card draws. A
+        // receive screen's job is to hand this over, and the two ways it does
+        // that — the code and this card — were both decorative until 031.
+        model.qr_payload.is_some().then(|| {
+            SharedString::from(format!(
+                "{}{}",
+                model.account.lines.0, model.account.lines.1
+            ))
+        }),
     ))
     .child(div().flex().justify_center().child(qr_card(
         theme,
@@ -749,6 +758,10 @@ fn send_form(
                     lines.0.clone(),
                     seed.as_ref(),
                     (lines.1.clone(), SharedString::default()),
+                    // The send form's recipient row: the whole card OPENS the
+                    // contact picker, so a copy click inside it would fight the
+                    // row it sits in.
+                    None,
                 ),
             ));
     }

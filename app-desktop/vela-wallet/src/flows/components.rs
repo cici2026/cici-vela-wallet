@@ -6,7 +6,11 @@
 //! `asset_row`, `token_icon`, `identicon_avatar` and `empty_state` all come
 //! from next door. What is here is what those did not already cover.
 
-use gpui::{Div, Hsla, ParentElement, SharedString, Styled, div, px};
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    Div, Hsla, InteractiveElement as _, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, div, px,
+};
 use qrcode::{Color as QrColorModule, QrCode};
 
 use crate::icons::{Icon, IconCache};
@@ -361,8 +365,11 @@ pub fn address_card(
     name: SharedString,
     seed: &str,
     lines: (SharedString, SharedString),
-) -> Div {
+    // The whole address, when there is a real one to copy. `None` in the mocks.
+    copy: Option<SharedString>,
+) -> gpui::Stateful<Div> {
     div()
+        .id("receive-address-card")
         .flex()
         .items_center()
         .gap(px(12.))
@@ -398,6 +405,12 @@ pub fn address_card(
                 ),
         )
         .child(icon_img(icons, Icon::Copy, false, theme.fg_muted, 16.))
+        .when_some(copy, |el, address| {
+            el.cursor_pointer()
+                .on_click(move |_, _, cx: &mut gpui::App| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.to_string()));
+                })
+        })
 }
 
 /// The receive QR card.

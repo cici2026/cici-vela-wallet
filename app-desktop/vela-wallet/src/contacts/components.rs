@@ -9,7 +9,8 @@
 
 use crate::contacts::model::ContactRowModel;
 use gpui::{
-    Div, ElementId, InteractiveElement as _, ParentElement, SharedString, Stateful, Styled, div, px,
+    Div, ElementId, InteractiveElement as _, IntoElement, ParentElement, SharedString, Stateful,
+    StatefulInteractiveElement as _, Styled, div, px,
 };
 
 use crate::icons::{Icon, IconCache};
@@ -213,7 +214,23 @@ pub fn rail_label(theme: &Theme, label: SharedString) -> Div {
 /// The menu card behind both DC5's header dropdown and DC6's group context
 /// menu (M1/M2): raised surface, hairline border, 44 px icon+label rows, an
 /// optional divider and a destructive row in `error_base`.
-pub fn menu_card(theme: &Theme, icons: &mut IconCache, menu: &MenuModel) -> Div {
+/// One menu row's action. Empty means the menu is a picture, which is what the
+/// gallery boards want and what a row with nowhere to go should be.
+pub type MenuAction = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// The anchored menu (M1/M2), with an optional action per row.
+///
+/// `actions` is positional: entry `i` belongs to `menu.items[i]`, and a shorter
+/// list simply leaves the rest inert. 030 recorded this component as blocked
+/// because its items "carry no action"; giving them an OPTIONAL one changes
+/// nothing about how the gallery draws them, which is what makes it additive
+/// rather than the design decision it was taken for.
+pub fn menu_card(
+    theme: &Theme,
+    icons: &mut IconCache,
+    menu: &MenuModel,
+    actions: Vec<Option<MenuAction>>,
+) -> Div {
     let mut card = div()
         .w(px(CONTACTS_MENU_W))
         .py(px(6.))
@@ -224,24 +241,32 @@ pub fn menu_card(theme: &Theme, icons: &mut IconCache, menu: &MenuModel) -> Div 
         .shadow_lg()
         .flex()
         .flex_col();
+    let mut actions = actions.into_iter();
     for (i, item) in menu.items.iter().enumerate() {
         let fg = if item.destructive {
             theme.error_base
         } else {
             theme.fg_base
         };
-        card = card.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .h(px(CONTACTS_MENU_ROW_H))
-                .px(px(14.))
-                .text_size(theme::text_row_sub())
-                .text_color(fg)
-                .child(icon_img(icons, item.icon, false, fg, GLYPH_SM))
-                .child(item.label.clone()),
-        );
+        let row = div()
+            .id(gpui::ElementId::from(("menu-row", i)))
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .h(px(CONTACTS_MENU_ROW_H))
+            .px(px(14.))
+            .text_size(theme::text_row_sub())
+            .text_color(fg)
+            .child(icon_img(icons, item.icon, false, fg, GLYPH_SM))
+            .child(item.label.clone());
+        card = card.child(match actions.next().flatten() {
+            Some(action) => row
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.bg_sunken))
+                .on_click(action)
+                .into_any_element(),
+            None => row.into_any_element(),
+        });
         if menu.divider_after == Some(i) {
             card = card.child(div().h(px(1.)).my(px(4.)).bg(theme.divider));
         }
@@ -291,6 +316,9 @@ pub fn address_block(
     icons: &mut IconCache,
     label: SharedString,
     address: SharedString,
+    // `None` in the gallery, where there is no address worth putting on a real
+    // clipboard. A live block copies.
+    on_copy: Option<MenuAction>,
 ) -> Div {
     div()
         .flex()
@@ -317,12 +345,12 @@ pub fn address_block(
                         .child(address),
                 ),
         )
-        .child(icon_button(
-            "copy-contact-address",
-            theme,
-            icons,
-            Icon::Copy,
-        ))
+        .child(match on_copy {
+            Some(on_copy) => {
+                icon_button("copy-contact-address", theme, icons, Icon::Copy).on_click(on_copy)
+            }
+            None => icon_button("copy-contact-address", theme, icons, Icon::Copy),
+        })
 }
 
 // -- GhostAddRow --------------------------------------------------------------

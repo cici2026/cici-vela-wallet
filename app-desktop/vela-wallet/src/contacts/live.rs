@@ -38,6 +38,30 @@ fn display_name(contact: &Contact) -> SharedString {
         )
 }
 
+/// The group rail: the person's own groups, with how many people are in each.
+///
+/// The rail drew `fixtures::GROUPS` for a signed-in person too — 家人 / 工作 /
+/// … under somebody's real address book. The same shape the home's asset strip
+/// had before phase 17, and found the same way: by reading what the surface
+/// actually calls rather than trusting that "contacts is live".
+///
+/// Returns the id alongside, because the row that opens a group's menu has to
+/// name WHICH group to the core, and an index into a list that reorders is not
+/// a name.
+#[must_use]
+pub fn groups(view: &ContactsView) -> Vec<(SharedString, SharedString, u32)> {
+    view.groups
+        .iter()
+        .map(|group| {
+            (
+                SharedString::from(group.id.clone()),
+                SharedString::from(group.name.clone()),
+                u32::try_from(group.members.len()).unwrap_or(u32::MAX),
+            )
+        })
+        .collect()
+}
+
 /// One row per contact, in the core's order.
 #[must_use]
 pub fn rows(view: &ContactsView) -> Vec<ContactRowModel> {
@@ -122,6 +146,42 @@ mod tests {
         assert_eq!(rows[0].name, SharedString::from("Ada"));
         assert_eq!(rows[1].name, SharedString::from("bob.eth"));
         assert_eq!(rows[2].name, SharedString::from("0xcccc…0003"));
+    }
+
+    /// The rail lists the person's own groups, with the id each row needs.
+    #[test]
+    fn the_group_rail_is_the_persons_own_and_carries_each_id() {
+        use vela_core::app::contacts::ContactGroupView;
+
+        let mut book = view(Vec::new());
+        book.groups = vec![
+            ContactGroupView {
+                id: "g-family".to_owned(),
+                name: "Family".to_owned(),
+                color: None,
+                members: vec![contact("0xaaa", None, None), contact("0xbbb", None, None)],
+            },
+            ContactGroupView {
+                id: "g-empty".to_owned(),
+                name: "Work".to_owned(),
+                color: None,
+                members: Vec::new(),
+            },
+        ];
+
+        let rows = groups(&book);
+        assert_eq!(rows.len(), 2);
+        // The ID, not the index: a rail that reorders would otherwise delete
+        // whichever group slid into the slot that was clicked.
+        assert_eq!(rows[0].0, "g-family");
+        assert_eq!(rows[0].1, "Family");
+        assert_eq!(rows[0].2, 2);
+        // An empty group is still a group — it is a thing the person made, and
+        // hiding it would make its delete unreachable.
+        assert_eq!(rows[1].0, "g-empty");
+        assert_eq!(rows[1].2, 0);
+
+        assert!(groups(&view(Vec::new())).is_empty());
     }
 
     /// The core sorts favourites first, then most recent. Grouping must not

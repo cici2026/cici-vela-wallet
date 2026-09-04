@@ -17,6 +17,7 @@ use gpui::{
 };
 
 use crate::contacts::ContactsStrings;
+use crate::contacts::components as contacts_components;
 use crate::contacts::components::{
     RailState, accent_button, add_chip, address_block, contact_row, destructive_text_button,
     empty_state_cta, ghost_add_row, group_chip, icon_button, menu_card, outline_button, rail_label,
@@ -1084,17 +1085,18 @@ impl WalletPage {
                 })),
             );
 
-        if !empty {
+        let groups = self.group_models(cx);
+        if !empty && !groups.is_empty() {
             rail = rail.child(rail_label(theme, groups_label));
-            for (i, group) in contacts_fixtures::GROUPS.iter().enumerate() {
+            for (i, (_, name, count)) in groups.iter().enumerate() {
                 rail = rail.child(
                     rail_row(
                         ElementId::from(("rail-group", i)),
                         theme,
                         &mut self.icons,
                         Some(Icon::UsersRound),
-                        SharedString::from(group.name),
-                        Some(group.count),
+                        name.clone(),
+                        Some(*count),
                         if selected_group == Some(i) {
                             RailState::Selected
                         } else {
@@ -1236,6 +1238,32 @@ impl WalletPage {
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
         wallet_live::balance(&view, &self.strings, &self.locale)
+    }
+
+    /// The group rail: the person's own groups, or the mocks'.
+    ///
+    /// Each carries its id, because the menu that acts on a group has to name
+    /// WHICH one to the core and an index into a reorderable list is not a name.
+    fn group_models(&mut self, cx: &mut Context<Self>) -> Vec<(SharedString, SharedString, u32)> {
+        if self.identity.is_none() {
+            return contacts_fixtures::GROUPS
+                .iter()
+                .map(|group| {
+                    (
+                        SharedString::from(group.name),
+                        SharedString::from(group.name),
+                        group.count,
+                    )
+                })
+                .collect();
+        }
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        if !view.loaded {
+            // The core has not ruled. An empty rail, not a fixture one — the
+            // same rule the roster beside it already follows.
+            return Vec::new();
+        }
+        contacts_live::groups(&view)
     }
 
     /// The roster: the core's book for a real session, the mocks' otherwise.
@@ -1446,6 +1474,18 @@ impl WalletPage {
             contacts_fixtures::CONTACTS[self.contact.min(contacts_fixtures::CONTACTS.len() - 1)];
         let model = contacts_fixtures::contact_detail(&self.contacts, &contact);
         let address_label = self.contacts.address_label.clone();
+        // Copy the address the panel is ABOUT — the core's, for a real session.
+        // Copying the mock's would put a stranger's address on somebody's
+        // clipboard, and the next thing that happens to a copied address is a
+        // paste into a send field.
+        let copy_address: Option<contacts_components::MenuAction> =
+            live_address.clone().map(|address| {
+                Box::new(
+                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.to_string()));
+                    },
+                ) as contacts_components::MenuAction
+            });
         let recent = self.contacts.recent_activity.clone();
         let view_all = self.contacts.view_all_activity.clone();
         let edit = self.contacts.edit.clone();
@@ -1586,6 +1626,7 @@ impl WalletPage {
                 &mut self.icons,
                 address_label,
                 model.address_full.clone(),
+                copy_address,
             ))
             .child(div().h(px(1.)).bg(theme.divider))
             .child(activity)
@@ -2038,6 +2079,10 @@ impl WalletPage {
             .text_color(theme.fg_base)
             .child(SharedString::from(self.identity().address));
 
+        // The button said "copy address" and copied nothing. A receive screen's
+        // whole job is to hand an address over, and the two ways it does that —
+        // the code and this button — were both decorative until 031.
+        let address = self.identity().address;
         let copy = div()
             .id("copy-address")
             .h(px(48.))
@@ -2055,7 +2100,10 @@ impl WalletPage {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(theme.fg_base)
             .child(crate::wallet::components::copy_icon(theme, &mut self.icons))
-            .child(s.copy_address.clone());
+            .child(s.copy_address.clone())
+            .on_click(move |_, _, cx: &mut gpui::App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(address.clone()));
+            });
 
         let warning = div()
             .p(px(14.))
@@ -2580,16 +2628,22 @@ impl WalletPage {
             theme,
             &mut self.icons,
             &contacts_fixtures::header_dropdown(&self.contacts),
+            // The component board is a picture of the menu, not a menu.
+            Vec::new(),
         );
         let group_menu = menu_card(
             theme,
             &mut self.icons,
             &contacts_fixtures::group_context(&self.contacts),
+            // The component board is a picture of the menu, not a menu.
+            Vec::new(),
         );
         let contact_menu = menu_card(
             theme,
             &mut self.icons,
             &contacts_fixtures::contact_context(&self.contacts),
+            // The component board is a picture of the menu, not a menu.
+            Vec::new(),
         );
         let menus = div()
             .flex()
@@ -2613,6 +2667,9 @@ impl WalletPage {
             &mut self.icons,
             s_address,
             contacts_fixtures::CONTACTS[0].address_full.into(),
+            // The component board is a picture: there is no address here worth
+            // putting on a real clipboard.
+            None,
         );
 
         let mut recent = div().flex().flex_col().child(
@@ -5091,6 +5148,58 @@ impl WalletPage {
         )
     }
 
+    /// What each row of an open menu does, positionally.
+    ///
+    /// 030 called this component blocked because its items "carry no action".
+    /// They can carry one; what most of them still have nowhere to GO is a
+    /// different problem, and the ones that do are wired here. An item with no
+    /// entry stays inert rather than pretending — a menu row that highlights
+    /// and does nothing is worse than one that plainly does not.
+    fn menu_actions(
+        &mut self,
+        kind: ContactsMenu,
+        cx: &mut Context<Self>,
+    ) -> Vec<Option<contacts_components::MenuAction>> {
+        // The mocks' menus are pictures. Only a real session acts.
+        if self.identity.is_none() {
+            return Vec::new();
+        }
+        match kind {
+            // 重命名 / 导入 / 导出 need a text dialog and a file picker, neither
+            // of which the desktop draws yet. 删除分组 needs neither.
+            ContactsMenu::Group => {
+                let Some(index) = self.group else {
+                    return Vec::new();
+                };
+                let Some((id, _, _)) = self.group_models(cx).get(index).cloned() else {
+                    return Vec::new();
+                };
+                vec![
+                    None,
+                    None,
+                    None,
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                            resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                                resident
+                                    .dispatch(ContactEvent::GroupDelete { id: id.to_string() }, cx);
+                            });
+                            // The group that was open no longer exists; the
+                            // rail falls back to the whole book rather than to
+                            // whichever group slid into that index.
+                            this.group = None;
+                            this.menu = None;
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                ]
+            }
+            // Import / export are a file dialog away, and the site and tile
+            // menus belong to a browser this client does not have.
+            ContactsMenu::Header | ContactsMenu::Site | ContactsMenu::Tile => Vec::new(),
+        }
+    }
+
     fn menu_overlay(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (kind, position, anchor) = self.menu?;
         let model = match kind {
@@ -5099,7 +5208,8 @@ impl WalletPage {
             ContactsMenu::Site => explore_fixtures::site_menu(&self.explore),
             ContactsMenu::Tile => explore_fixtures::tile_menu(&self.explore),
         };
-        let card = menu_card(theme, &mut self.icons, &model);
+        let actions = self.menu_actions(kind, cx);
+        let card = menu_card(theme, &mut self.icons, &model, actions);
         Some(
             deferred(
                 anchored()
