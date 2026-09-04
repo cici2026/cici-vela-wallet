@@ -13,7 +13,7 @@ use crate::settings::fixtures::{Pill, Tone};
 use crate::settings::model::{NetworkRowModel, chain_tint, lettermark};
 
 use vela_core::app::display_currency::CurrencyView;
-use vela_core::app::network_admin::{NetProbeHealth, NetServiceHealth, NetView};
+use vela_core::app::network_admin::{NetProbeHealth, NetProviderId, NetServiceHealth, NetView};
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
 
 /// The sample figure the 本地化 mock prints beside the currency code.
@@ -265,6 +265,56 @@ pub fn endpoint_tone(health: &NetServiceHealth) -> Option<Tone> {
     }
 }
 
+/// A provider's own name. Not translated: Alchemy is called Alchemy.
+#[must_use]
+pub fn provider_name(provider: NetProviderId) -> SharedString {
+    SharedString::from(match provider {
+        NetProviderId::Alchemy => "Alchemy",
+        NetProviderId::Drpc => "dRPC",
+        NetProviderId::Ankr => "Ankr",
+    })
+}
+
+/// How many networks this provider's key actually reached, once tested.
+///
+/// `None` until the test finishes. A count of zero out of zero, printed while
+/// the test is still running, reads as "this key works nowhere" — which is a
+/// verdict, and the test has not reached one.
+#[must_use]
+pub fn provider_support(
+    provider: &vela_core::app::network_admin::NetProviderView,
+    s: &SettingsStrings,
+) -> Option<SharedString> {
+    let test = provider.test.as_ref().filter(|test| test.done)?;
+    let base = crate::wallet::fill(
+        &crate::wallet::fill(&s.provider_supports, "count", &test.ok_count.to_string()),
+        "total",
+        &test.total.to_string(),
+    );
+    // The average of the ones that ANSWERED. Folding a failed network in as
+    // zero would make a half-broken key look fast.
+    let answered: Vec<f64> = test
+        .results
+        .iter()
+        .filter(|row| row.ok)
+        .map(|row| row.latency_ms)
+        .collect();
+    if answered.is_empty() {
+        return Some(SharedString::from(base));
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a mean latency, for display"
+    )]
+    let mean = (answered.iter().sum::<f64>() / answered.len() as f64).max(0.0) as u32;
+    Some(SharedString::from(format!(
+        "{base} · {}",
+        crate::wallet::fill(&s.provider_avg_latency, "ms", &mean.to_string())
+    )))
+}
+
 /// The core owns which networks exist, in what order, and whether each is
 /// custom. This adds only the two things it has no business knowing — a
 /// lettermark and a tint — and flattens the probe health to "is there a number".
@@ -298,6 +348,88 @@ mod endpoint_tests {
 
     fn strings() -> SettingsStrings {
         SettingsStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A key's support line waits for the test to finish, and averages only
+    /// the networks that answered.
+    #[test]
+    fn a_support_line_waits_for_the_test_and_averages_what_answered() {
+        use vela_core::app::network_admin::{
+            NetProviderNetRow, NetProviderTestView, NetProviderView,
+        };
+        let s = strings();
+        let provider = |test: Option<NetProviderTestView>| NetProviderView {
+            provider: NetProviderId::Alchemy,
+            key: "abc".to_owned(),
+            has_key: true,
+            test,
+        };
+
+        // Never tested, and mid-test: no line. "0 of 0" printed while a test is
+        // running reads as "this key works nowhere", which is a verdict the
+        // test has not reached.
+        assert!(provider_support(&provider(None), &s).is_none());
+        assert!(
+            provider_support(
+                &provider(Some(NetProviderTestView {
+                    done: false,
+                    results: Vec::new(),
+                    ok_count: 0,
+                    total: 3,
+                })),
+                &s
+            )
+            .is_none()
+        );
+
+        // Done: two of three, and the average of the two that ANSWERED — 50ms,
+        // not 33ms. Folding the failure in as zero makes a half-broken key look
+        // fast.
+        let line = provider_support(
+            &provider(Some(NetProviderTestView {
+                done: true,
+                results: vec![
+                    NetProviderNetRow {
+                        chain_id: 1,
+                        ok: true,
+                        latency_ms: 40.0,
+                    },
+                    NetProviderNetRow {
+                        chain_id: 56,
+                        ok: true,
+                        latency_ms: 60.0,
+                    },
+                    NetProviderNetRow {
+                        chain_id: 100,
+                        ok: false,
+                        latency_ms: 0.0,
+                    },
+                ],
+                ok_count: 2,
+                total: 3,
+            })),
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("a finished test has a line"));
+        assert!(line.contains('2') && line.contains('3'), "{line}");
+        assert!(line.contains("50"), "the mean of what answered: {line}");
+
+        // Everything failed: the count, and no average at all.
+        let none_ok = provider_support(
+            &provider(Some(NetProviderTestView {
+                done: true,
+                results: vec![NetProviderNetRow {
+                    chain_id: 1,
+                    ok: false,
+                    latency_ms: 0.0,
+                }],
+                ok_count: 0,
+                total: 1,
+            })),
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("a finished test has a line"));
+        assert!(!none_ok.contains('·'), "no average to state: {none_ok}");
     }
 
     /// Each health state gets its own badge — and "checking" gets none.

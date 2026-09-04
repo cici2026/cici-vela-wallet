@@ -34,6 +34,10 @@ use crate::loc::Loc;
 use crate::resident;
 use crate::session;
 use crate::settings::SettingsStrings;
+
+/// How many focus handles the endpoints panel claims before the providers
+/// panel starts. Four fields, one per service.
+const ENDPOINT_FOCUS_COUNT: usize = 4;
 use crate::settings::components::{
     CalloutTone, callout, chain_mark, check_list, danger_card, dropdown_menu, dropdown_trigger,
     editable_url_field, form_row, key_value_row, network_row, rpc_banner, segmented,
@@ -2909,7 +2913,7 @@ impl WalletPage {
             SettingsPage::Appearance => self.settings_appearance(theme),
             SettingsPage::Localization => self.settings_localization(theme, cx),
             SettingsPage::Networks => self.settings_networks(theme, cx),
-            SettingsPage::RpcProviders => self.settings_providers(theme),
+            SettingsPage::RpcProviders => self.settings_providers(theme, window, cx),
             SettingsPage::Endpoints => self.settings_endpoints(theme, window, cx),
             SettingsPage::Storage => self.settings_storage(theme),
             SettingsPage::About => self.settings_about(theme),
@@ -3375,7 +3379,12 @@ impl WalletPage {
     }
 
     /// DST5 — one card per RPC provider.
-    fn settings_providers(&mut self, theme: &Theme) -> Div {
+    fn settings_providers(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut col = div().flex().flex_col().gap(px(32.)).child(
             div()
                 .pb(px(8.))
@@ -3384,6 +3393,78 @@ impl WalletPage {
                 .text_color(theme.fg_muted)
                 .child(self.settings.providers_desc.clone()),
         );
+
+        // Live since 031. An API key is a CREDENTIAL, and the field it goes in
+        // was read-only until now — so a person with a paid Alchemy plan had no
+        // way to use it.
+        if self.identity.is_some() {
+            let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
+            for (i, provider) in view.providers.iter().enumerate() {
+                let badge = if provider.has_key {
+                    pill(Tone::Ok, self.settings.provider_connected.clone())
+                } else {
+                    pill(Tone::Neutral, self.settings.provider_not_set.clone())
+                };
+                let id = provider.provider;
+                // Index past the endpoint fields so the two panels' handles
+                // cannot collide.
+                let focus = self.endpoint_focus(ENDPOINT_FOCUS_COUNT + i, cx);
+                col = col.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_size(theme::text_panel_title())
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(theme.fg_base)
+                                        .child(settings_live::provider_name(id)),
+                                )
+                                .child(status_pill(theme, &badge)),
+                        )
+                        .child(editable_url_field(
+                            ElementId::from(("provider", i)),
+                            theme,
+                            None,
+                            &provider.key,
+                            self.settings.provider_not_set.clone(),
+                            None,
+                            settings_live::provider_support(provider, &self.settings),
+                            None,
+                            &focus,
+                            window,
+                            move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                                let entity = resident::resident::<NetworkAdmin>(cx);
+                                entity.update(cx, |resident, cx| {
+                                    // Edited, then blurred — the blur is what
+                                    // persists, and it also DROPS a provider
+                                    // whose key was cleared (invariant ⑦).
+                                    resident.dispatch(
+                                        NetEvent::ProviderKeyEdited {
+                                            provider: id,
+                                            value: text.clone(),
+                                        },
+                                        cx,
+                                    );
+                                    resident.dispatch(
+                                        NetEvent::ProviderKeyBlurred { provider: id },
+                                        cx,
+                                    );
+                                });
+                            },
+                        )),
+                );
+            }
+            return col;
+        }
+
         for p in &settings_fixtures::PROVIDERS {
             let connected = !p.key.is_empty();
             let badge = if connected {
