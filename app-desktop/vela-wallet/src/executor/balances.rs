@@ -56,7 +56,7 @@ use vela_core::app::network_admin::BUILTIN_CHAINS;
 use crate::executor::abi::{self, Call3, McResult};
 use crate::executor::chain_tokens::{self, ChainTokenData, DexInfo, StableToken};
 use crate::executor::pool::{self, PoolError};
-use crate::executor::{chainlink, custom_tokens};
+use crate::executor::{chainlink, custom_tokens, token_trust};
 
 /// Uniswap-V3 fee tiers worth asking: 0.05%, 0.3%, PancakeSwap's 0.25%, and 1%
 /// for exotic pairs. Each is a separate pool and the deepest one wins.
@@ -465,6 +465,52 @@ fn chain_tokens_for(
     tokens
 }
 
+/// Tell the `token_trust` session what this fetch just learned.
+///
+/// **This fetch IS the observation.** Which chains the account holds on, which
+/// ERC-20s it holds there, and what the registry says are that chain's
+/// stablecoins — `token_trust` assembles its trusted-contract allowlist from
+/// exactly those three, and re-deriving them later means a second multi-chain
+/// read of the same facts.
+///
+/// Without them the core degrades correctly rather than wrongly: an empty
+/// held-chains list polls the default payment chains, and a cold registry
+/// leaves the trusted set at the person's own tokens plus the native sentinels.
+/// Safe, and blind to a plain USDC payment — which is why they are worth
+/// feeding.
+fn inform_token_trust(address: &str, tokens: &[BalanceToken]) {
+    let mut chains: Vec<u32> = Vec::new();
+    for token in tokens {
+        if !chains.contains(&token.chain_id) {
+            chains.push(token.chain_id);
+        }
+    }
+    token_trust::held_chains(address, chains.clone());
+    for chain_id in chains {
+        token_trust::held_tokens(
+            address,
+            chain_id,
+            tokens
+                .iter()
+                .filter(|token| token.chain_id == chain_id)
+                .filter_map(|token| token.token_address.clone())
+                .collect(),
+        );
+        // Cached for 30 minutes, so this is a map lookup on every fetch after
+        // the first.
+        if let Some(data) = chain_tokens::fetch(chain_id) {
+            token_trust::registry_tokens(
+                chain_id,
+                data.stables
+                    .iter()
+                    .map(|stable| stable.contract.clone())
+                    .collect(),
+                data.wrapped_native.clone(),
+            );
+        }
+    }
+}
+
 /// Every chain's balances for one address, fetched in parallel.
 ///
 /// Returns the tokens found and the chains that could not be reached, which the
@@ -511,6 +557,7 @@ pub fn fetch_all(address: &str) -> (Vec<BalanceToken>, Vec<u32>) {
             Err(_) => {}
         }
     }
+    inform_token_trust(address, &tokens);
     // Deterministic order: the core sorts for display, but a stable input makes
     // a test's failure readable.
     tokens.sort_by(|a, b| {

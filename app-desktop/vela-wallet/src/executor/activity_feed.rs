@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use gpui::App;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use vela_core::app::activity_feed::{
     ActivityFeed, Event, FeedOperation, FeedShellResult, FeedTxKind, FeedTxRecord, FeedTxStatus,
@@ -106,6 +106,112 @@ fn to_record(row: &Value) -> Option<FeedTxRecord> {
     })
 }
 
+/// Discover incoming transfers and persist the ones `token_trust` admitted.
+///
+/// Answers the count of GENUINELY NEW records, which is what the core turns
+/// into a celebration. Re-persisting a receipt the store already has must count
+/// as zero, or every poll would congratulate somebody on the same payment: the
+/// scan window overlaps between polls on purpose, and de-duping is the shell's
+/// half of that bargain.
+///
+/// Any failure answers 0 — the TS `catch { return 0 }`. A scan that could not
+/// run found nothing, which is a true statement, and it is not a reason to
+/// show an error over a feed that is otherwise correct.
+fn sync_received(address: &str) -> u32 {
+    let incoming = crate::executor::token_trust::poll(address);
+    if incoming.is_empty() {
+        return 0;
+    }
+
+    let mut rows = match storage::read_value(TX_KEY) {
+        Ok(Some(Value::Array(rows))) => rows,
+        _ => Vec::new(),
+    };
+    let mut known: std::collections::BTreeSet<String> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect();
+
+    let mut added = 0u32;
+    for transfer in &incoming {
+        if known.contains(&transfer.id) {
+            continue;
+        }
+        // A non-native token whose metadata would not resolve is SKIPPED, not
+        // stored at a guessed scale. The web says why: an 18-decimal fallback
+        // on a 6-decimal token stores a misleading "+0 tokens", and the
+        // transfer stays in the scan window to be retried once metadata
+        // resolves. Genuine spam with no readable symbol never reaches the feed.
+        let (Some(symbol), Some(decimals)) = (
+            transfer
+                .symbol
+                .clone()
+                .or_else(|| transfer.is_native.then(|| native_symbol(transfer.chain_id))),
+            transfer.decimals.or(transfer.is_native.then_some(18)),
+        ) else {
+            continue;
+        };
+        let Some(row) = incoming_row(transfer, address, &symbol, decimals) else {
+            continue;
+        };
+        known.insert(transfer.id.clone());
+        rows.push(row);
+        added += 1;
+    }
+
+    if added == 0 {
+        return 0;
+    }
+    if storage::write_value(TX_KEY, Value::Array(rows)).is_err() {
+        // The store refused. Reporting new records that are not on disk would
+        // celebrate a payment the next launch has never heard of.
+        return 0;
+    }
+    added
+}
+
+/// One admitted transfer as a stored row, in the bytes every client reads.
+fn incoming_row(
+    transfer: &vela_core::app::token_trust::TrustIncomingView,
+    address: &str,
+    symbol: &str,
+    decimals: u32,
+) -> Option<Value> {
+    // The core hands over the RAW on-chain amount; the store holds the human
+    // one, exactly as `BalanceToken.balance` does and for the same reason —
+    // `tx_usd_value` parses it as a decimal.
+    let value = crate::executor::abi::format_raw_balance(&transfer.value, decimals);
+    Some(json!({
+        "id": transfer.id,
+        "txHash": transfer.tx_hash,
+        "userOpHash": "",
+        "from": transfer.from,
+        "to": address,
+        "value": value,
+        "symbol": symbol,
+        "decimals": decimals,
+        "chainId": transfer.chain_id,
+        "timestamp": transfer.timestamp_sec,
+        "status": "confirmed",
+        "type": "receive",
+        // No `usd`. The ingest valuation needs a live price this path does not
+        // hold, and the core RE-DERIVES the value on read (`tx_usd_value`),
+        // including the ≈$1 stablecoin fallback. Writing "$0.00" would store a
+        // claim; writing nothing lets the rule that owns it decide.
+    }))
+}
+
+/// A chain's own coin, for a native transfer the core did not name.
+fn native_symbol(chain_id: u32) -> String {
+    vela_core::app::network_admin::BUILTIN_CHAINS
+        .iter()
+        .find(|chain| chain.chain_id == chain_id)
+        .map_or_else(
+            || "tokens".to_owned(),
+            |chain| chain.native_symbol.to_owned(),
+        )
+}
+
 fn read_records() -> Vec<FeedTxRecord> {
     let Ok(Some(Value::Array(rows))) = storage::read_value(TX_KEY) else {
         return Vec::new();
@@ -134,13 +240,15 @@ impl Machine for ActivityFeed {
                 })
             }
 
-            // live in 032 — receipt discovery is `getLogs` over the transfer
-            // allowlist plus `token_trust` admission, and the records it would
-            // persist are the same store 032's send path writes. Zero new
-            // records is a true statement about a scan that found none, not a
-            // failure, so the feed simply does not celebrate anything yet.
-            FeedOperation::ScanIncomingTransfers { .. } => {
-                Answer::Now(FeedShellResult::SyncCompleted { new_count: 0 })
+            // Live since 031: the whole `syncReceivedTransfers` pipeline —
+            // `token_trust` runs the discovery and rules on admission, and this
+            // persists what it admitted into the same store the send path will
+            // write to.
+            FeedOperation::ScanIncomingTransfers { address, .. } => {
+                let address = address.clone();
+                Answer::Blocking(Box::new(move || FeedShellResult::SyncCompleted {
+                    new_count: sync_received(&address),
+                }))
             }
 
             FeedOperation::DeleteTxRecord { id } => {
@@ -203,6 +311,56 @@ mod tests {
         if storage::write_value(TX_KEY, rows).is_err() {
             unreachable!("could not seed the tx store");
         }
+    }
+
+    /// A discovered receipt becomes a stored row, and the same one twice does
+    /// not become two.
+    #[test]
+    fn an_admitted_transfer_persists_once_and_is_not_celebrated_again() {
+        use vela_core::app::token_trust::TrustIncomingView;
+
+        storage::tests::with_temp_state("feed-ingest", || {
+            const ME: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            let transfer = TrustIncomingView {
+                id: "100-0xdead-0".to_owned(),
+                chain_id: 100,
+                token: Some("0xDDAf".to_owned()),
+                is_native: false,
+                from: "0xAbCd".to_owned(),
+                // Raw base units — six decimals, so 1.5 USDC.
+                value: "1500000".to_owned(),
+                tx_hash: "0xdead".to_owned(),
+                block_number: 1.0,
+                log_index: 0,
+                timestamp_sec: 1_788_500_000.0,
+                symbol: Some("USDC".to_owned()),
+                decimals: Some(6),
+            };
+            let row = incoming_row(&transfer, ME, "USDC", 6)
+                .unwrap_or_else(|| unreachable!("a complete transfer"));
+
+            // The stored amount is HUMAN, not base units: `tx_usd_value`
+            // parses it as a decimal, so 1500000 here would be a $1.5M receipt.
+            assert_eq!(row.get("value").and_then(Value::as_str), Some("1.5"));
+            assert_eq!(row.get("type").and_then(Value::as_str), Some("receive"));
+            assert_eq!(row.get("to").and_then(Value::as_str), Some(ME));
+            assert!(row.get("usd").is_none(), "the core re-derives the value");
+
+            // And the record round-trips through the store reader into the
+            // shape the core reads.
+            if storage::write_value(TX_KEY, Value::Array(vec![row])).is_err() {
+                unreachable!("could not seed");
+            }
+            let records = read_records();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].kind, Some(FeedTxKind::Receive));
+            assert_eq!(records[0].symbol, "USDC");
+            assert_eq!(records[0].decimals, 6);
+            // The core's own valuation of what we wrote: a stablecoin with no
+            // stored price is worth its amount, not zero.
+            let usd = vela_core::app::activity_feed::tx_usd_value(&records[0]);
+            assert!((usd - 1.5).abs() < 1e-9, "{usd}");
+        });
     }
 
     /// A record another client wrote reads back, camelCase and all.

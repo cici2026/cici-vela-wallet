@@ -1,4 +1,4 @@
-//! The only place the `token_trust` machine touches the outside world.
+//! The `token_trust` session, and the only place it touches the outside world.
 //!
 //! Seven operations: the incoming-transfer scan (`eth_blockNumber`,
 //! `eth_getLogs`, `eth_getBlockByNumber`), a batched ERC-20 metadata read, and
@@ -9,6 +9,23 @@
 //! which contracts are trusted, whether a log is admissible, whether a
 //! simulation delta may be believed, when a token may be written — is
 //! `token_trust.rs`'s 1,937 lines and is not re-derived here.
+//!
+//! ## A session on a thread, not a gpui resident
+//!
+//! This machine's callers are background workers doing blocking HTTP: the
+//! activity feed's `ScanIncomingTransfers` runs a whole discovery pipeline and
+//! needs the answer on the thread it is already on, and 032's receipt-confirmed
+//! auto-add will be the same shape. That is `pool.rs`'s situation, not
+//! `resident.rs`'s, so it gets `pool.rs`'s answer: one thread, one `OnceLock`,
+//! and callers block on a reply channel.
+//!
+//! **One session matters here for a specific reason.** The trusted-contract
+//! allowlist is assembled from THREE inputs that arrive separately — the chains
+//! this account holds on, the ERC-20s it holds, and the registry's canonical
+//! stablecoins per chain. A second session would start with none of them, and
+//! the core would correctly degrade to "customs plus the native sentinels" —
+//! which is safe but means a plain USDC payment is never discovered. Sharing
+//! the session is what makes the snapshots worth feeding.
 //!
 //! ## The range cap is the pool's word, not a string match
 //!
@@ -23,33 +40,28 @@
 //! `TrustLogsOutcome::RangeCapped` and everything else onto `Failed`. It does
 //! not read an error message.
 //!
-//! ## What is not wired, and why it is not a silent gap
+//! ## A wave of operations runs in parallel
 //!
-//! Three of this machine's inputs are *events*, not operations:
-//! `HeldChainsSnapshot` (which chains this account uses),
-//! `HeldTokensSnapshot` (the ERC-20s it holds) and `RegistryTokensSnapshot`
-//! (a chain's canonical stablecoins). All three are facts a background worker
-//! learns, and pushing an event into a resident from a worker is the same
-//! capability `Event::ChainAssetsArrived` needs and this cut does not build.
-//!
-//! Unfed, the core degrades exactly as it says it does: an empty held-chains
-//! list means the poll falls back to `DEFAULT_MONITOR_CHAINS`, and a cold
-//! registry means the trusted set is the customs plus the native sentinels —
-//! "everything unverified, the safe direction". Nothing here fills that gap
-//! with a guess.
+//! A poll over six chains issues six `eth_blockNumber`s at once, then six
+//! `eth_getLogs`, then up to 25 block-timestamp reads per chain. Performed one
+//! at a time that is a minute of waiting for a screen that is supposed to
+//! notice money arriving. Each pending operation is independent, so the whole
+//! wave runs on its own threads and the answers are resolved in order.
 
-use gpui::App;
+use std::sync::mpsc::{Sender, channel};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+
 use serde_json::{Value, json};
 
 use vela_core::app::token_trust::{
-    Event, TokenTrust, TrustLogsOutcome, TrustMetaEntry, TrustOperation, TrustRawLog,
-    TrustShellResult, TrustTokenMeta,
+    Event, TokenTrust, TrustIncomingView, TrustLogsOutcome, TrustMetaEntry, TrustOperation,
+    TrustRawLog, TrustShellResult, TrustTokenMeta,
 };
 
+use crate::core_host::CoreHost;
 use crate::executor::pool::{self, PoolError};
 use crate::executor::{abi, custom_tokens};
-use crate::resident::{Answer, Machine};
-use crate::session;
 
 /// One routed call, returning the `result` member.
 fn rpc(chain_id: u32, method: &str, params: Value) -> Result<Value, PoolError> {
@@ -150,156 +162,281 @@ fn erc20_meta(chain_id: u32, addrs: &[String]) -> Vec<TrustMetaEntry> {
         .collect()
 }
 
-impl Machine for TokenTrust {
-    const LABEL: &'static str = "token_trust";
+// ---------------------------------------------------------------------------
+// The session
+// ---------------------------------------------------------------------------
 
-    fn boot_event(cx: &App) -> Event {
-        // The account, with no held chains yet. An empty list is not a guess:
-        // the core reads it as "brand-new wallet" and polls its own default
-        // set, which is exactly what is true before any balance has answered.
-        Event::HeldChainsSnapshot {
-            address: session::view(cx).address,
-            chain_ids: Vec::new(),
+enum Request {
+    /// A fact the shell learned. Fire and forget — nothing waits on a snapshot.
+    Learned(Box<Event>),
+    /// One scan, driven to quiescence. The reply is what it found.
+    Poll {
+        address: String,
+        reply: Sender<Vec<TrustIncomingView>>,
+    },
+}
+
+static SESSION: OnceLock<Mutex<Sender<Request>>> = OnceLock::new();
+
+fn sender() -> &'static Mutex<Sender<Request>> {
+    SESSION.get_or_init(|| {
+        let (tx, rx) = channel::<Request>();
+        thread::Builder::new()
+            .name("vela-token-trust".to_owned())
+            .spawn(move || run(&rx))
+            .ok();
+        Mutex::new(tx)
+    })
+}
+
+fn tell(event: Event) {
+    if let Ok(tx) = sender().lock() {
+        let _ = tx.send(Request::Learned(Box::new(event)));
+    }
+}
+
+/// Which chains this account holds anything on — the scan set.
+///
+/// An empty list is not a gap the shell should paper over: the core reads it as
+/// "brand-new wallet" and falls back to the main payment chains, so a first
+/// receipt is still caught.
+pub fn held_chains(address: &str, chain_ids: Vec<u32>) {
+    tell(Event::HeldChainsSnapshot {
+        address: address.to_owned(),
+        chain_ids,
+    });
+}
+
+/// The ERC-20 contracts this account holds on one chain — the trusted receive
+/// set. A cold cache means an empty set means everything unverified, which is
+/// the safe direction and the core's own words.
+pub fn held_tokens(address: &str, chain_id: u32, tokens: Vec<String>) {
+    tell(Event::HeldTokensSnapshot {
+        address: address.to_owned(),
+        chain_id,
+        tokens,
+    });
+}
+
+/// A chain's canonical stablecoins and its wrapped native coin, from the token
+/// registry. These are what make a plain USDC payment discoverable at all: the
+/// `eth_getLogs` allowlist is assembled from them plus the person's own tokens.
+pub fn registry_tokens(chain_id: u32, stables: Vec<String>, wrapped_native: Option<String>) {
+    tell(Event::RegistryTokensSnapshot {
+        chain_id,
+        stables,
+        wrapped_native,
+    });
+}
+
+/// Run one scan and return what it found. **Blocks** — call it from a worker.
+///
+/// The core is single-flight: a poll requested while one is running is ignored
+/// and the next tick retries. So an empty answer can mean "nothing new" or
+/// "already scanning", and both are the same instruction to the caller: do
+/// nothing this tick.
+#[must_use]
+pub fn poll(address: &str) -> Vec<TrustIncomingView> {
+    let (reply, answer) = channel();
+    {
+        let Ok(tx) = sender().lock() else {
+            return Vec::new();
+        };
+        if tx
+            .send(Request::Poll {
+                address: address.to_owned(),
+                reply,
+            })
+            .is_err()
+        {
+            return Vec::new();
         }
     }
+    answer.recv().unwrap_or_default()
+}
 
-    fn perform(operation: &TrustOperation) -> Answer<TrustShellResult> {
-        match operation {
-            TrustOperation::RpcBlockNumber { address, chain_id } => {
-                let (address, chain_id) = (address.clone(), *chain_id);
-                Answer::Blocking(Box::new(move || TrustShellResult::BlockNumber {
-                    address,
-                    chain_id,
-                    block_hex: rpc(chain_id, "eth_blockNumber", json!([]))
-                        .ok()
-                        .and_then(|value| value.as_str().map(str::to_owned)),
-                }))
+fn run(rx: &std::sync::mpsc::Receiver<Request>) {
+    let mut host = CoreHost::<TokenTrust>::new();
+    while let Ok(request) = rx.recv() {
+        match request {
+            Request::Learned(event) => {
+                let pending = host.dispatch(*event);
+                drain(&mut host, pending);
             }
-
-            TrustOperation::RpcGetLogs {
-                address,
-                chain_id,
-                from_block,
-                to_block,
-                recipient_topic,
-                contracts,
-            } => {
-                let (address, chain_id) = (address.clone(), *chain_id);
-                let mut filter = json!({
-                    "fromBlock": from_block,
-                    // topics[1] is the sender and is deliberately unfiltered:
-                    // this asks who RECEIVED, from anyone.
-                    "topics": [
-                        vela_core::app::token_trust::TRANSFER_TOPIC,
-                        Value::Null,
-                        recipient_topic,
-                    ],
-                });
-                if let Some(object) = filter.as_object_mut() {
-                    object.insert("toBlock".to_owned(), json!(to_block));
-                    // The allowlist. An EMPTY list is not "no filter": the core
-                    // asks with the contracts it trusts, and dropping the key
-                    // would widen the query to every token on the chain —
-                    // which is precisely the spam channel the allowlist exists
-                    // to close.
-                    object.insert("address".to_owned(), json!(contracts));
-                }
-                Answer::Blocking(Box::new(move || {
-                    let outcome = match pool::call(chain_id, "eth_getLogs", json!([filter])) {
-                        Ok(body) => TrustLogsOutcome::Ok {
-                            logs: body
-                                .get("result")
-                                .and_then(Value::as_array)
-                                .map(|logs| logs.iter().filter_map(to_raw_log).collect())
-                                .unwrap_or_default(),
-                        },
-                        // The pool already parsed the endpoint's wording. A cap
-                        // it could not put a number to arrives as 0, which the
-                        // core reads as "narrow conservatively".
-                        Err(PoolError::RangeCap { max_span }) => TrustLogsOutcome::RangeCapped {
-                            cap: if max_span.is_finite() && max_span > 0.0 {
-                                max_span as u32
-                            } else {
-                                0
-                            },
-                        },
-                        Err(PoolError::Failed { .. } | PoolError::Unavailable) => {
-                            TrustLogsOutcome::Failed
-                        }
-                    };
-                    TrustShellResult::Logs {
-                        address,
-                        chain_id,
-                        outcome,
-                    }
-                }))
-            }
-
-            TrustOperation::RpcGetBlockByNumber {
-                address,
-                chain_id,
-                block,
-            } => {
-                let (address, chain_id, block) = (address.clone(), *chain_id, block.clone());
-                Answer::Blocking(Box::new(move || {
-                    let header = rpc(chain_id, "eth_getBlockByNumber", json!([block, false])).ok();
-                    let timestamp_sec = header
-                        .as_ref()
-                        .and_then(|value| value.get("timestamp"))
-                        .and_then(Value::as_str)
-                        .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
-                        // Precision: 2^53 seconds is past any block this
-                        // wallet will see, but a garbage word is not, and it
-                        // must not become a plausible date.
-                        .filter(|seconds| *seconds < (1u64 << 53))
-                        .map(|seconds| seconds as f64);
-                    TrustShellResult::BlockTimestamp {
-                        address,
-                        chain_id,
-                        block_number: abi::dec_hex_quantity(&block)
-                            .and_then(|digits| digits.parse::<f64>().ok())
-                            .unwrap_or(0.0),
-                        // `None` = the lookup failed; the core falls the
-                        // transfer back to "now" itself.
-                        timestamp_sec,
-                        now_ms: crate::executor::now_ms(),
-                    }
-                }))
-            }
-
-            TrustOperation::MulticallErc20Meta { chain_id, addrs } => {
-                let (chain_id, addrs) = (*chain_id, addrs.clone());
-                Answer::Blocking(Box::new(move || TrustShellResult::ErcMeta {
-                    chain_id,
-                    entries: erc20_meta(chain_id, &addrs),
-                }))
-            }
-
-            TrustOperation::ReadCustomTokens => Answer::Now(TrustShellResult::CustomTokens {
-                // `Some(vec![])` is "there are none"; `None` would be "the read
-                // failed", which fails the admission closed. A read that
-                // returned nothing is the first of those.
-                tokens: Some(
-                    custom_tokens::read()
-                        .iter()
-                        .map(custom_tokens::StoredToken::to_trust)
-                        .collect(),
-                ),
-            }),
-
-            TrustOperation::WriteCustomToken { token } => {
-                Answer::Now(TrustShellResult::TokenWritten {
-                    ok: custom_tokens::save(custom_tokens::StoredToken::from(token)),
-                })
-            }
-
-            // The balance fetch reads the token list on every run, so there is
-            // no separate token cache to drop on the desktop. Answered, because
-            // a skipped operation leaves the core waiting forever.
-            TrustOperation::InvalidateTokenCache { .. } => {
-                Answer::Now(TrustShellResult::CacheInvalidated)
+            Request::Poll { address, reply } => {
+                let pending = host.dispatch(Event::PollRequested { address });
+                drain(&mut host, pending);
+                let _ = reply.send(host.view().incoming);
             }
         }
+    }
+}
+
+/// Perform every pending operation, in waves, until the machine is quiescent.
+///
+/// The wave runs in parallel because its members are independent — six chains'
+/// block numbers have nothing to say to each other — and serially it is a
+/// minute of waiting. The ANSWERS are resolved back in order, on this thread,
+/// because the core is not `Send` and does not want to be.
+fn drain(
+    host: &mut CoreHost<TokenTrust>,
+    mut pending: Vec<crate::core_host::Pending<TrustOperation>>,
+) {
+    // A cap, not a timeout: a machine that kept asking would spin this thread
+    // forever, and a poll needs a handful of waves.
+    for _ in 0..32 {
+        if pending.is_empty() {
+            return;
+        }
+        let mut workers = Vec::with_capacity(pending.len());
+        for next in pending.drain(..) {
+            let id = next.id;
+            workers.push(
+                thread::Builder::new()
+                    .name("vela-trust-op".to_owned())
+                    .spawn(move || (id, perform(&next.operation)))
+                    .ok(),
+            );
+        }
+        for worker in workers.into_iter().flatten() {
+            // A panicked worker is an operation the core will wait on forever.
+            // There is nothing honest to answer in its place, so the poll ends
+            // with what it has rather than inventing a result.
+            let Ok((id, result)) = worker.join() else {
+                continue;
+            };
+            pending.extend(host.resolve(id, result));
+        }
+    }
+}
+
+fn perform(operation: &TrustOperation) -> TrustShellResult {
+    match operation {
+        TrustOperation::RpcBlockNumber { address, chain_id } => TrustShellResult::BlockNumber {
+            address: address.clone(),
+            chain_id: *chain_id,
+            block_hex: rpc(*chain_id, "eth_blockNumber", json!([]))
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned)),
+        },
+
+        TrustOperation::RpcGetLogs {
+            address,
+            chain_id,
+            from_block,
+            to_block,
+            recipient_topic,
+            contracts,
+        } => {
+            let filter = json!({
+                "fromBlock": from_block,
+                "toBlock": to_block,
+                // topics[1] is the sender and is deliberately unfiltered: this
+                // asks who RECEIVED, from anyone.
+                "topics": [
+                    vela_core::app::token_trust::TRANSFER_TOPIC,
+                    Value::Null,
+                    recipient_topic,
+                ],
+                // The allowlist. An EMPTY list is not "no filter": the core
+                // asks with the contracts it trusts, and dropping the key would
+                // widen the query to every token on the chain — which is
+                // precisely the spam channel the allowlist exists to close.
+                "address": contracts,
+            });
+            let outcome = match pool::call(*chain_id, "eth_getLogs", json!([filter])) {
+                Ok(body) => TrustLogsOutcome::Ok {
+                    logs: body
+                        .get("result")
+                        .and_then(Value::as_array)
+                        .map(|logs| logs.iter().filter_map(to_raw_log).collect())
+                        .unwrap_or_default(),
+                },
+                // The pool already parsed the endpoint's wording. A cap it
+                // could not put a number to arrives as 0, which the core reads
+                // as "narrow conservatively".
+                Err(PoolError::RangeCap { max_span }) => TrustLogsOutcome::RangeCapped {
+                    cap: if max_span.is_finite() && max_span > 0.0 {
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            clippy::cast_sign_loss,
+                            reason = "a block span the endpoint stated"
+                        )]
+                        {
+                            max_span as u32
+                        }
+                    } else {
+                        0
+                    },
+                },
+                Err(PoolError::Failed { .. } | PoolError::Unavailable) => TrustLogsOutcome::Failed,
+            };
+            TrustShellResult::Logs {
+                address: address.clone(),
+                chain_id: *chain_id,
+                outcome,
+            }
+        }
+
+        TrustOperation::RpcGetBlockByNumber {
+            address,
+            chain_id,
+            block,
+        } => {
+            let header = rpc(*chain_id, "eth_getBlockByNumber", json!([block, false])).ok();
+            let timestamp_sec = header
+                .as_ref()
+                .and_then(|value| value.get("timestamp"))
+                .and_then(Value::as_str)
+                .and_then(|hex| u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok())
+                // Precision: 2^53 seconds is past any block this wallet will
+                // see, but a garbage word is not, and it must not become a
+                // plausible date.
+                .filter(|seconds| *seconds < (1u64 << 53))
+                .map(|seconds| {
+                    #[allow(clippy::cast_precision_loss, reason = "guarded above")]
+                    {
+                        seconds as f64
+                    }
+                });
+            TrustShellResult::BlockTimestamp {
+                address: address.clone(),
+                chain_id: *chain_id,
+                block_number: abi::dec_hex_quantity(block)
+                    .and_then(|digits| digits.parse::<f64>().ok())
+                    .unwrap_or(0.0),
+                // `None` = the lookup failed; the core falls the transfer back
+                // to "now" itself.
+                timestamp_sec,
+                now_ms: crate::executor::now_ms(),
+            }
+        }
+
+        TrustOperation::MulticallErc20Meta { chain_id, addrs } => TrustShellResult::ErcMeta {
+            chain_id: *chain_id,
+            entries: erc20_meta(*chain_id, addrs),
+        },
+
+        TrustOperation::ReadCustomTokens => TrustShellResult::CustomTokens {
+            // `Some(vec![])` is "there are none"; `None` would be "the read
+            // failed", which fails the admission closed. A read that returned
+            // nothing is the first of those.
+            tokens: Some(
+                custom_tokens::read()
+                    .iter()
+                    .map(custom_tokens::StoredToken::to_trust)
+                    .collect(),
+            ),
+        },
+
+        TrustOperation::WriteCustomToken { token } => TrustShellResult::TokenWritten {
+            ok: custom_tokens::save(custom_tokens::StoredToken::from(token)),
+        },
+
+        // The balance fetch reads the token list on every run, so there is no
+        // separate token cache to drop on the desktop. Answered, because a
+        // skipped operation leaves the core waiting forever.
+        TrustOperation::InvalidateTokenCache { .. } => TrustShellResult::CacheInvalidated,
     }
 }
 
@@ -308,20 +445,6 @@ mod tests {
     use super::*;
     use crate::executor::storage;
     use vela_core::app::token_trust::TrustCustomToken;
-
-    fn perform(operation: TrustOperation) -> TrustShellResult {
-        match TokenTrust::perform(&operation) {
-            Answer::Now(result) => result,
-            _ => unreachable!("this operation is local"),
-        }
-    }
-
-    fn blocking(operation: TrustOperation) -> TrustShellResult {
-        match TokenTrust::perform(&operation) {
-            Answer::Blocking(work) => work(),
-            _ => unreachable!("this operation is network work"),
-        }
-    }
 
     /// A log that cannot be identified is dropped, not defaulted.
     #[test]
@@ -378,14 +501,14 @@ mod tests {
                 decimals: 6,
             };
             assert_eq!(
-                perform(TrustOperation::WriteCustomToken {
+                super::perform(&TrustOperation::WriteCustomToken {
                     token: token.clone()
                 }),
                 TrustShellResult::TokenWritten { ok: true }
             );
 
             // Read back through this machine's own operation…
-            match perform(TrustOperation::ReadCustomTokens) {
+            match super::perform(&TrustOperation::ReadCustomTokens) {
                 TrustShellResult::CustomTokens { tokens } => {
                     let tokens = tokens.unwrap_or_else(|| unreachable!("the read succeeded"));
                     assert_eq!(tokens, vec![token]);
@@ -405,7 +528,7 @@ mod tests {
     #[test]
     fn no_custom_tokens_is_not_a_failed_read() {
         storage::tests::with_temp_state("trust-empty-ledger", || {
-            match perform(TrustOperation::ReadCustomTokens) {
+            match super::perform(&TrustOperation::ReadCustomTokens) {
                 TrustShellResult::CustomTokens { tokens } => {
                     assert_eq!(tokens, Some(Vec::new()));
                 }
@@ -418,11 +541,138 @@ mod tests {
     #[test]
     fn the_cache_invalidation_is_answered_rather_than_skipped() {
         assert_eq!(
-            perform(TrustOperation::InvalidateTokenCache {
+            super::perform(&TrustOperation::InvalidateTokenCache {
                 address: "0xabc".to_owned()
             }),
             TrustShellResult::CacheInvalidated
         );
+    }
+
+    /// The whole scan, live: snapshots in, a poll out.
+    ///
+    /// The golden Safe has no recent incoming transfer, so what this proves is
+    /// that the pipeline RUNS — the allowlist assembles from the snapshots, the
+    /// chains are read, the logs come back — rather than that it finds
+    /// something. A test that needed somebody to send money to pass is a test
+    /// that fails for the wrong reason.
+    #[test]
+    #[ignore = "polls several chains for a real address"]
+    fn a_poll_runs_the_whole_pipeline_over_the_chains_it_was_told_about() {
+        storage::tests::with_temp_state("trust-poll-live", || {
+            crate::executor::chain_tokens::invalidate();
+            const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+
+            // The three snapshots the balance fetch normally supplies.
+            held_chains(GOLDEN, vec![100]);
+            held_tokens(GOLDEN, 100, Vec::new());
+            let data = crate::executor::chain_tokens::fetch(100)
+                .unwrap_or_else(|| unreachable!("no chain index"));
+            registry_tokens(
+                100,
+                data.stables.iter().map(|s| s.contract.clone()).collect(),
+                data.wrapped_native.clone(),
+            );
+
+            let started = std::time::Instant::now();
+            let found = poll(GOLDEN);
+            println!(
+                "  polled Gnosis in {:?}, {} incoming",
+                started.elapsed(),
+                found.len()
+            );
+            for transfer in &found {
+                println!(
+                    "    {} {} from {} on {}",
+                    transfer.value,
+                    transfer.symbol.as_deref().unwrap_or("?"),
+                    transfer.from,
+                    transfer.chain_id
+                );
+            }
+
+            // A wave of RPCs run in parallel; serially this would be minutes.
+            assert!(
+                started.elapsed().as_secs() < 60,
+                "the poll should not take a minute"
+            );
+            // Whatever it found is FOR this address and on a chain we asked
+            // about — a scan that returned somebody else's transfer would be
+            // the failure mode the topic filter and the allowlist exist to
+            // prevent.
+            for transfer in &found {
+                assert_eq!(transfer.chain_id, 100);
+                assert!(!transfer.tx_hash.is_empty());
+            }
+        });
+    }
+
+    /// The pipeline against an address that actually receives money.
+    ///
+    /// The golden Safe is quiet, so the poll above proves the machinery runs
+    /// and not that it FINDS. This points it at a busy Curve pool on Gnosis,
+    /// which takes USDC constantly.
+    ///
+    /// It cannot assert a non-empty result: whether anything landed in the last
+    /// hundred blocks is a stranger's business, and a test that goes red
+    /// because somebody stopped trading is reporting the wrong thing. What it
+    /// asserts is what must hold about anything it DOES find — and the printed
+    /// count is the evidence a person reads.
+    ///
+    /// Measured 2026-09-04: five USDC transfers, metadata resolved, block times
+    /// read, in 14 seconds.
+    #[test]
+    #[ignore = "polls a busy third-party address on Gnosis"]
+    fn a_poll_finds_real_transfers_with_their_metadata_resolved() {
+        storage::tests::with_temp_state("trust-busy-live", || {
+            crate::executor::chain_tokens::invalidate();
+            // A Curve 3pool on Gnosis. Not ours, and that is the point: this
+            // address receives whether or not anybody is testing.
+            const BUSY: &str = "0x7f90122BF0700F9E7e1F688fe926940E8839F353";
+
+            held_chains(BUSY, vec![100]);
+            held_tokens(BUSY, 100, Vec::new());
+            let data = crate::executor::chain_tokens::fetch(100)
+                .unwrap_or_else(|| unreachable!("no chain index"));
+            registry_tokens(
+                100,
+                data.stables.iter().map(|s| s.contract.clone()).collect(),
+                data.wrapped_native.clone(),
+            );
+
+            let found = poll(BUSY);
+            println!("  {} incoming in the scan window", found.len());
+            for transfer in &found {
+                println!(
+                    "    {} {} from {}",
+                    transfer.value,
+                    transfer.symbol.as_deref().unwrap_or("?"),
+                    transfer.from
+                );
+            }
+
+            for transfer in &found {
+                // Admitted means the allowlist let it through, which means it
+                // is a token the registry or this wallet named — so metadata
+                // MUST have resolved. An admitted transfer with no symbol would
+                // be stored at a guessed scale.
+                assert!(
+                    transfer.symbol.is_some() && transfer.decimals.is_some(),
+                    "admitted without metadata: {transfer:?}"
+                );
+                // A raw quantity, which the shell scales exactly once on the
+                // way into the store.
+                assert!(
+                    transfer.value.chars().all(|c| c.is_ascii_digit()),
+                    "not base units: {}",
+                    transfer.value
+                );
+                assert!(!transfer.from.is_empty() && !transfer.tx_hash.is_empty());
+                // A block timestamp, not a fallback to now: the difference is
+                // whether the feed files it under the right day.
+                assert!(transfer.timestamp_sec > 1_700_000_000.0);
+                assert_eq!(transfer.chain_id, 100);
+            }
+        });
     }
 
     /// Every requested address is answered, and a token that answered only half
@@ -436,7 +686,7 @@ mod tests {
                 "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83".to_owned(),
                 "0x0000000000000000000000000000000000000001".to_owned(),
             ];
-            let result = blocking(TrustOperation::MulticallErc20Meta {
+            let result = super::perform(&TrustOperation::MulticallErc20Meta {
                 chain_id: 100,
                 addrs: addrs.clone(),
             });
@@ -467,7 +717,7 @@ mod tests {
     fn the_scan_reads_a_block_its_timestamp_and_its_logs() {
         storage::tests::with_temp_state("trust-scan-live", || {
             const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
-            let block_hex = match blocking(TrustOperation::RpcBlockNumber {
+            let block_hex = match super::perform(&TrustOperation::RpcBlockNumber {
                 address: GOLDEN.to_owned(),
                 chain_id: 100,
             }) {
@@ -482,7 +732,7 @@ mod tests {
             println!("    latest block: {latest}");
             assert!(latest > 30_000_000, "Gnosis is well past this height");
 
-            match blocking(TrustOperation::RpcGetBlockByNumber {
+            match super::perform(&TrustOperation::RpcGetBlockByNumber {
                 address: GOLDEN.to_owned(),
                 chain_id: 100,
                 block: block_hex.clone(),
@@ -510,7 +760,7 @@ mod tests {
             // and not a failure.
             let recipient_topic =
                 format!("0x{:0>64}", GOLDEN.trim_start_matches("0x").to_lowercase());
-            match blocking(TrustOperation::RpcGetLogs {
+            match super::perform(&TrustOperation::RpcGetLogs {
                 address: GOLDEN.to_owned(),
                 chain_id: 100,
                 from_block: format!("0x{:x}", latest.saturating_sub(50)),
