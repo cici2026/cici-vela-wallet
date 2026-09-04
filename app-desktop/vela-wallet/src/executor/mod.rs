@@ -465,7 +465,7 @@ fn unix_millis() -> i64 {
 /// and no clock in any core test. UTC, because a stored `created_at_iso` that
 /// carries a local offset is a record that means something different when the
 /// laptop moves.
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     let civil = Civil::from_unix_millis(unix_millis(), 0);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",

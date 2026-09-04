@@ -38,6 +38,11 @@ use crate::settings::SettingsStrings;
 /// How many focus handles the endpoints panel claims before the providers
 /// panel starts. Four fields, one per service.
 const ENDPOINT_FOCUS_COUNT: usize = 4;
+
+/// Focus slots past the endpoints and the three providers, so no two editable
+/// settings fields share a handle — focus is which box the keystrokes go into.
+const WIZARD_SEARCH_FOCUS: usize = ENDPOINT_FOCUS_COUNT + 3;
+const WIZARD_RPC_FOCUS: usize = WIZARD_SEARCH_FOCUS + 1;
 use crate::settings::components::{
     CalloutTone, callout, chain_mark, check_list, danger_card, dropdown_menu, dropdown_trigger,
     editable_url_field, form_row, key_value_row, network_row, rpc_banner, segmented,
@@ -3785,6 +3790,7 @@ impl WalletPage {
     fn settings_dialog_overlay(
         &mut self,
         theme: &Theme,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let kind = self.settings_dialog?;
@@ -3801,6 +3807,9 @@ impl WalletPage {
         };
 
         let body = match kind {
+            SettingsDialog::AddNetwork if self.identity.is_some() => {
+                self.settings_add_network_live(theme, window, cx)
+            }
             SettingsDialog::AddNetwork => self.settings_add_network_body(theme),
             SettingsDialog::FixRpc => self.settings_fix_rpc_body(theme),
         };
@@ -3878,6 +3887,217 @@ impl WalletPage {
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// DST4b's body, live: type a chain, see its verdict, add it.
+    ///
+    /// 030 proved the pipeline end to end by dispatching the events by hand
+    /// (SC-001: Zora 12→13, still there after a relaunch). What it could not do
+    /// was let a person type — the search box was a placeholder. This is that
+    /// box.
+    fn settings_add_network_live(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let s = &self.settings;
+        let description = s.add_network_desc.clone();
+        let search_placeholder = s.search_placeholder.clone();
+        let custom_title = s.custom_rpc_title.clone();
+        let custom_placeholder = s.custom_rpc_placeholder.clone();
+        let checks_title = s.compatibility_check.clone();
+        let cta = s.add_network.clone();
+        let retry = s.recheck.clone();
+        let hover_accent = theme.accent_hover;
+
+        let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
+        let wizard = view.wizard.clone();
+        let search_focus = self.endpoint_focus(WIZARD_SEARCH_FOCUS, cx);
+        let rpc_focus = self.endpoint_focus(WIZARD_RPC_FOCUS, cx);
+
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_subtle)
+                    .child(description),
+            )
+            .child(editable_url_field(
+                ElementId::from("wizard-search"),
+                theme,
+                None,
+                &wizard.query,
+                search_placeholder,
+                None,
+                None,
+                None,
+                &search_focus,
+                window,
+                move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                    resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                        resident.dispatch(NetEvent::SearchInput { query: text }, cx);
+                    });
+                },
+            ));
+
+        // The suggestions the index answered with. Each one is a click that
+        // resolves and checks that chain — which is the whole pipeline 030
+        // proved and could not reach from the keyboard.
+        for (i, entry) in wizard.suggestions.iter().take(6).enumerate() {
+            let chain_id = entry.chain_id;
+            let selected = wizard
+                .chain_info
+                .as_ref()
+                .is_some_and(|c| c.chain_id == chain_id);
+            col = col.child(
+                div()
+                    .id(ElementId::from(("wizard-suggestion", i)))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .p(px(8.))
+                    .rounded(px(10.))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(theme.bg_sunken))
+                    .hover(|el| el.bg(theme.bg_sunken))
+                    .child(chain_mark(
+                        crate::settings::model::lettermark(&entry.name),
+                        crate::settings::model::chain_tint(u64::from(chain_id))
+                            .unwrap_or(0x8A_8F_98),
+                        32.,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .child(gpui::SharedString::from(entry.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_subtle)
+                            .child(gpui::SharedString::from(chain_id.to_string())),
+                    )
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                NetEvent::ChainSelected {
+                                    chain_id,
+                                    // A fresh pick throws away a custom RPC
+                                    // typed for a DIFFERENT chain. Keeping it
+                                    // would check chain A against chain B's
+                                    // endpoint.
+                                    keep_custom_rpc: false,
+                                },
+                                cx,
+                            );
+                        });
+                        cx.notify();
+                    })),
+            );
+        }
+
+        if let Some(compat) = wizard.compat.as_ref() {
+            match settings_live::compat_checks(compat, &self.settings) {
+                Some(checks) => {
+                    col = col.child(check_list(theme, &mut self.icons, checks_title, &checks));
+                }
+                // The probe could not reach a verdict. A retry, never a
+                // condemnation — the core's invariant ③, and the difference
+                // between "this chain does not work" and "we could not ask".
+                None => {
+                    let chain_id = compat.chain_id;
+                    col = col.child(
+                        div()
+                            .id("wizard-retry")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(CONTACTS_BUTTON_H))
+                            .rounded(px(12.))
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(theme.outline_strong)
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .child(retry)
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                resident::resident::<NetworkAdmin>(cx).update(
+                                    cx,
+                                    |resident, cx| {
+                                        resident.dispatch(
+                                            NetEvent::ChainSelected {
+                                                chain_id,
+                                                // A recheck KEEPS the typed RPC:
+                                                // it is often the reason to recheck.
+                                                keep_custom_rpc: true,
+                                            },
+                                            cx,
+                                        );
+                                    },
+                                );
+                                cx.notify();
+                            })),
+                    );
+                }
+            }
+        }
+
+        col = col.child(editable_url_field(
+            ElementId::from("wizard-rpc"),
+            theme,
+            Some(custom_title),
+            &wizard.custom_rpc,
+            custom_placeholder,
+            None,
+            None,
+            None,
+            &rpc_focus,
+            window,
+            move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(NetEvent::CustomRpcEdited { value: text }, cx);
+                });
+            },
+        ));
+
+        // The CTA renders only when the core says it may. `can_add` is its
+        // whole judgement — resolved, checked, compatible, not already added —
+        // and re-deriving any part of it here would be a second opinion about
+        // whether a chain is safe to add.
+        if wizard.can_add {
+            col = col.child(
+                div()
+                    .id("settings-add-network-confirm")
+                    .h(px(CONTACTS_BUTTON_H))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .bg(theme.accent)
+                    .hover(move |el| el.bg(hover_accent))
+                    .text_size(theme::text_row_title())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.fg_inverse)
+                    .child(cta)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let now_iso = crate::executor::now_iso();
+                        resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(NetEvent::AddConfirmed { now_iso }, cx);
+                        });
+                        this.settings_dialog = None;
+                        cx.notify();
+                    })),
+            );
+        }
+        col
     }
 
     /// DST4b's body: the chosen chain, its verdict, and the CTA.
@@ -4686,7 +4906,7 @@ impl Render for WalletPage {
         let scan = self.scan_overlay(&theme, cx);
         let menu = self.menu_overlay(&theme, cx);
         let sign_out = self.sign_out_dialog(&theme, cx);
-        let settings_dialog = self.settings_dialog_overlay(&theme, cx);
+        let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
         let mut root = div()
             .size_full()
             .relative()

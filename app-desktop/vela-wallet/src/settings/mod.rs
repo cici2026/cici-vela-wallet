@@ -107,6 +107,9 @@ pub struct SettingsStrings {
     pub health_https_required: SharedString,
     pub health_offline: SharedString,
     pub health_invalid: SharedString,
+    /// The wizard's retry, for a chain the probe could not reach — never a
+    /// condemnation (the core's invariant ③).
+    pub recheck: SharedString,
     pub endpoints_reset: SharedString,
     pub endpoints_guide: SharedString,
     // storage panel
@@ -238,6 +241,7 @@ impl SettingsStrings {
             health_https_required: s("settingsModals.health.httpsRequired"),
             health_offline: s("settingsModals.health.offline"),
             health_invalid: s("settingsModals.health.invalid"),
+            recheck: s("settingsModals.addNetwork.recheck"),
             endpoints_reset: s("settingsModals.endpoints.resetToDefaults"),
             endpoints_guide: s("settingsModals.endpoints.selfHostGuide"),
             storage_subtitle: s("settings.storage.subtitle"),

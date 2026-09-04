@@ -13,7 +13,9 @@ use crate::settings::fixtures::{Pill, Tone};
 use crate::settings::model::{NetworkRowModel, chain_tint, lettermark};
 
 use vela_core::app::display_currency::CurrencyView;
-use vela_core::app::network_admin::{NetProbeHealth, NetProviderId, NetServiceHealth, NetView};
+use vela_core::app::network_admin::{
+    NetCompatibility, NetProbeHealth, NetProviderId, NetServiceHealth, NetView,
+};
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
 
 /// The sample figure the 本地化 mock prints beside the currency code.
@@ -265,6 +267,66 @@ pub fn endpoint_tone(health: &NetServiceHealth) -> Option<Tone> {
     }
 }
 
+/// The wizard's compatibility rows, from what the probe found.
+///
+/// **An unreachable chain is not an incompatible one** — the core's invariant
+/// ③, and the reason `rpc_failure` exists as a separate field. When the probe
+/// could not reach a verdict this answers `None` and the caller draws the
+/// retry, rather than four red crosses that condemn a chain nobody managed to
+/// ask.
+#[must_use]
+pub fn compat_checks(
+    compat: &NetCompatibility,
+    s: &SettingsStrings,
+) -> Option<Vec<(SharedString, bool)>> {
+    if compat.rpc_failure.is_some() {
+        return None;
+    }
+    let deployed = |name: &str| {
+        compat
+            .contracts
+            .iter()
+            .find(|contract| contract.name.contains(name))
+            .is_some_and(|contract| contract.deployed)
+    };
+    let mut rows = vec![
+        // A product name, not prose: translating it would make the row lie.
+        (
+            SharedString::from("EntryPoint v0.7"),
+            deployed("EntryPoint"),
+        ),
+        (s.check_safe.clone(), deployed("Safe")),
+    ];
+    // `None` = never probed, which is not the same as "no P-256". The row is
+    // left out rather than drawn as a failure.
+    if let Some(available) = compat.p256_available {
+        rows.push((s.check_signer.clone(), available));
+    }
+    let remaining = compat
+        .contracts
+        .iter()
+        .filter(|contract| !contract.name.contains("EntryPoint") && !contract.name.contains("Safe"))
+        .count();
+    if remaining > 0 {
+        let ok = compat
+            .contracts
+            .iter()
+            .filter(|contract| {
+                !contract.name.contains("EntryPoint") && !contract.name.contains("Safe")
+            })
+            .all(|contract| contract.deployed);
+        rows.push((
+            SharedString::from(crate::wallet::fill(
+                &s.check_remaining,
+                "count",
+                &remaining.to_string(),
+            )),
+            ok,
+        ));
+    }
+    Some(rows)
+}
+
 /// A provider's own name. Not translated: Alchemy is called Alchemy.
 #[must_use]
 pub fn provider_name(provider: NetProviderId) -> SharedString {
@@ -348,6 +410,55 @@ mod endpoint_tests {
 
     fn strings() -> SettingsStrings {
         SettingsStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// An unreachable chain gets a retry, never four red crosses.
+    #[test]
+    fn a_probe_that_could_not_ask_does_not_condemn_the_chain() {
+        use vela_core::app::network_admin::{NetContractStatus, NetRpcFailureKind};
+        let s = strings();
+        let contract = |name: &str, deployed: bool| NetContractStatus {
+            name: name.to_owned(),
+            address: "0xaaa".to_owned(),
+            deployed,
+        };
+        let compat =
+            |rpc_failure: Option<NetRpcFailureKind>, p256: Option<bool>| NetCompatibility {
+                chain_id: 7_777_777,
+                compatible: rpc_failure.is_none(),
+                contracts: vec![
+                    contract("EntryPoint v0.7", true),
+                    contract("Safe v1.4.1", true),
+                    contract("SafeWebAuthnSharedSigner", true),
+                ],
+                p256_available: p256,
+                best_rpc_url: None,
+                best_rpc_latency_ms: None,
+                rpc_failure,
+            };
+
+        // Could not reach a verdict: NO rows. The caller draws a retry, which
+        // is the difference between "this chain does not work" and "we could
+        // not ask" — the core's invariant ③.
+        assert!(
+            compat_checks(
+                &compat(Some(NetRpcFailureKind::AllProbesFailed), Some(true)),
+                &s
+            )
+            .is_none()
+        );
+
+        let rows = compat_checks(&compat(None, Some(true)), &s)
+            .unwrap_or_else(|| unreachable!("a reached verdict has rows"));
+        assert_eq!(rows[0].0, "EntryPoint v0.7", "a product name, not prose");
+        assert!(rows.iter().all(|(_, ok)| *ok));
+        assert!(rows.iter().any(|(label, _)| *label == s.check_signer));
+
+        // Never probed for P-256 is not "no P-256": the row is left out rather
+        // than drawn as a failure.
+        let unprobed = compat_checks(&compat(None, None), &s)
+            .unwrap_or_else(|| unreachable!("a reached verdict has rows"));
+        assert!(!unprobed.iter().any(|(label, _)| *label == s.check_signer));
     }
 
     /// A key's support line waits for the test to finish, and averages only
