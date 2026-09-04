@@ -267,6 +267,24 @@ pub fn endpoint_tone(health: &NetServiceHealth) -> Option<Tone> {
     }
 }
 
+/// One override probe's badge — the same "no verdict yet, no badge" rule the
+/// service endpoints follow.
+#[must_use]
+pub fn probe_badge(health: &NetProbeHealth) -> Option<Pill> {
+    match health {
+        NetProbeHealth::Ok { latency_ms } => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a measured latency"
+            )]
+            let ms = latency_ms.max(0.0) as u32;
+            Some(crate::settings::fixtures::latency(ms, None))
+        }
+        _ => None,
+    }
+}
+
 /// The wizard's compatibility rows, from what the probe found.
 ///
 /// **An unreachable chain is not an incompatible one** — the core's invariant
@@ -410,6 +428,17 @@ mod endpoint_tests {
 
     fn strings() -> SettingsStrings {
         SettingsStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A probe that has not answered draws no latency badge, on the override
+    /// card as on the service endpoints.
+    #[test]
+    fn an_override_probe_badges_only_a_measured_answer() {
+        assert!(probe_badge(&NetProbeHealth::Checking).is_none());
+        assert!(probe_badge(&NetProbeHealth::Error).is_none());
+        let ok = probe_badge(&NetProbeHealth::Ok { latency_ms: 45.0 })
+            .unwrap_or_else(|| unreachable!("a measured probe has a badge"));
+        assert_eq!(ok.label, "45ms");
     }
 
     /// An unreachable chain gets a retry, never four red crosses.

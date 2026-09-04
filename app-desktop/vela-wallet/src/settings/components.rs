@@ -9,8 +9,8 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Div, ElementId, InteractiveElement as _, IntoElement, ParentElement, Stateful, Styled, div, px,
-    rgb,
+    Div, ElementId, InteractiveElement as _, IntoElement, ParentElement, Stateful,
+    StatefulInteractiveElement as _, Styled, div, px, rgb,
 };
 
 use crate::icons::{Icon, IconCache};
@@ -897,35 +897,42 @@ pub fn rpc_banner(
         u32,
         gpui::SharedString,
         gpui::SharedString,
+        Option<crate::flows::panels::Click>,
     )>,
 ) -> Div {
     let mut row = div().flex().flex_wrap().gap(px(8.));
-    for (letter, color, name, action) in chips {
-        row = row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .px(px(8.))
-                .py(px(6.))
-                .rounded_full()
-                .bg(theme.bg_base)
-                .child(chain_mark(letter, color, 20.))
-                .child(
-                    div()
-                        .text_size(theme::text_row_sub())
-                        .text_color(theme.fg_base)
-                        .child(name),
-                )
-                // The only accent on this banner: the thing that fixes it.
-                .child(
-                    div()
-                        .text_size(theme::text_row_sub())
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(theme.accent)
-                        .child(action),
-                ),
-        );
+    for (index, (letter, color, name, action, on_click)) in chips.into_iter().enumerate() {
+        // The chip IS the fix affordance — it names a chain and the thing to do
+        // about it, so clicking it must open that chain's editor rather than
+        // some other one's.
+        let chip = div()
+            .id(gpui::ElementId::from(("rpc-banner-chip", index)))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .rounded_full()
+            .bg(theme.bg_base)
+            .child(chain_mark(letter, color, 20.))
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_base)
+                    .child(name),
+            )
+            // The only accent on this banner: the thing that fixes it.
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.accent)
+                    .child(action),
+            );
+        row = row.child(match on_click {
+            Some(on_click) => chip.cursor_pointer().on_click(on_click).into_any_element(),
+            None => chip.into_any_element(),
+        });
     }
     div()
         .flex()

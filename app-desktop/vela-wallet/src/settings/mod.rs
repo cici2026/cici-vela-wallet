@@ -161,6 +161,10 @@ pub struct SettingsStrings {
     pub rpc_report: SharedString,
     pub rpc_unavailable_multiple: String,
     pub rpc_fix_action: SharedString,
+    /// The one refusal the override gate makes: this endpoint answered
+    /// `eth_chainId` with ANOTHER chain's id, so nothing was written. Carries
+    /// `{{expected}}` and `{{actual}}`.
+    pub rpc_wrong_chain: String,
     pub offline: SharedString,
 }
 
@@ -290,6 +294,7 @@ impl SettingsStrings {
             rpc_report: s("assets.rpcReport"),
             rpc_unavailable_multiple: raw("assets.rpcUnavailableMultiple"),
             rpc_fix_action: s("assets.rpcFix"),
+            rpc_wrong_chain: raw("assets.rpcFixWrongChain"),
             offline: s("settingsModals.health.offline"),
         }
     }

@@ -43,6 +43,8 @@ const ENDPOINT_FOCUS_COUNT: usize = 4;
 /// settings fields share a handle — focus is which box the keystrokes go into.
 const WIZARD_SEARCH_FOCUS: usize = ENDPOINT_FOCUS_COUNT + 3;
 const WIZARD_RPC_FOCUS: usize = WIZARD_SEARCH_FOCUS + 1;
+/// Two handles per network card, past everything above.
+const OVERRIDE_FOCUS_BASE: usize = WIZARD_RPC_FOCUS + 1;
 use crate::settings::components::{
     CalloutTone, callout, chain_mark, check_list, danger_card, dropdown_menu, dropdown_trigger,
     editable_url_field, form_row, key_value_row, network_row, rpc_banner, segmented,
@@ -69,7 +71,7 @@ use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
-use vela_core::app::network_admin::{Event as NetEvent, NetworkAdmin};
+use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
 use vela_core::app::payment_request::PaymentRequest;
 use vela_core::app::receive_watch::ReceiveWatch;
 
@@ -307,6 +309,11 @@ pub struct WalletPage {
     add_token_focus: gpui::FocusHandle,
     /// One per editable settings field, made on first use.
     endpoint_focuses: Vec<gpui::FocusHandle>,
+    /// Which network card's probes have been asked for, so opening one asks
+    /// once rather than on every frame.
+    settings_probed_network: Option<u32>,
+    /// DSR1, live: WHICH unreachable chain the rescue dialog is about.
+    settings_fix_chain: Option<u32>,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
     /// core's sorted `tokens`.
     ///
@@ -498,6 +505,8 @@ impl WalletPage {
             asset_detail: None,
             add_token_focus: cx.focus_handle(),
             endpoint_focuses: Vec::new(),
+            settings_probed_network: None,
+            settings_fix_chain: None,
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -2917,7 +2926,7 @@ impl WalletPage {
             SettingsPage::Account => self.settings_account(theme, cx),
             SettingsPage::Appearance => self.settings_appearance(theme),
             SettingsPage::Localization => self.settings_localization(theme, cx),
-            SettingsPage::Networks => self.settings_networks(theme, cx),
+            SettingsPage::Networks => self.settings_networks(theme, window, cx),
             SettingsPage::RpcProviders => self.settings_providers(theme, window, cx),
             SettingsPage::Endpoints => self.settings_endpoints(theme, window, cx),
             SettingsPage::Storage => self.settings_storage(theme),
@@ -2932,10 +2941,15 @@ impl WalletPage {
         // that into `banner_chain_ids` (failed MINUS rate-limited), and this is
         // where the person finally sees it. A correct verdict nobody is shown
         // is, from the chair in front of the screen, no verdict.
-        let live_chips = self.identity.is_some().then(|| {
+        let live = self.identity.is_some().then(|| {
             let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
-            wallet_live::unreachable_chips(&view)
+            (wallet_live::unreachable_chips(&view), view.banner_chain_ids)
         });
+        let banner_chain_ids = live
+            .as_ref()
+            .map(|(_, ids)| ids.clone())
+            .unwrap_or_default();
+        let live_chips = live.map(|(chips, _)| chips);
         let action = self.settings.rpc_fix_action.clone();
         let banner = match live_chips {
             Some(chips) if !chips.is_empty() => {
@@ -2946,7 +2960,21 @@ impl WalletPage {
                 ));
                 let chips = chips
                     .into_iter()
-                    .map(|(letter, color, name)| (letter, color, name, action.clone()))
+                    .enumerate()
+                    .map(|(index, (letter, color, name))| {
+                        // Each chip opens ITS chain's editor. A single "fix"
+                        // button that always opened the first one would send
+                        // somebody to repair a network that is working.
+                        let chain_id = banner_chain_ids.get(index).copied();
+                        let on_click: Option<panels::Click> = chain_id.map(|chain_id| {
+                            Box::new(cx.listener(move |this: &mut Self, _, _, cx| {
+                                this.settings_fix_chain = Some(chain_id);
+                                this.settings_dialog = Some(SettingsDialog::FixRpc);
+                                cx.notify();
+                            })) as panels::Click
+                        });
+                        (letter, color, name, action.clone(), on_click)
+                    })
                     .collect();
                 Some(rpc_banner(theme, &mut self.icons, text, chips))
             }
@@ -2964,6 +2992,7 @@ impl WalletPage {
                             n.color,
                             SharedString::from(n.name),
                             action.clone(),
+                            None,
                         )
                     })
                     .collect();
@@ -3306,7 +3335,7 @@ impl WalletPage {
         settings_live::network_rows(&view)
     }
 
-    fn settings_networks(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn settings_networks(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         let expanded = self.settings_expanded_network.clone();
         let rows = self.network_rows(cx);
         let mut col = div().flex().flex_col();
@@ -3341,34 +3370,153 @@ impl WalletPage {
                 })))
                 .child(div().h(px(1.)).bg(theme.divider));
             if is_expanded {
-                col = col.child(self.settings_network_detail(theme));
+                // The row model carries a u64 for the tint table; the core
+                // speaks u32. A chain id past 2^32 is not one.
+                let chain_id = u32::try_from(n.chain_id).unwrap_or(0);
+                col = col.child(self.settings_network_detail(theme, chain_id, i, window, cx));
             }
         }
         col
     }
 
+    /// The two editable overrides under an expanded network card.
+    ///
+    /// **The RPC field is the only place in this app where a save can be
+    /// REFUSED.** The core probes what the person typed and, if it answers
+    /// `eth_chainId` with another chain's id, writes nothing — because a
+    /// "Gnosis" endpoint that actually serves Polygon would send somebody's
+    /// money to the wrong chain. 030 proved that refusal against a real
+    /// endpoint; this is the field it refuses.
+    fn network_override_fields(
+        &mut self,
+        theme: &Theme,
+        chain_id: u32,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (Div, Div) {
+        // Opening the card is what starts the two probes. Dispatched here
+        // rather than from the click, because the card can also open from a
+        // restored state where no click happened.
+        if self.settings_probed_network != Some(chain_id) {
+            self.settings_probed_network = Some(chain_id);
+            resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                resident.dispatch(NetEvent::OverrideExpanded { chain_id }, cx);
+            });
+        }
+
+        let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
+        let row = view
+            .networks
+            .iter()
+            .find(|row| row.chain_id == chain_id)
+            .cloned();
+        let Some(row) = row else {
+            return (div(), div());
+        };
+
+        let rpc_badge = row.rpc_health.as_ref().and_then(settings_live::probe_badge);
+        // The refusal, in words, over the hint. A person who just watched
+        // nothing happen needs to be told why, and "saved" would be a lie.
+        let hint = row.rpc_chain_mismatch.as_ref().map_or_else(
+            || self.settings.network_save_hint.clone(),
+            |mismatch| {
+                gpui::SharedString::from(crate::wallet::fill(
+                    &crate::wallet::fill(
+                        &self.settings.rpc_wrong_chain,
+                        "actual",
+                        &mismatch.reported_chain_id.to_string(),
+                    ),
+                    "expected",
+                    &mismatch.expected_chain_id.to_string(),
+                ))
+            },
+        );
+        let refused = row.rpc_chain_mismatch.is_some();
+        let rpc_focus = self.endpoint_focus(OVERRIDE_FOCUS_BASE + index * 2, cx);
+        let explorer_focus = self.endpoint_focus(OVERRIDE_FOCUS_BASE + index * 2 + 1, cx);
+
+        let edit = move |field: NetOverrideField| {
+            move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(
+                        NetEvent::OverrideFieldEdited {
+                            chain_id,
+                            field,
+                            value: text.clone(),
+                        },
+                        cx,
+                    );
+                    resident.dispatch(NetEvent::OverrideBlurred { chain_id }, cx);
+                });
+            }
+        };
+
+        (
+            editable_url_field(
+                ElementId::from(("override-rpc", index)),
+                theme,
+                Some(self.settings.rpc_url.clone()),
+                &row.rpc_url,
+                self.settings.rpc_url.clone(),
+                rpc_badge.as_ref(),
+                Some(hint),
+                refused.then_some(Tone::Error),
+                &rpc_focus,
+                window,
+                edit(NetOverrideField::Rpc),
+            ),
+            editable_url_field(
+                ElementId::from(("override-explorer", index)),
+                theme,
+                Some(self.settings.explorer.clone()),
+                &row.explorer_url,
+                self.settings.explorer.clone(),
+                None,
+                None,
+                None,
+                &explorer_focus,
+                window,
+                edit(NetOverrideField::Explorer),
+            ),
+        )
+    }
+
     /// The editor DST4 opens under the expanded row. No identity line: the row
     /// above it already says which chain this is.
-    fn settings_network_detail(&mut self, theme: &Theme) -> Div {
-        let s = &self.settings;
-        let rpc = url_field(
-            theme,
-            Some(s.rpc_url.clone()),
-            gpui::SharedString::from(settings_fixtures::ETHEREUM_RPC),
-            Some(&latency(45, None)),
-            Some(s.network_save_hint.clone()),
-            None,
-            None,
-        );
-        let explorer = url_field(
-            theme,
-            Some(s.explorer.clone()),
-            gpui::SharedString::from(settings_fixtures::ETHEREUM_EXPLORER),
-            None,
-            None,
-            None,
-            None,
-        );
+    fn settings_network_detail(
+        &mut self,
+        theme: &Theme,
+        chain_id: u32,
+        index: usize,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let (rpc, explorer) = if self.identity.is_some() {
+            self.network_override_fields(theme, chain_id, index, window, cx)
+        } else {
+            let s = &self.settings;
+            (
+                url_field(
+                    theme,
+                    Some(s.rpc_url.clone()),
+                    gpui::SharedString::from(settings_fixtures::ETHEREUM_RPC),
+                    Some(&latency(45, None)),
+                    Some(s.network_save_hint.clone()),
+                    None,
+                    None,
+                ),
+                url_field(
+                    theme,
+                    Some(s.explorer.clone()),
+                    gpui::SharedString::from(settings_fixtures::ETHEREUM_EXPLORER),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        };
         div()
             .flex()
             .flex_col()
@@ -3811,7 +3959,12 @@ impl WalletPage {
                 self.settings_add_network_live(theme, window, cx)
             }
             SettingsDialog::AddNetwork => self.settings_add_network_body(theme),
-            SettingsDialog::FixRpc => self.settings_fix_rpc_body(theme),
+            SettingsDialog::FixRpc => match self.settings_fix_chain {
+                Some(chain_id) if self.identity.is_some() => {
+                    self.settings_fix_rpc_live(theme, chain_id, window, cx)
+                }
+                _ => self.settings_fix_rpc_body(theme),
+            },
         };
 
         let mut header = div()
@@ -4212,6 +4365,110 @@ impl WalletPage {
     }
 
     /// DSR1's body: one network is unreachable, and this is where it is fixed.
+    /// DSR1, live: the chain the banner named, and a field that really saves.
+    ///
+    /// The banner has been telling the truth since phase 11 and pointing at a
+    /// dialog that could not act on it. This closes that loop — and it is the
+    /// one place in the app where a save can be REFUSED, because an endpoint
+    /// that answers `eth_chainId` with another chain's id would route somebody's
+    /// money to the wrong chain.
+    fn settings_fix_rpc_live(
+        &mut self,
+        theme: &Theme,
+        chain_id: u32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let s = &self.settings;
+        let badge = pill(Tone::Error, s.offline.clone());
+        let warning = s.rpc_fix_warning.clone();
+        let providers_hint = s.rpc_providers_hint.clone();
+        let report = s.rpc_report.clone();
+        let name = crate::executor::custom_tokens::network_name(chain_id);
+        let letter = crate::settings::model::lettermark(&name);
+        let colour = crate::settings::model::chain_tint(u64::from(chain_id)).unwrap_or(0x8A_8F_98);
+        let meta = settings_fixtures::chain_meta(s, u64::from(chain_id));
+
+        let mut chips = div().flex().flex_wrap().gap(px(8.));
+        for provider in settings_fixtures::RPC_PROVIDER_LINKS {
+            chips = chips.child(
+                div()
+                    .px(px(12.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .bg(theme.bg_raised)
+                    .border_1()
+                    .border_color(theme.divider)
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_base)
+                    .child(provider),
+            );
+        }
+
+        // The SAME field the network card opens, deliberately. Two editors for
+        // one override is two places a refusal has to be worded, and they would
+        // drift.
+        let (rpc, _) = self.network_override_fields(theme, chain_id, 0, window, cx);
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(chain_mark(letter, colour, 32.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(theme::text_panel_title())
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.fg_base)
+                                    .child(gpui::SharedString::from(name)),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::font_mono())
+                                    .text_size(theme::text_row_sub())
+                                    .text_color(theme.fg_subtle)
+                                    .child(meta),
+                            ),
+                    )
+                    .child(status_pill(theme, &badge)),
+            )
+            .child(callout(
+                theme,
+                &mut self.icons,
+                CalloutTone::Warning,
+                warning,
+            ))
+            .child(rpc)
+            // No save button. The field persists on its own — the core's blur
+            // IS the save, behind its own gate — and a button that only
+            // sometimes saves is worse than no button.
+            .child(
+                div()
+                    .text_size(theme::text_label())
+                    .text_color(theme.fg_subtle)
+                    .child(providers_hint),
+            )
+            .child(chips)
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.info_base)
+                    .child(report),
+            )
+    }
+
     fn settings_fix_rpc_body(&mut self, theme: &Theme) -> Div {
         let s = &self.settings;
         let n = settings_fixtures::network(settings_fixtures::RPC_FIX_CHAIN);
