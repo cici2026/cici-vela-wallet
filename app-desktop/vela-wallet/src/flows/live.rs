@@ -20,14 +20,16 @@ use gpui::{Hsla, SharedString};
 use vela_core::app::activity_feed::{FeedRow, FeedView};
 use vela_core::app::balance_dashboard::{BalanceToken, BalanceView};
 use vela_core::app::network_admin::BUILTIN_CHAINS;
+use vela_core::app::payment_request::PaymentRequestView;
+use vela_core::app::receive_watch::ReceiveWatchView;
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
-use vela_core::l10n::datetime::Civil;
+use vela_core::l10n::datetime::{Civil, TimePreset, format_time};
 use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::flows::FlowStrings;
 use crate::flows::fixtures::{
-    AddressCard, AssetsEmpty, AssetsPanel, HistoryGroup, NetworkRow, ReceiveList, ReceiveQr,
-    TokenMark, address_lines,
+    AddressCard, AssetsEmpty, AssetsPanel, DepositEntry as FlowDeposit, HistoryGroup, NetworkRow,
+    ReceiveList, ReceiveQr, TokenMark, address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -264,7 +266,15 @@ pub fn receive_list(address: &str, s: &FlowStrings) -> ReceiveList {
 
 /// One network's QR, with the person's real address under it.
 #[must_use]
-pub fn receive_qr(address: &str, name: &str, chain_id: u32, s: &FlowStrings) -> ReceiveQr {
+pub fn receive_qr(
+    address: &str,
+    name: &str,
+    chain_id: u32,
+    watch: &ReceiveWatchView,
+    pay: &PaymentRequestView,
+    s: &FlowStrings,
+    locale: &str,
+) -> ReceiveQr {
     let network = chain_name(chain_id);
     let symbol = receivable_chains()
         .into_iter()
@@ -289,6 +299,12 @@ pub fn receive_qr(address: &str, name: &str, chain_id: u32, s: &FlowStrings) -> 
             seed: SharedString::from(address.to_owned()),
             lines: (SharedString::from(lines.0), SharedString::from(lines.1)),
         },
+        // WHAT the code says is the core's decision, not this file's: in
+        // address mode `qr_value` is the bare recipient, and in request mode it
+        // is the EIP-681 URI with the amount in it. Encoding the address here
+        // would work today and silently ignore an amount the moment the request
+        // builder lands.
+        qr_payload: (!pay.qr_value.is_empty()).then(|| SharedString::from(pay.qr_value.clone())),
         centre: TokenMark {
             ticker: SharedString::from(symbol),
             badge: tint(chain_id),
@@ -296,7 +312,57 @@ pub fn receive_qr(address: &str, name: &str, chain_id: u32, s: &FlowStrings) -> 
         warning: s.warning_reminder.clone(),
         save_image: s.save_image.clone(),
         view_on_explorer: s.view_on_explorer.clone(),
+        deposits: deposits(watch, locale),
     }
+}
+
+/// What landed while this code was open.
+///
+/// The core decides WHAT counts as a deposit — the baseline, the comparison,
+/// the debounce. This turns its verdict into words: the local wall clock, the
+/// amount with its sign, and the network and value beside it.
+///
+/// `detected` gates the section rather than `deposits.is_empty()`, because they
+/// are the core's two separate answers and only the first means "announce
+/// this". A list with nothing in it is not a celebration.
+fn deposits(view: &ReceiveWatchView, locale: &str) -> Vec<FlowDeposit> {
+    if !view.detected {
+        return Vec::new();
+    }
+    view.deposits
+        .iter()
+        .map(|entry| FlowDeposit {
+            time: SharedString::from(format_time(
+                &crate::executor::local_civil(entry.at_epoch_ms),
+                TimePreset::H24,
+                locale,
+            )),
+            rows: entry
+                .items
+                .iter()
+                .map(|item| {
+                    (
+                        SharedString::from(format!(
+                            "+{} {}",
+                            format_token_amount(item.amount, NumberPreset::CommaDot, false),
+                            item.symbol
+                        )),
+                        SharedString::from(match item.usd {
+                            // An unpriced arrival still says which chain it came
+                            // in on. Printing `$0.00` beside it would be the
+                            // assets panel's mistake on a happier screen.
+                            Some(usd) => format!(
+                                "{}  {}",
+                                chain_name(item.chain_id),
+                                format_fiat(usd, "USD", "$", locale, FiatOptions::default())
+                            ),
+                            None => chain_name(item.chain_id),
+                        }),
+                    )
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// The chains a payment can arrive on: the built-ins plus whatever the person
@@ -352,6 +418,18 @@ mod tests {
 
     fn wallet_strings() -> crate::wallet::WalletStrings {
         crate::wallet::WalletStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A real `PaymentRequestView`, from a booted core.
+    fn pay_view() -> PaymentRequestView {
+        use vela_core::app::payment_request::{Event as PayEvent, PaymentRequest};
+        let mut host = CoreHost::<PaymentRequest>::new();
+        let _ = host.dispatch(PayEvent::Start {
+            account: "0xabc".to_owned(),
+            recipient: "0xabc".to_owned(),
+            base_url: "https://getvela.app".to_owned(),
+        });
+        host.view()
     }
 
     /// A real `BalanceView`, taken from a booted core rather than hand-written.
@@ -507,7 +585,21 @@ mod tests {
     fn the_qr_card_is_seeded_by_the_address_not_the_name() {
         crate::executor::storage::tests::with_temp_state("flows-qr", || {
             const ADDR: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
-            let qr = receive_qr(ADDR, "Everyday wallet", 100, &strings());
+            let quiet = ReceiveWatchView {
+                detected: false,
+                deposits: Vec::new(),
+            };
+            let mut pay = pay_view();
+            pay.qr_value = ADDR.to_owned();
+            let qr = receive_qr(
+                ADDR,
+                "Everyday wallet",
+                100,
+                &quiet,
+                &pay,
+                &strings(),
+                "en-US",
+            );
             assert_eq!(qr.account.name, "Everyday wallet");
             assert_eq!(qr.account.seed, ADDR, "two same-named accounts must differ");
             // The two halves rejoin into the address the person will paste.
@@ -518,6 +610,99 @@ mod tests {
             // A network code is not a token code: no contract line here.
             assert_eq!(qr.contract, None);
         });
+    }
+
+    /// The QR encodes what the CORE says, and a live one is never the demo
+    /// pattern.
+    #[test]
+    fn the_code_carries_the_cores_payload_not_the_shells_guess() {
+        crate::executor::storage::tests::with_temp_state("flows-qr-payload", || {
+            const ADDR: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            let quiet = ReceiveWatchView {
+                detected: false,
+                deposits: Vec::new(),
+            };
+
+            // A booted `payment_request` in address mode answers the recipient.
+            let mut pay = pay_view();
+            pay.qr_value = ADDR.to_owned();
+            let qr = receive_qr(ADDR, "Me", 100, &quiet, &pay, &strings(), "en-US");
+            assert_eq!(qr.qr_payload.as_deref(), Some(ADDR));
+
+            // Request mode puts an EIP-681 URI in the same field, and this file
+            // must forward it rather than re-deriving the address.
+            pay.qr_value = "ethereum:0x88cC@100?value=1.5e18".to_owned();
+            let request = receive_qr(ADDR, "Me", 100, &quiet, &pay, &strings(), "en-US");
+            assert_eq!(
+                request.qr_payload.as_deref(),
+                Some("ethereum:0x88cC@100?value=1.5e18")
+            );
+
+            // Before the core has ruled there is nothing to encode, and drawing
+            // a decorative code on a screen meant to be scanned is the failure
+            // this field exists to end.
+            pay.qr_value = String::new();
+            let unruled = receive_qr(ADDR, "Me", 100, &quiet, &pay, &strings(), "en-US");
+            assert_eq!(unruled.qr_payload, None);
+        });
+    }
+
+    /// A deposit is announced when the core says one landed — and only then.
+    #[test]
+    fn an_arrival_is_announced_only_when_the_core_says_one_landed() {
+        use vela_core::app::receive_watch::{DepositEntry, DepositItem};
+
+        let entry = DepositEntry {
+            // 2026-09-04T12:34:56Z, shifted into whatever zone this machine is
+            // in — the assertion is on shape, not on a clock the test cannot
+            // know.
+            at_epoch_ms: 1_788_525_296_000.0,
+            items: vec![
+                DepositItem {
+                    symbol: "xDAI".to_owned(),
+                    amount: 1.5,
+                    chain_id: 100,
+                    usd: Some(1.5),
+                },
+                DepositItem {
+                    symbol: "MON".to_owned(),
+                    amount: 12.0,
+                    chain_id: 143,
+                    usd: None,
+                },
+            ],
+        };
+
+        // A list the core has NOT called detected is not a celebration.
+        let quiet = ReceiveWatchView {
+            detected: false,
+            deposits: vec![entry.clone()],
+        };
+        assert!(
+            deposits(&quiet, "en-US").is_empty(),
+            "undetected must not announce"
+        );
+
+        let landed = ReceiveWatchView {
+            detected: true,
+            deposits: vec![entry],
+        };
+        let announced = deposits(&landed, "en-US");
+        assert_eq!(announced.len(), 1);
+        assert_eq!(announced[0].rows.len(), 2);
+        assert_eq!(announced[0].rows[0].0, "+1.5 xDAI");
+        assert!(announced[0].rows[0].1.starts_with("Gnosis"));
+        assert!(announced[0].rows[0].1.contains("$1.50"));
+        // An unpriced arrival still says which chain it came in on; `$0.00`
+        // beside it would be the assets panel's mistake on a happier screen.
+        assert_eq!(announced[0].rows[1].0, "+12 MON");
+        assert_eq!(announced[0].rows[1].1, "Monad");
+        // The time is a wall clock, not an epoch.
+        assert!(
+            announced[0].time.contains(':') && announced[0].time.len() <= 8,
+            "not a clock: {}",
+            announced[0].time
+        );
     }
 
     /// The assets panel, end to end, against the golden Safe.

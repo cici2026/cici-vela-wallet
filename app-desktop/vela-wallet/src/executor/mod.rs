@@ -429,6 +429,21 @@ pub fn day_start_ms(timestamp_ms: f64) -> f64 {
     (local / DAY_MS).floor() * DAY_MS - offset_ms
 }
 
+/// An epoch stamp as the wall clock the person is actually reading.
+///
+/// The offset comes from the same `localtime_r` [`day_start_ms`] uses, so a
+/// timestamp and the day heading it files under can never disagree about which
+/// zone this machine is in — and it includes daylight saving as of that
+/// instant, which a value read once at startup would be wrong about twice a
+/// year.
+#[must_use]
+pub fn local_civil(epoch_ms: f64) -> Civil {
+    #[allow(clippy::cast_possible_truncation, reason = "an epoch in milliseconds")]
+    let ms = epoch_ms as i64;
+    let offset_minutes = i32::try_from(local_utc_offset_seconds() / 60).unwrap_or(0);
+    Civil::from_unix_millis(ms, offset_minutes)
+}
+
 /// The same wall clock, as epoch milliseconds — what the wallet-state machines
 /// stamp their mutations with. Public since spec 030: an event carries the time
 /// the SHELL observed, so the core stays a pure function of its inputs.

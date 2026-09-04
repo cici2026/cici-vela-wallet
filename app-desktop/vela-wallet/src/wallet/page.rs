@@ -60,6 +60,8 @@ use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::network_admin::NetworkAdmin;
+use vela_core::app::payment_request::PaymentRequest;
+use vela_core::app::receive_watch::ReceiveWatch;
 
 use super::WalletStrings;
 use super::components::{
@@ -1656,12 +1658,27 @@ impl WalletPage {
                 &identity.address,
                 &self.flow_strings,
             )),
-            FlowPanel::Dr2 => flow_fixtures::FlowBody::ReceiveQr(flows_live::receive_qr(
-                &identity.address,
-                &identity.name,
-                self.receive_chain,
-                &self.flow_strings,
-            )),
+            FlowPanel::Dr2 => {
+                // Reading the resident BOOTS it, which is what starts the
+                // watcher: the machine's own boot event is `Start`. So opening
+                // this panel begins watching for money, and that is US3's
+                // "a deposit lands and is noticed without a manual refresh".
+                let watch = resident::resident::<ReceiveWatch>(cx).read(cx).view();
+                // And `payment_request` decides WHAT the code says — the bare
+                // recipient today, an EIP-681 URI once an amount can be asked
+                // for. Encoding the address here instead would work now and
+                // silently drop the amount later.
+                let pay = resident::resident::<PaymentRequest>(cx).read(cx).view();
+                flow_fixtures::FlowBody::ReceiveQr(flows_live::receive_qr(
+                    &identity.address,
+                    &identity.name,
+                    self.receive_chain,
+                    &watch,
+                    &pay,
+                    &self.flow_strings,
+                    &self.locale,
+                ))
+            }
             // Send (DSD*), the scanner, the asset QR and add-token still draw
             // the mock. Each is named so the next person sees a list rather
             // than a wildcard.

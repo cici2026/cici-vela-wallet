@@ -20,9 +20,9 @@ use super::components::{
     status_chip, token_header_card,
 };
 use super::fixtures::{
-    AddToken, AddTokenResult, AssetsPanel, BatchImport, ContactPick, FeeTokenPick, FlowBody,
-    HistoryGroup, ReceiveList, ReceiveQr, ScanModal, SendConfirm, SendForm, SendPick, SendReceipt,
-    TxDetail,
+    AddToken, AddTokenResult, AssetsPanel, BatchImport, ContactPick, DepositEntry, FeeTokenPick,
+    FlowBody, HistoryGroup, ReceiveList, ReceiveQr, ScanModal, SendConfirm, SendForm, SendPick,
+    SendReceipt, TxDetail,
 };
 
 /// One prepared click listener. The page builds these from `cx.listener`
@@ -218,6 +218,7 @@ fn receive_qr(
             model.centre.ticker.as_ref(),
             model.centre.badge,
         )),
+        model.qr_payload.as_deref(),
     )))
     .child(
         div()
@@ -227,6 +228,80 @@ fn receive_qr(
     )
     .child(ghost_button(theme, model.save_image.clone()))
     .child(ghost_button(theme, model.view_on_explorer.clone()))
+    .children(deposit_section(&model.deposits, theme))
+}
+
+/// Money that landed while the code was open.
+///
+/// Ported from `ReceiveScreen.tsx`'s `depositBox`: an open, de-boxed section
+/// under a hairline — no filled card — with success ink on the dot and the
+/// amount only, and the time, network and value in plain muted text. The
+/// restraint is the design's: a celebration that shouts is one somebody learns
+/// to distrust.
+///
+/// Absent when there is nothing, rather than an empty container: a hairline
+/// with nothing under it reads as a section that failed to load.
+fn deposit_section(deposits: &[DepositEntry], theme: &Theme) -> Option<Div> {
+    if deposits.is_empty() {
+        return None;
+    }
+    let mut section = div()
+        .flex()
+        .flex_col()
+        .pt(px(16.))
+        .border_t_1()
+        .border_color(theme.border_card);
+    for (i, entry) in deposits.iter().enumerate() {
+        let mut group = div().flex().flex_col().py(px(10.));
+        if i > 0 {
+            group = group.border_t_1().border_color(theme.border_card);
+        }
+        group = group.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(theme.success_base),
+                )
+                .child(
+                    div()
+                        .text_size(theme::text_row_sub())
+                        .text_color(theme.fg_muted)
+                        .child(entry.time.clone()),
+                ),
+        );
+        for (amount, meta) in &entry.rows {
+            group = group.child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    // Inset past the dot so amounts align under the time.
+                    .pl(px(14.))
+                    .pt(px(4.))
+                    .child(
+                        div()
+                            .text_size(theme::text_row_title())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(theme.success_base)
+                            .child(amount.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_muted)
+                            .child(meta.clone()),
+                    ),
+            );
+        }
+        section = section.child(group);
+    }
+    Some(section)
 }
 
 fn history(

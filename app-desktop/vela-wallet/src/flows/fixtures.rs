@@ -187,6 +187,19 @@ pub struct ReceiveList {
     pub rows: Vec<NetworkRow>,
 }
 
+/// One arrival, as the receive screen announces it.
+///
+/// Ported from `screens/wallet/ReceiveScreen.tsx` (the `depositBox` group): an
+/// open, de-boxed section under a hairline, a success dot beside a muted time,
+/// then one row per token with the amount in success ink and the network and
+/// value muted beside it.
+#[derive(Clone)]
+pub struct DepositEntry {
+    pub time: SharedString,
+    /// `(+1.5 xDAI, Gnosis  $1.50)` — the amount, then its context.
+    pub rows: Vec<(SharedString, SharedString)>,
+}
+
 #[derive(Clone)]
 pub struct ReceiveQr {
     pub title: SharedString,
@@ -198,6 +211,20 @@ pub struct ReceiveQr {
     pub warning: SharedString,
     pub save_image: SharedString,
     pub view_on_explorer: SharedString,
+    /// What the code actually encodes.
+    ///
+    /// `None` in every mock, and that is why the gallery still draws the
+    /// designed pattern. A signed-in receive screen carries the real payload —
+    /// the core's `qr_value` — because a decorative code on a screen whose
+    /// whole job is to be scanned is a screen that does not work.
+    pub qr_payload: Option<SharedString>,
+    /// Money that landed while this code was open, newest first.
+    ///
+    /// Empty in every mock, because the mocks draw the screen before anything
+    /// has arrived — this is a state only a live wallet reaches, like the
+    /// hero's real figure. A field, not a separate panel: the person is looking
+    /// at the code when it happens and must not have to go anywhere.
+    pub deposits: Vec<DepositEntry>,
 }
 
 #[derive(Clone)]
@@ -522,6 +549,11 @@ fn receive_qr(s: &FlowStrings, asset_mode: bool) -> ReceiveQr {
         warning: s.warning_reminder.clone(),
         save_image: s.save_image.clone(),
         view_on_explorer: s.view_on_explorer.clone(),
+        // The mocks draw the design, not a wallet: no payload, so the card
+        // keeps the pattern the drawing shows.
+        qr_payload: None,
+        // The mocks draw the screen before anything has arrived.
+        deposits: Vec::new(),
     }
 }
 
