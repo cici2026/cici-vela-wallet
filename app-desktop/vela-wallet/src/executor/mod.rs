@@ -28,6 +28,7 @@
 //! is why [`Performed`] exists.
 
 pub mod display_currency;
+pub mod network_admin;
 pub mod passkey;
 #[cfg(target_os = "macos")]
 mod platform_macos;

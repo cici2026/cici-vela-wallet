@@ -84,6 +84,11 @@ impl Render for Root {
                 // Dropped on the way out, so a second sign-in starts from a
                 // fresh machine rather than resuming a finished one.
                 self.wallet = None;
+                // And so do the resident machines. Contacts, networks and the
+                // chosen currency belong to the ACCOUNT; a resident that
+                // outlived a sign-out would show the previous person's address
+                // book to the next one.
+                resident::drop_all(cx);
                 let page = self
                     .onboarding
                     .get_or_insert_with(|| cx.new(|cx| OnboardingPage::new(window, cx)))

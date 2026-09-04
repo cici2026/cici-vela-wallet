@@ -133,3 +133,84 @@ Two smaller things the tests pinned rather than assumed:
   resolves, because "a seeded currency rendering at the rate-1 fallback (₫78 instead
   of ₫2,000,000) is strictly worse than staying on USD" — so with no rate source this
   cut, seeding buys a label that cannot commit. Owed to 031, with its region table.
+
+## Phase 2 — `network_admin` can talk to the world
+
+`executor/network_admin.rs`: fifteen operations — four stored ledgers with their
+camelCase codecs, six live probes, a debounce timer, and two acknowledged no-ops.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **111 passed · 0 failed · 6 ignored** (phase 1: 104/0/5) |
+| `cargo fmt --all --check` | ✅ clean |
+| `cargo build` warnings | ✅ **1**, and it is `BLE_CHANNEL_SUPPORTED`, pre-existing |
+| `cargo clippy --all-targets` | ✅ **10**, all in `ctap/cable.rs`(7), `cable/l2cap.rs`, `hardware.rs`, `onboarding.rs` — **zero in any file this cut wrote** |
+| live probes vs. a real chain | ✅ see below |
+
+**A measurement gotcha, since these numbers are evidence.** `cargo build` only
+re-emits warnings for crates it actually recompiled, so an incremental build reports
+a number that means nothing. Every count above is after `touch src/main.rs`.
+
+### The probes are live, and they answer
+
+`cargo test …the_probes_answer -- --ignored`, against Gnosis mainnet:
+
+```
+eth_chainId    -> 100 in 620ms
+eth_getCode    -> 172 bytes of runtime code   (the golden Safe, genuinely deployed)
+eth_call(P256) -> 0x…0001                      (the precompile IS supported)
+```
+
+That last value is the point of the whole phase: it is what `add_confirmed`
+hard-gates on. `#[ignore]`d, because a CI runner is not promised a network and a gate
+that fails on a flaky connection is a gate people learn to re-run rather than read.
+
+### A bug the live run found, and a host that found it
+
+The first live run failed, and chasing it turned up two separate things.
+
+**One real bug, in this cut's code.** `ureq` 3 treats a non-2xx response as an
+**`Err`**, not an `Ok` carrying a status — `registry.rs:112` already says so in its
+own words: *"StatusCode is the ONLY variant that means the server answered."* Reading
+the status off an `Ok`, as the first version did, made the `HttpError` arm
+**unreachable**: every 4xx and 5xx reported as `Failed`. The core renders those
+differently ("HTTP 502" against "Connection failed"), so the settings screen would
+have said a wrong true thing about every service that answered with an error. Fixed
+with an `http_error` splitter.
+
+**One host, not a bug.** `https://rpc.gnosischain.com` answers curl with 200 and this
+client with **403** — with and without a proxy, measured by running the same request
+through a bare `ureq::Agent` and through `proxy::agent`, against all three Gnosis
+URLs. The other two answer normally. It is a property of that host.
+
+Worth recording beyond this cut: **`registry.rs:362` pins that host FIRST** for
+onboarding's legacy-name lookup, so every such lookup burns a request on an endpoint
+that will refuse it before falling through. Not this feature's to fix, and not
+invisible any more. It is also, incidentally, the argument for the core routing a
+*pool* rather than one URL.
+
+### Three things the warnings caught that mattered
+
+Chasing the warning count to zero found a real gap rather than tidying:
+
+1. **`drop_all` was never called.** `resident.rs` documents it as running on
+   sign-out; nothing invoked it. A resident outliving a sign-out shows the previous
+   person's address book to the next one. Now wired into `main.rs`'s
+   `SessionRoute::Onboarding` arm, beside the existing `self.wallet = None`.
+2. **`Machine::LABEL` was decoration.** It now prints one line per boot, in the
+   file's existing `[vela-wallet]` voice.
+3. **Three contacts keys were a phase early.** Moved to the phase that uses them —
+   a constant nothing reads is a claim nothing checks.
+
+### Deviations, recorded
+
+- **A corrupt record is dropped, where web coerces it to zeros and keeps it.** Both
+  keep the load alive, which is the invariant that matters (a rejected `StoreLoaded`
+  strands the core unloaded forever and every later write is dropped). Dropping is
+  safer here: a network whose `chainId` did not parse has chain 0, and chain 0 is the
+  key the core dedups and routes on, so keeping it puts a colliding ghost in the
+  ledger.
+- **`probe_reachable` reads the real status.** On the web it must be a `no-cors`
+  request whose only honest signal is "resolved without throwing", because the browser
+  hides the status. A desktop has no CORS, so it answers 2xx/3xx — strictly better
+  information into a field the core already types as a bool.

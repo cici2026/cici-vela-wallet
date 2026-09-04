@@ -35,9 +35,6 @@ pub const KEY_SERVICE_ENDPOINTS: &str = "vela.serviceEndpoints";
 /// camelCase FIELD names inside, as the web and Expo clients — a record written
 /// on one client has to stay legible on another, which is what makes copying a
 /// wallet between machines work at all.
-pub const KEY_CONTACTS: &str = "vela.contacts";
-pub const KEY_CONTACTS_DISMISSED: &str = "vela.contacts.dismissed";
-pub const KEY_CONTACT_GROUPS: &str = "vela.contactGroups";
 pub const KEY_CUSTOM_NETWORKS: &str = "vela.customNetworks";
 pub const KEY_NETWORK_CONFIG: &str = "vela.networkConfig";
 pub const KEY_RPC_PROVIDERS: &str = "vela.rpcProviders";
@@ -432,9 +429,6 @@ pub(crate) mod tests {
     fn the_wallet_state_keys_round_trip_and_start_absent() {
         with_temp_state("wallet-state-keys", || {
             for key in [
-                KEY_CONTACTS,
-                KEY_CONTACTS_DISMISSED,
-                KEY_CONTACT_GROUPS,
                 KEY_CUSTOM_NETWORKS,
                 KEY_NETWORK_CONFIG,
                 KEY_RPC_PROVIDERS,
@@ -446,20 +440,13 @@ pub(crate) mod tests {
                 );
             }
 
-            let contacts = json!([{ "address": "0xabc", "name": "Ada", "favorite": true }]);
-            if write_value(KEY_CONTACTS, contacts.clone()).is_err() {
-                unreachable!("could not write contacts");
-            }
-            assert_eq!(read_value(KEY_CONTACTS).ok().flatten(), Some(contacts));
-
-            // The dismissed store is an OBJECT (address → epoch ms), not a list.
-            let tombstones = json!({ "0xabc": 1_756_000_000_000u64 });
-            if write_value(KEY_CONTACTS_DISMISSED, tombstones.clone()).is_err() {
-                unreachable!("could not write tombstones");
+            let networks = json!([{ "id": "custom-100", "chainId": 100 }]);
+            if write_value(KEY_CUSTOM_NETWORKS, networks.clone()).is_err() {
+                unreachable!("could not write networks");
             }
             assert_eq!(
-                read_value(KEY_CONTACTS_DISMISSED).ok().flatten(),
-                Some(tombstones)
+                read_value(KEY_CUSTOM_NETWORKS).ok().flatten(),
+                Some(networks)
             );
 
             // A bare string, not an object — matching what the other clients store.
