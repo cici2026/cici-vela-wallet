@@ -303,3 +303,57 @@ The lesson is not about this script. A guard is a claim, and a claim nobody has 
 fail is a claim nobody has tested. Two of the three checks in the first version were
 wrong, and the only reason that is known is that SC-005 refused to accept an
 assertion.
+
+## Closeout — SC verdicts
+
+| SC | Claim | Verdict |
+|---|---|---|
+| **SC-001** | Guards fail on the unmodified tree, pass on the finished one | ✅ New guard vs. `f9bcb278`: all 6 orphans on 3 platforms. Vs. HEAD: green, zero false positives. |
+| **SC-002** | A person opens Explore, then the signing sheet, on all three | ✅ desktop `VELA_PAGE=explore` opens (screenshot); Android 探索 tab switches the body; iOS `selectTab` → `.explore`. Signing reachable from Explore on all three. |
+| **SC-003** | Desktop 88→93, the five dead tests named; Android/iOS do not regress | ✅ `93 passed; 0 failed; 5 ignored`, all five named. Android 118/0. iOS 130 in 13 suites/0, on two runtimes. |
+| **SC-004** | Galleries unchanged; every `fixtures.*` literal identical | ✅ Both desktop fixtures: **every string literal byte-identical**. Android/iOS fixtures untouched entirely. |
+| **SC-005** | A PR removing any wiring is red — proven, not asserted | ✅ Proven for all three. **The proof broke the guard twice** (§Phase 5); both defects were real and are fixed. |
+| **SC-006** | Zero files under `rust/`; zero corpus delta | ✅ `git diff f9bcb278..HEAD -- rust/` is empty. Corpus untouched — FR-007 held while 026 is open. |
+| **SC-007** | The 8 explore/signing source dirs unchanged | ✅ Android (2) and iOS (2) byte-identical. Desktop (2) carry rustfmt reflow **only** — every literal proven identical — and that reflow is itself evidence: rustfmt could not see the files before either. |
+
+### Final gate, all three platforms
+
+```
+desktop   cargo fmt --check ✅   cargo test: 93 passed, 0 failed, 5 ignored
+android   testDebugUnitTest: 118 tests, 0 failed
+ios       xcodebuild test: 130 tests in 13 suites passed  (iOS 18.2 and 26.2)
+guard     native reachability: every screen family is reachable
+ci.yml    app, web, site, rust, rust-macos, desktop, android, ios
+```
+
+### Carried debts → handoff
+
+1. **13 hardcoded CJK literals** in the newly-visible explore/signing fixtures (11
+   desktop explore, 2 desktop signing): category titles 交易 / 预测市场, relative
+   timestamps 刚刚 / 昨天, subtitles 稳定币兑换 / 永续合约交易. These are wallet
+   chrome and should resolve from the corpus. **Blocked by FR-007 while 026 is open**
+   — and doing a corpus change during another session's corpus change is the exact
+   mistake that caused this feature. Take it up once 026 merges.
+2. **The desktop crate has never been clippy-clean.** 10 baseline warnings (7
+   `ctap/cable.rs`, 1 `cable/l2cap.rs` — an `Arc` that is not `Send`/`Sync` — 1
+   `hardware.rs`, 1 `onboarding.rs`). The `desktop` CI job gates
+   `clippy --all-targets` without `-D warnings` until they are cleared. Raising it is
+   a named, self-contained task.
+3. **`gpui` is an unpinned git dependency** (`git = ".../zed"`, no `rev`/`tag`).
+   Reproducible today only via the committed `Cargo.lock`; the first `cargo update`
+   moves the desktop to an arbitrary Zed commit. Pin a `rev`.
+4. **No native job is in branch protection.** Following the file's own precedent for
+   `rust-macos`, the three jobs are added but merge policy is not changed — that is a
+   founder action.
+5. **The desktop gallery sweep is not in CI** and cannot be: it opens real windows.
+   It stays a local gate; the job comment says so.
+
+### What this feature is really evidence for
+
+Three tools were blind to the same 3,571 lines — rustc, rustfmt and the test
+harness — and every gate in CI stayed green, because on all three platforms the
+*compiler* was content. `check-windows.sh` had already recorded this exact shape once
+("left the Windows path unlinked, with this gate green throughout"). The instrument
+that sees it is not a stronger compiler or a stricter lint; it is a check that asks a
+different question — **can a person get here?** — and is cheap enough that nobody
+ever skips it.
