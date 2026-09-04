@@ -478,3 +478,89 @@ The live driver prints each operation as the core asks for it. That trace is wha
 turned "it did not add" into "it never got past `FetchChainInfo`" in one line, and it
 is the only readable record of a live run. Production `get_json` and `json_rpc` are
 quiet again: a failed probe is expected, and the core owns what it means.
+
+## Phase 7 — the refusal, and closeout
+
+### The invariant-④ refusal, against real endpoints
+
+Ethereum's RPC field pointed at a **healthy** Gnosis endpoint — healthy is the point:
+
+```
+refused: card is chain 1, endpoint reported chain 100
+nothing was written
+```
+
+A shell that saved on blur and let the core "fix it later" would have written an
+override that silently breaks every balance read on that network, and **nothing about
+the screen would look wrong**. The refusal is the whole feature.
+
+### Final gate
+
+```
+cargo test    125 passed · 0 failed · 8 ignored      (030 opened at 93)
+fmt           clean
+warnings      1, pre-existing (BLE_CHANNEL_SUPPORTED)
+gallery       every state rendered (36)
+fixtures      0 deleted lines in 030 — 128 insertions, purely additive
+rust/         0 files changed
+corpus        0 files changed
+```
+
+*(The 20 fixture deletions visible against `origin/main` are 029's rustfmt reflow of
+the previously-uncompiled explore/signing files, documented there. 030 deletes
+nothing.)*
+
+### SC verdicts
+
+| SC | Verdict |
+|---|---|
+| **SC-001** network added against a real endpoint survives a relaunch | ✅ Zora added live (12→13) via the real index and a real RPC race; survives a fresh core. Plus the chain-mismatch refusal, proven against a real wrong-chain endpoint with nothing written. |
+| **SC-002** contacts CRUD survives a relaunch | ◐ **partial** — delete proven end to end through a fresh core. Add / edit / groups are **blocked on drawn UI that does not exist**, see below. |
+| **SC-003** currency survives, degrades honestly | ✅ |
+| **SC-004** the paved-road measurement | ✅ as amended — zero shared *logic*; 4 declaration lines |
+| **SC-005** galleries unchanged, fixtures additive | ✅ 0 deletions in 030 |
+| **SC-006** tests up, fmt and CI green | ✅ 93 → 125 |
+| **SC-007** zero `rust/`, zero corpus delta | ✅ |
+
+### Why SC-002 stops where it does — a design gap, not unfinished wiring
+
+Three surfaces cannot be wired without drawing something first, and inventing the
+drawing would be designing rather than porting:
+
+1. **The context menus are pictures.** `menu_card` renders `MenuItemModel`s that carry
+   an icon, a label and a `destructive` flag — and **no action**. Wiring 删除分组 or
+   重命名分组 means giving menu items a click surface, which changes a component every
+   gallery board renders.
+2. **There is no add/edit form sheet on desktop.** 018's boards never drew one; web's
+   024 hit the identical gap and recorded it. Composing one from existing primitives
+   is possible and is a *design* decision.
+3. **There is no favourite control at all** in the desktop mocks. `ToggleFavorite`
+   therefore has no affordance to hang off — the same shape as `session.rs`'s note
+   that `SwitchAccount` "is still absent: an event with no control is dead code."
+
+The core is complete for all three; the desktop is missing the picture. That is the
+honest boundary between spec 030 and whatever draws them.
+
+### Also not wired, and merely unfinished rather than blocked
+
+The wizard's **search field** (the pipeline behind it is proven end to end by the live
+add), the **RPC override field** (the refusal behind it is proven), and the
+**endpoints / providers** panels. Each needs a focused editable text field in gpui —
+`ui::text_field` exists and `settings/components.rs` grew an editable `url_field`
+variant, so this is bounded work, not a gap.
+
+### Carried debts → 031
+
+1. `contacts::resolve_identity`, `contacts::classify_recipient`,
+   `display_currency::resolve_rate` and `read_device_currency` all answer the core's
+   modelled *unknown* and carry `// live in 031` markers. `read_device_currency` also
+   needs a region→ISO-4217 table.
+2. `network_admin::invalidate_pools` is an acknowledged no-op until a pool exists;
+   `clear_bundler_cache` until 032.
+3. `contacts::load_send_history` is honestly empty until 032's transaction store.
+4. **`rpc.gnosischain.com` refuses this HTTP client with 403** while curl gets 200 —
+   measured through a bare `ureq::Agent` and through `proxy::agent`, against all three
+   Gnosis endpoints. `registry.rs:362` pins it **first** for onboarding's legacy-name
+   lookup, so every such lookup burns a request on an endpoint that will refuse it.
+   Not 030's to fix; 031 owns the pool and should not inherit the assumption.
+5. `VELA_SECTION` is new and undocumented outside this file.

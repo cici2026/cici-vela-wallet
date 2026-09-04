@@ -671,6 +671,7 @@ fn write_service_endpoints(endpoints: &NetServiceEndpoints) -> Result<(), storag
 mod tests {
     use super::*;
     use crate::core_host::CoreHost;
+    use vela_core::app::network_admin::NetOverrideField;
 
     fn network(chain_id: u32) -> NetCustomNetwork {
         NetCustomNetwork {
@@ -966,6 +967,70 @@ mod tests {
                 "the added network did not survive the relaunch"
             );
             println!("  survived the relaunch");
+        });
+    }
+
+    /// SC-001's other half: the invariant-④ refusal, against real endpoints.
+    ///
+    /// Point Ethereum's RPC field at a **Gnosis** endpoint. The endpoint is
+    /// perfectly healthy — that is the point. It answers `eth_chainId` with
+    /// 100, the card is Ethereum's, and the core refuses the write rather than
+    /// quietly routing chain-1 traffic to another chain's node.
+    ///
+    /// The refusal is the interesting direction. A shell that saved on blur and
+    /// let the core "fix it later" would have written an override that silently
+    /// breaks every balance read on that network, and nothing about the screen
+    /// would look wrong.
+    #[test]
+    #[ignore = "hits two real RPC endpoints"]
+    fn an_endpoint_serving_another_chain_is_refused() {
+        storage::tests::with_temp_state("net-mismatch", || {
+            const ETHEREUM: u32 = 1;
+            // Healthy, real, and serving the WRONG chain for this card.
+            const GNOSIS_RPC: &str = "https://gnosis-rpc.publicnode.com";
+
+            let mut host = CoreHost::<NetworkAdmin>::new();
+            drive_fully(&mut host, Event::Started);
+            drive_fully(&mut host, Event::OverrideExpanded { chain_id: ETHEREUM });
+            drive_fully(
+                &mut host,
+                Event::OverrideFieldEdited {
+                    chain_id: ETHEREUM,
+                    field: NetOverrideField::Rpc,
+                    value: GNOSIS_RPC.to_owned(),
+                },
+            );
+            drive_fully(&mut host, Event::OverrideBlurred { chain_id: ETHEREUM });
+
+            let view = host.view();
+            let row = view
+                .networks
+                .iter()
+                .find(|row| row.chain_id == ETHEREUM)
+                .unwrap_or_else(|| unreachable!("Ethereum vanished"));
+
+            let mismatch = row
+                .rpc_chain_mismatch
+                .clone()
+                .unwrap_or_else(|| unreachable!("the write was NOT refused: {row:?}"));
+            println!(
+                "  refused: card is chain {}, endpoint reported chain {}",
+                mismatch.expected_chain_id, mismatch.reported_chain_id
+            );
+            assert_eq!(mismatch.expected_chain_id, ETHEREUM);
+            assert_eq!(
+                mismatch.reported_chain_id, 100,
+                "the endpoint really does serve Gnosis"
+            );
+
+            // And nothing reached the disk. The pool still serves whatever it
+            // served before, which is the whole point of refusing.
+            let stored = decode_list::<StoredConfig, NetNetworkConfig>(storage::KEY_NETWORK_CONFIG);
+            assert!(
+                !stored.iter().any(|c| c.rpc_url == GNOSIS_RPC),
+                "a refused override was written anyway: {stored:?}"
+            );
+            println!("  nothing was written");
         });
     }
 
