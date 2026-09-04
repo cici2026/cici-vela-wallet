@@ -475,3 +475,64 @@ at the conversion, because the next person to read it will reasonably wonder.
 `payment_request`'s `base_url` points at `getvela.app`, not a desktop URL scheme. A
 pay link is for somebody else to open, and a scheme most people cannot follow is a
 link that does not work.
+
+---
+
+# 交接:下一个会话从这里开始
+
+工作区 `/Volumes/data/production/vela-wallet-native`,分支 `031-desktop-read-wiring`
+(叠在 `030-desktop-live-shell` 上,后者叠在 `029-native-repair` 上,均未合并)。
+
+## 先读这三样
+
+1. **本文件**(031 账本)与 `specs/030-desktop-live-shell/results.md`(含 SC 判定与
+   五条结转欠账)、`specs/029-native-repair/results.md`。
+2. `app-desktop/vela-wallet/src/resident.rs` 的模块注释 —— 解释了为什么常驻机器是
+   gpui entity 而不是 `Global`,以及 `Answer` 为什么把线程边界做成类型。
+3. `src/executor/pool.rs` 的模块注释 —— 为什么 pool 是独立线程而非 resident。
+
+## 立刻可跑的闸门
+
+```bash
+cd /Volumes/data/production/vela-wallet-native/app-desktop/vela-wallet
+cargo fmt --all --check && cargo test && scripts/sweep-gallery.sh
+# 真网测试必须【按模块】跑,原因见本文件 Phase 4:
+env -u all_proxy -u http_proxy -u https_proxy \
+  cargo test executor::pool -- --ignored --test-threads=1
+```
+
+基线:**156 passed · 0 failed · 14 ignored**,fmt clean,36 个画廊状态,1 个既有
+warning(`BLE_CHANNEL_SUPPORTED`)。
+
+## 031 还剩五件
+
+| # | 事 | 备注 |
+|---|---|---|
+| 1 | `token_trust` | 最后一台机器(1,937 行 core / 6 ops) |
+| 2 | ERC-20 余额 | `balances.rs` 目前**只读原生币**;需要 Multicall3 编码 + 代币列表 |
+| 3 | 价格 | `price_usd` 全是 `None`,所以余额英雄区还渲染不出法币数字 |
+| 4 | `resolve_identity` | 唯一还挂 `// live in 031` 的臂;与 `activity_feed` 的名字查询是同一个瀑布,**应一起做** |
+| 5 | 收款/资产屏绑定 + 收账 | SC 判定表 |
+
+## 三条容易踩的坑(我踩过)
+
+1. **`str.replace` 静默不匹配** —— `cargo fmt` 会把目标重排。改文件后必须**重新读回
+   并断言新文本在盘上**,只在写之前断言是不够的(我为此调试过一个陈旧文件两轮)。
+2. **真网测试不能同进程一起跑** —— pool 是进程级单例线程,`with_temp_state` 会在它
+   脚下换掉进程级的 `VELA_STATE_DIR`。两者各自都对,但不能共处一个进程。
+3. **别把链上数字钉进断言** —— 金标 Safe 余额在本次会话中间就变了(0.76997 →
+   0.75897)。断行为,不断金额。
+
+## 032 开工前必须先做的一件事
+
+**固定密钥集签名者要用 Rust 写进 vela-core(`dev-fixtures` feature),而且要在 032
+的**第一个** phase,不是花钱那一刀里。** 那三把是裸 P-256 私钥,而 desktop/Android/iOS
+每条签名路径都通向**导不进密钥的真实认证器**,所以金标密钥集目前在三端一条路都走不
+通。这是三刀花钱 spec 共同的前置条件;放到 032 中段才发现,验收标准就无法满足。
+vela-core 已有全部零件(`webauthn.rs` / `registry_proof.rs` / p256),约 150 行。
+
+## 033 开工前必须先测的一件事
+
+给 `vela-core-uniffi` 加 17 台机器的 `bridge_object!` 之前,**先测体积**。spec 019
+记录的闸门是 arm64-v8a **+785,864 剥离字节**;我的估算是再加 **+3~5 MB**,必须在
+033 的 plan 签字前用半小时的探针量出来(三刀分别量:3 / +A / +B / +C),而不是事后。
