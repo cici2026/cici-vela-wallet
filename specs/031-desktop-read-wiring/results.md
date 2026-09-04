@@ -424,3 +424,54 @@ together. A test now pins it: `1.5` renders as `+1.5`.
 Read through `settings::model::chain_tint` — the same table the network rows use, which
 is the same table the mocks use. A second colour map for the same chains is how one
 screen's Polygon stops matching another's.
+
+## Phase 7 — three more machines
+
+`receive_watch`, `payment_request` and `manage_tokens`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **156 passed · 0 failed · 14 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · warnings 1, pre-existing |
+| live ERC-20 read | ✅ `USDC / USD//C on xDai / 6 decimals` |
+
+### Six of seven machines are wired
+
+`rpc_pool`, `balance_dashboard`, `activity_feed`, `receive_watch`,
+`payment_request`, `manage_tokens`. Only `token_trust` remains.
+
+### `MulticallErc20Meta` is three calls, and the name is the core's word for a want
+
+The operation is named for what the web does — one `aggregate3` against
+Multicall3. This asks `symbol()`, `name()` and `decimals()` separately: three
+round trips, no Multicall3 encoding, the same answer. The name describes *what
+the core wants*, not how; folding them into one call later changes nothing it sees.
+
+**The failure rule is not deferred.** Metadata is all-or-nothing: a token with a
+symbol and no decimals renders an amount at the wrong magnitude, and once saved it
+stays wrong for as long as it is in the list. `None` unless all three answered.
+
+The ABI decoders are hand-written and tested against real return data, including the
+shapes that must produce `None` rather than a panic or a garbage symbol: a truncated
+word, a non-hex body, an offset with no length behind it. A mojibake symbol saved into
+somebody's token list is forever.
+
+### Two "failed" answers that could easily have been quiet successes
+
+- **Removing a token that is not there** answers `RemoveFailed`. The row is still on
+  the screen.
+- **Saving the same token twice replaces it** rather than appending. Adding the same
+  contract again is a person correcting themselves, not two tokens.
+
+### A float that is safe because of what it is *for*
+
+`receive_watch`'s `TokenSnapshot.balance` is an `f64`, which would be wrong for money.
+It is safe here because the number is only ever compared against an earlier snapshot
+of itself to answer "did it go up" — never rendered, never summed. The comment says so
+at the conversion, because the next person to read it will reasonably wonder.
+
+### The pay-link base is the web wallet, deliberately
+
+`payment_request`'s `base_url` points at `getvela.app`, not a desktop URL scheme. A
+pay link is for somebody else to open, and a scheme most people cannot follow is a
+link that does not work.

@@ -32,12 +32,15 @@ pub mod balance_dashboard;
 pub mod balances;
 pub mod contacts;
 pub mod display_currency;
+pub mod manage_tokens;
 pub mod network_admin;
 pub mod passkey;
+pub mod payment_request;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 pub mod pool;
 pub mod proxy;
+pub mod receive_watch;
 pub mod registry;
 pub mod storage;
 
