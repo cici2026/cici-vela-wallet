@@ -13,8 +13,8 @@ use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::wallet::WalletStrings;
 use crate::wallet::fixtures::{
-    ActivityKind, ActivityRowModel, AssetRowModel, BALANCE_MASK, BalanceModel, BalanceState,
-    ChainRowModel, Fiat, StatusKind,
+    ActivityKind, ActivityRowModel, AssetDetailModel, AssetRowModel, BALANCE_MASK, BalanceModel,
+    BalanceState, ChainRowModel, Fiat, StatusKind,
 };
 
 /// The balance hero.
@@ -359,6 +359,102 @@ mod tests {
         );
     }
 
+    /// The asset detail is about the holding that was clicked, and it says
+    /// "no price" rather than "$0.00" when nobody could price it.
+    #[test]
+    fn the_asset_detail_is_about_the_row_that_was_opened() {
+        crate::executor::storage::tests::with_temp_state("asset-detail", || {
+            use vela_core::app::activity_feed::{
+                ActivityFeed, Event as FeedEvent, FeedDirection, FeedItem,
+            };
+            use vela_core::app::balance_dashboard::BalanceToken;
+
+            let mut held = view(Some(100.0));
+            held.tokens = vec![
+                BalanceToken {
+                    chain_id: 100,
+                    symbol: "xDAI".to_owned(),
+                    name: "xDai".to_owned(),
+                    balance: "0.75897".to_owned(),
+                    decimals: 18,
+                    token_address: None,
+                    price_usd: Some(1.0),
+                    spam: false,
+                },
+                BalanceToken {
+                    chain_id: 143,
+                    symbol: "MON".to_owned(),
+                    name: "Monad".to_owned(),
+                    balance: "12".to_owned(),
+                    decimals: 18,
+                    token_address: Some("0xAbCdEf0000000000000000000000000000000009".to_owned()),
+                    price_usd: None,
+                    spam: false,
+                },
+            ];
+
+            let mut host = CoreHost::<ActivityFeed>::new();
+            let _ = host.dispatch(FeedEvent::AccountSwitched {
+                address: "0xme".to_owned(),
+            });
+            let feed = FeedView {
+                rows: vec![FeedRow::Item {
+                    item: FeedItem {
+                        id: "a".to_owned(),
+                        direction: FeedDirection::In,
+                        counterparty: None,
+                        alias: None,
+                        value: Some("1.5".to_owned()),
+                        symbol: "xDAI".to_owned(),
+                        decimals: Some(18),
+                        usd_value: 1.5,
+                        chain_id: 100,
+                        timestamp: 1_788_500_000.0,
+                        day_start_ms: 0.0,
+                        tx_hash: None,
+                        batch: None,
+                    },
+                }],
+                ..host.view()
+            };
+            let s = strings();
+
+            // The SECOND row, because that is the one clicked.
+            let mon = asset_detail(&held, &feed, 1, &s, "en-US")
+                .unwrap_or_else(|| unreachable!("row 1 exists"));
+            assert_eq!(mon.ticker, "MON");
+            assert_eq!(mon.amount, "12 MON");
+            // Unpriced: the chain, never "$0.00 · Monad".
+            assert!(mon.sub.contains("Monad"));
+            assert!(!mon.sub.contains('$'), "an unpriced holding is not $0.00");
+            // An ERC-20 names its contract; the price row is absent because
+            // there is no price to state.
+            assert!(
+                mon.facts
+                    .iter()
+                    .any(|(label, _)| *label == s.label_contract)
+            );
+            assert!(!mon.facts.iter().any(|(label, _)| *label == s.label_price));
+            // xDAI's transaction is not MON's.
+            assert!(mon.activity.is_empty());
+
+            let xdai = asset_detail(&held, &feed, 0, &s, "en-US")
+                .unwrap_or_else(|| unreachable!("row 0 exists"));
+            assert_eq!(xdai.ticker, "xDAI");
+            assert!(xdai.sub.starts_with("$0.76"));
+            // A native coin has no contract, and says so in words.
+            assert!(
+                xdai.facts
+                    .iter()
+                    .any(|(label, value)| *label == s.label_contract && *value == s.native_token)
+            );
+            assert_eq!(xdai.activity.len(), 1, "its own transaction");
+
+            // The list moved underneath: no panel rather than the wrong one.
+            assert!(asset_detail(&held, &feed, 9, &s, "en-US").is_none());
+        });
+    }
+
     /// The home strip lists the core's holdings, in the core's order, and says
     /// nothing about a chain nobody holds anything on.
     #[test]
@@ -626,6 +722,106 @@ pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
         });
     }
     rows
+}
+
+/// The ids of the feed ITEMS, in the order the home preview draws them.
+///
+/// The preview drops the core's day headers, so this is the header-free walk;
+/// `flows::live::history_ids` is the same list for the full panel, which keeps
+/// them. Both exist because the two surfaces draw different shapes of the same
+/// feed, and a row must open its own transaction on either.
+#[must_use]
+pub fn history_item_ids(view: &FeedView) -> Vec<String> {
+    view.rows
+        .iter()
+        .filter_map(|row| match row {
+            FeedRow::Item { item } => Some(item.id.clone()),
+            FeedRow::Header { .. } => None,
+        })
+        .collect()
+}
+
+/// One holding, in detail — D3.
+///
+/// `None` when the index names nothing, which happens the moment a refresh
+/// re-orders the holdings under an open panel. Drawing the row that took its
+/// place would silently swap which asset somebody is looking at, and the next
+/// thing they do on that panel is send it.
+#[must_use]
+pub fn asset_detail(
+    view: &BalanceView,
+    feed: &FeedView,
+    index: usize,
+    s: &WalletStrings,
+    locale: &str,
+) -> Option<AssetDetailModel> {
+    let token = view.tokens.get(index)?;
+    let amount = token.balance.parse::<f64>().unwrap_or(0.0);
+    let chain = crate::executor::custom_tokens::network_name(token.chain_id);
+    let figure = |value: f64| format_fiat(value, "USD", "$", locale, FiatOptions::default());
+
+    let mut facts = vec![(s.label_name.clone(), SharedString::from(token.name.clone()))];
+    if let Some(price) = token.price_usd {
+        facts.push((
+            s.label_price.clone(),
+            SharedString::from(crate::wallet::fill(
+                &crate::wallet::fill(&s.price_value, "symbol", &token.symbol),
+                "value",
+                &figure(price),
+            )),
+        ));
+    }
+    facts.push((
+        s.label_contract.clone(),
+        match token.token_address.as_ref() {
+            Some(address) => SharedString::from(shorten_address(address)),
+            // The chain's own coin has no contract, and the mock says so in
+            // words rather than leaving the row blank.
+            None => s.native_token.clone(),
+        },
+    ));
+    facts.push((
+        s.label_decimals.clone(),
+        SharedString::from(token.decimals.to_string()),
+    ));
+
+    Some(AssetDetailModel {
+        ticker: SharedString::from(token.symbol.clone()),
+        badge: badge(token.chain_id),
+        amount: if view.hidden {
+            SharedString::from(crate::wallet::fixtures::MASK)
+        } else {
+            SharedString::from(format!(
+                "{} {}",
+                format_token_amount(amount, NumberPreset::CommaDot, false),
+                token.symbol
+            ))
+        },
+        sub: if view.hidden {
+            SharedString::from(chain.clone())
+        } else {
+            match token.price_usd {
+                Some(price) => SharedString::from(format!("{} · {chain}", figure(amount * price))),
+                // Unpriced: the chain alone, never "$0.00 · Gnosis".
+                None => SharedString::from(format!("{} · {chain}", s.no_price)),
+            }
+        },
+        facts,
+        // This asset's own transactions, from the same feed the home draws.
+        // Matched on symbol AND chain: two chains' USDC are different money.
+        activity: feed
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                FeedRow::Item { item }
+                    if item.symbol == token.symbol && item.chain_id == token.chain_id =>
+                {
+                    Some(activity_row(feed, item, s, view.hidden))
+                }
+                _ => None,
+            })
+            .collect(),
+    })
 }
 
 /// The chain tint for an activity badge.

@@ -289,6 +289,13 @@ pub struct WalletPage {
     /// lead somewhere.
     flows: Vec<FlowPanel>,
     flow_strings: FlowStrings,
+    /// D3, live: WHICH holding the asset strip opened, as an index into the
+    /// core's sorted `tokens`.
+    ///
+    /// `None` for the mocks. An index rather than a key because the core's
+    /// order IS the identity here — the panel's own model re-reads it and
+    /// answers `None` when the list moved underneath.
+    asset_detail: Option<usize>,
     /// DA2L, live: WHICH transaction the history stepped into.
     ///
     /// `None` while the mocks draw, and after a record is deleted — the panel
@@ -470,6 +477,7 @@ impl WalletPage {
             flow_strings: FlowStrings::resolve(&loc),
             receive_chain: 100,
             tx_detail: None,
+            asset_detail: None,
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -802,6 +810,13 @@ impl WalletPage {
                 })),
             );
 
+        // The ids behind the preview rows, in the same order they draw. The
+        // home drops the core's day headers, so row N here is feed item N.
+        let home_tx_ids: Vec<String> = if self.identity.is_some() {
+            wallet_live::history_item_ids(&resident::resident::<ActivityFeed>(cx).read(cx).view())
+        } else {
+            Vec::new()
+        };
         let mut activity_col = div().flex().flex_col();
         for (i, row) in activity.iter().enumerate() {
             activity_col = activity_col.child(
@@ -809,10 +824,14 @@ impl WalletPage {
                     .id(ElementId::from(("activity", i)))
                     .cursor_pointer()
                     .child(activity_row(theme, &mut self.icons, row))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.enter_flow(FlowEntry::TxDetail);
-                        cx.notify();
-                    })),
+                    .on_click({
+                        let id = home_tx_ids.get(i).cloned();
+                        cx.listener(move |this, _, _, cx| {
+                            this.tx_detail = id.clone();
+                            this.enter_flow(FlowEntry::TxDetail);
+                            cx.notify();
+                        })
+                    }),
             );
         }
 
@@ -820,7 +839,10 @@ impl WalletPage {
         for (i, row) in assets.iter().enumerate() {
             assets_col = assets_col.child(
                 asset_row(ElementId::from(("asset", i)), theme, &mut self.icons, row).on_click(
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(move |this, _, _, cx| {
+                        // WHICH holding, so the panel is about the row that was
+                        // clicked rather than about the first one.
+                        this.asset_detail = this.identity.is_some().then_some(i);
                         this.panel = PanelId::AssetDetail;
                         cx.notify();
                     }),
@@ -1133,6 +1155,31 @@ impl WalletPage {
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
         wallet_live::chain_rows(&view, &self.strings)
+    }
+
+    /// D3's model: the selected holding, or the mock's BNB.
+    fn asset_detail_model(&mut self, cx: &mut Context<Self>) -> fixtures::AssetDetailModel {
+        let Some(index) = self.asset_detail else {
+            return fixtures::asset_detail_default(&self.strings);
+        };
+        if self.identity.is_none() {
+            return fixtures::asset_detail_default(&self.strings);
+        }
+        let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+        let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+        wallet_live::asset_detail(&view, &feed, index, &self.strings, &self.locale)
+            // The holding is gone — a refresh re-ordered the list under an open
+            // panel. The mock is NOT a substitute: it would silently swap which
+            // asset somebody is looking at, and the next thing they do on this
+            // panel is send it.
+            .unwrap_or_else(|| fixtures::AssetDetailModel {
+                ticker: SharedString::from(""),
+                badge: gpui::rgb(0x8A_8F_98).into(),
+                amount: SharedString::from(""),
+                sub: SharedString::from(""),
+                facts: Vec::new(),
+                activity: Vec::new(),
+            })
     }
 
     /// The balance hero: the core's figure for a real session, the mock's
@@ -1962,14 +2009,14 @@ impl WalletPage {
             .child(warning)
     }
 
-    fn asset_detail_body(&mut self, theme: &Theme) -> Div {
+    fn asset_detail_body(&mut self, model: &fixtures::AssetDetailModel, theme: &Theme) -> Div {
         let s = &self.strings;
 
         let head = div()
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(token_icon(theme, "BNB", fixtures::chain_bnb()))
+            .child(token_icon(theme, model.ticker.as_ref(), model.badge))
             .child(
                 div()
                     .flex()
@@ -1980,13 +2027,13 @@ impl WalletPage {
                             .text_size(theme::text_panel_title())
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(theme.fg_base)
-                            .child("0.8533 BNB"),
+                            .child(model.amount.clone()),
                     )
                     .child(
                         div()
                             .text_size(theme::text_row_sub())
                             .text_color(theme.fg_muted)
-                            .child("$496.46 · BNB Chain"),
+                            .child(model.sub.clone()),
                     ),
             );
 
@@ -2009,7 +2056,7 @@ impl WalletPage {
             ));
 
         let mut facts = div().flex().flex_col();
-        for (i, (label, value)) in fixtures::bnb_facts(s).into_iter().enumerate() {
+        for (i, (label, value)) in model.facts.iter().cloned().enumerate() {
             let mut row = div()
                 .flex()
                 .items_center()
@@ -2054,8 +2101,8 @@ impl WalletPage {
                 .text_color(theme.fg_base)
                 .child(s.label_transactions.clone()),
         );
-        for row in fixtures::bnb_activity(s) {
-            tx = tx.child(activity_row(theme, &mut self.icons, &row));
+        for row in &model.activity {
+            tx = tx.child(activity_row(theme, &mut self.icons, row));
         }
 
         div()
@@ -4222,8 +4269,10 @@ impl WalletPage {
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
             PanelId::AssetDetail => {
-                let body = self.asset_detail_body(theme);
-                columns.child(self.panel_scaffold(theme, "BNB".into(), body, cx))
+                let model = self.asset_detail_model(cx);
+                let title = model.ticker.clone();
+                let body = self.asset_detail_body(&model, theme);
+                columns.child(self.panel_scaffold(theme, title, body, cx))
             }
             PanelId::ContactDetail => {
                 let body = self.contact_detail_body(theme, cx);

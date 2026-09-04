@@ -376,6 +376,36 @@ pub fn bnb_activity(s: &WalletStrings) -> Vec<ActivityRowModel> {
     ]
 }
 
+/// D3, as one model.
+///
+/// Added in 031 so the live panel and the mock render through one body. The
+/// fixture constructor below reproduces the mock's content exactly, so the
+/// gallery is unchanged.
+#[derive(Clone)]
+pub struct AssetDetailModel {
+    pub ticker: SharedString,
+    pub badge: Hsla,
+    /// `0.8533 BNB`.
+    pub amount: SharedString,
+    /// `$496.46 · BNB Chain`.
+    pub sub: SharedString,
+    pub facts: Vec<(SharedString, SharedString)>,
+    pub activity: Vec<ActivityRowModel>,
+}
+
+/// D3 as the mocks draw it.
+#[must_use]
+pub fn asset_detail_default(s: &WalletStrings) -> AssetDetailModel {
+    AssetDetailModel {
+        ticker: "BNB".into(),
+        badge: chain_bnb(),
+        amount: "0.8533 BNB".into(),
+        sub: "$496.46 · BNB Chain".into(),
+        facts: bnb_facts(s),
+        activity: bnb_activity(s),
+    }
+}
+
 /// D3 fact rows.
 pub fn bnb_facts(s: &WalletStrings) -> Vec<(SharedString, SharedString)> {
     vec![
