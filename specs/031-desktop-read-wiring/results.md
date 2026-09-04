@@ -204,3 +204,53 @@ cause was the test seeding a fixed past timestamp while the operation reads the
 **real** clock — so both rows were legitimately expired and the executor was right.
 Fixed by seeding from the same clock. Worth recording because the failure looked
 exactly like a broken TTL.
+
+## Phase 3 — the hero shows the person's own money
+
+`wallet/live.rs` and the hero bound to `BalanceDashboard`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **138 passed · 0 failed · 10 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced) | ✅ 1, pre-existing |
+| `scripts/sweep-gallery.sh` | ✅ every state rendered |
+
+### No fallback to the fixture, and that is the point
+
+`balance_model` returns the mock only when there is **no session**. For a real one it
+returns whatever the core says — including a skeleton while the count is in flight.
+Falling back to `$1,383.28` there would be the app showing somebody a stranger's money
+and calling it theirs.
+
+The three states the tests pin are the ones the core went to trouble over:
+- **unknown → skeleton, never `$0`** (invariant ②). A wallet that shows zero while it
+  is still counting has told the person their money is gone. A test asserts the
+  rendered integer contains no digit at all.
+- **a real zero is not unknown.** Different state, drawn differently, on purpose.
+- **hidden withholds by construction** (invariant ⑧). The core already nulls the
+  total; the test asserts the shell does not reintroduce a figure.
+
+### What a 50-second run of the real app produced
+
+```
+[vela-wallet] core: balance_dashboard booting
+keys written: vela.accounts, vela.activeAccountIndex, vela.rpc.banned
+balanceCache: ABSENT
+BANNED: https://rpc.gnosischain.com  (temporary)
+```
+
+Both of those lines are the system working, and neither is obvious:
+
+1. **The pool banned `rpc.gnosischain.com` by itself.** That is the endpoint 030
+   phase 2 found refusing this HTTP client with 403 while curl gets 200 — recorded
+   then as a debt with no fix. It now needs none: the pool met it, classified it,
+   banned it, routed around it, and wrote the ban down so the next launch does not
+   spend a request rediscovering it. The debt closed itself the moment the machinery
+   that owns the decision was wired.
+2. **No balance cache was written, and that is correct.** Tempo was unreachable, so
+   the result was partial, and the core's complete-results-only write gate (invariant
+   ⑥) refused to ask for the write. A cached total assembled from eleven of twelve
+   chains is a number that was never true. Distinguishing "the core refused" from
+   "the fetch had not finished" needed a 50-second run rather than a 25-second one —
+   the 25s run looked identical and would have supported the wrong conclusion.

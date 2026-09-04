@@ -51,9 +51,11 @@ use crate::theme::{
     SETTINGS_NAV_W, SETTINGS_PANEL_PAD_X, SETTINGS_PANEL_W, SIDEBAR_PAD, SIDEBAR_TOP, SIDEBAR_W,
     THIRD_PANEL_W, Theme, ThemeMode, WALLET_PAD_TOP, WALLET_PAD_X,
 };
+use crate::wallet::live as wallet_live;
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
+use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::network_admin::NetworkAdmin;
@@ -729,7 +731,7 @@ impl WalletPage {
         let s_all = self.strings.action_all.clone();
         let s_add = self.strings.action_add.clone();
 
-        let balance = fixtures::balance_default(&self.strings);
+        let balance = self.balance_model(cx);
         let activity = fixtures::activity_default(&self.strings);
         let assets = fixtures::assets_default(&self.strings);
 
@@ -1069,6 +1071,21 @@ impl WalletPage {
             .flat_map(|(_, rows)| rows)
             .nth(self.contact)
             .map(|row| row.address_full)
+    }
+
+    /// The balance hero: the core's figure for a real session, the mock's
+    /// otherwise.
+    ///
+    /// Note what is NOT here — a fallback to the fixture when the core has not
+    /// answered yet. `wallet::live::balance` renders a skeleton for `None`, and
+    /// substituting `$1,383.28` while a real wallet is still counting would be
+    /// the app showing somebody a stranger's money and calling it theirs.
+    fn balance_model(&mut self, cx: &mut Context<Self>) -> fixtures::BalanceModel {
+        if self.identity.is_none() {
+            return fixtures::balance_default(&self.strings);
+        }
+        let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+        wallet_live::balance(&view, &self.strings, &self.locale)
     }
 
     /// The roster: the core's book for a real session, the mocks' otherwise.
