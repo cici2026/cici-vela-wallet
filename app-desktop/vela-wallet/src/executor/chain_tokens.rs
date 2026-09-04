@@ -215,13 +215,22 @@ fn parse(chain_id: u32, raw: &Value) -> ChainTokenData {
     }
 }
 
-// `pickQuoteToken` is deliberately absent. In the web it does one job —
-// ordering the CUSTOM-token price attempts so USDC's deeper pool is tried
-// first — and this cut does not price custom tokens (see `balances.rs`'s
-// header: the rule has no `vela-core` home and FR-009 forbids adding one). The
-// native path quotes every stable and lets the core pick the winner, so an
-// ordering preference would change nothing. It comes back with the rule it
-// serves.
+/// The stablecoin a custom token's price should be quoted against first: native
+/// USDC, then any USDC, then USDT, then whatever the chain has.
+///
+/// It only ORDERS the attempts, and it matters because
+/// `first_grouped_quote_price` takes the FIRST group that answers rather than
+/// the best. The native-coin path does not use it: there the core takes the
+/// maximum across every stable, so order changes nothing.
+#[must_use]
+pub fn pick_quote_token(stables: &[StableToken]) -> Option<&StableToken> {
+    stables
+        .iter()
+        .find(|s| s.symbol == "USDC" && s.kind == "native")
+        .or_else(|| stables.iter().find(|s| s.symbol == "USDC"))
+        .or_else(|| stables.iter().find(|s| s.symbol == "USDT"))
+        .or_else(|| stables.first())
+}
 
 #[cfg(test)]
 mod tests {
@@ -262,6 +271,48 @@ mod tests {
         assert_eq!(empty.native_decimals, 18);
         assert!(empty.stables.is_empty());
         assert_eq!(empty.dex, None);
+    }
+
+    fn stable(symbol: &str, kind: &str) -> StableToken {
+        StableToken {
+            symbol: symbol.to_owned(),
+            kind: kind.to_owned(),
+            contract: format!("0x{symbol}"),
+        }
+    }
+
+    /// The quote-token preference, in its stated order.
+    #[test]
+    fn the_quote_token_prefers_native_usdc_then_any_usdc_then_usdt() {
+        let all = vec![
+            stable("USDT", "native"),
+            stable("USDC", "bridge"),
+            stable("USDC", "native"),
+        ];
+        let picked = pick_quote_token(&all).unwrap_or_else(|| unreachable!("a stable"));
+        assert_eq!(
+            (picked.symbol.as_str(), picked.kind.as_str()),
+            ("USDC", "native")
+        );
+
+        let bridged = vec![stable("USDT", "native"), stable("USDC", "bridge")];
+        assert_eq!(
+            pick_quote_token(&bridged).map(|s| s.symbol.as_str()),
+            Some("USDC")
+        );
+
+        let no_usdc = vec![stable("DAI", "native"), stable("USDT", "native")];
+        assert_eq!(
+            pick_quote_token(&no_usdc).map(|s| s.symbol.as_str()),
+            Some("USDT")
+        );
+
+        let neither = vec![stable("DAI", "native")];
+        assert_eq!(
+            pick_quote_token(&neither).map(|s| s.symbol.as_str()),
+            Some("DAI")
+        );
+        assert!(pick_quote_token(&[]).is_none());
     }
 
     /// An out-of-range `decimals` is the index being wrong about a scale, and a

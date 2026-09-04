@@ -23,16 +23,18 @@
 //! Folding them together makes a chain with no Multicall3 report as unreachable,
 //! which is a true-sounding lie about somebody's money.
 //!
-//! ## Custom ERC-20s are read but not priced, on purpose
+//! ## Every price comes from a core rule
 //!
-//! The web prices a custom token by DEX quote through `firstGroupedQuotePrice`
-//! — a rule that has **no `vela-core` home**, and FR-009 forbids this cut from
-//! adding one to a machine file. Writing it here instead would put a money rule
-//! in the shell, which is FR-001. So a custom token comes back with its real
-//! balance and `price_usd: None`, and the core's `Unpriced` notice says so out
-//! loud. The native coin's rules DO live in the core (`best_native_dex_price`,
-//! `choose_native_price`), which is why the native price is here and this one
-//! is not.
+//! The native coin: `best_native_dex_price` picks the deepest pool across the
+//! stables, and `choose_native_price` runs the DEX → local-Chainlink →
+//! mainnet-Chainlink ladder with its sanity band. A custom ERC-20:
+//! `first_grouped_quote_price` takes the first pool that answers, in the order
+//! the groups were built — the preferred stablecoin first, then the rest.
+//!
+//! The one price this file decides is a stablecoin's $1.00, and that is a
+//! MEMBERSHIP verdict rather than a missing factor: the token came from this
+//! chain's curated stablecoin list, and ≈$1 is what being on that list means.
+//! The web owns it the same way and says so at length.
 //!
 //! ## Why parallel, and why not streaming
 //!
@@ -49,6 +51,7 @@ use serde_json::{Value, json};
 
 use vela_core::app::balance_dashboard::{
     BalanceToken, NativeQuoteGroup, best_native_dex_price, choose_native_price,
+    first_grouped_quote_price,
 };
 use vela_core::app::fee_policy::TEMPO_CHAIN_IDS;
 use vela_core::app::network_admin::BUILTIN_CHAINS;
@@ -235,6 +238,95 @@ fn one_whole(decimals: u32) -> Option<u128> {
     (decimals <= 38).then(|| 10u128.pow(decimals))
 }
 
+/// The order a custom token's stablecoin quotes are tried in: the preferred
+/// quote token first, then the rest in the chain's own order.
+///
+/// `first_grouped_quote_price` takes the FIRST group that answers, so this
+/// order is the preference — native USDC's deeper pool wins a tie, and a
+/// chain-specific bridge stable still answers when it does not.
+fn stable_preference(stables: &[StableToken]) -> Vec<usize> {
+    let preferred = chain_tokens::pick_quote_token(stables)
+        .and_then(|wanted| stables.iter().position(|s| std::ptr::eq(s, wanted)));
+    let mut order: Vec<usize> = (0..stables.len()).collect();
+    if let Some(index) = preferred {
+        if index > 0 {
+            order.remove(index);
+            order.insert(0, index);
+        }
+    }
+    order
+}
+
+/// One custom token's price, by the core's rules.
+///
+/// **Path A** quotes the token against each stablecoin, each group scaled by
+/// its OWN quote token's decimals — mixing a 6-decimal USDC group with an
+/// 18-decimal DAI group under one scale mis-prices by 10^12, which is the bug
+/// `first_grouped_quote_price` was extracted to prevent.
+///
+/// **Path B** quotes it against the wrapped native coin and multiplies by that
+/// coin's USD price. One quote token, so one scale — and the wrapped coin
+/// mirrors the coin's decimals by construction.
+///
+/// `None` when neither answers, never a substituted zero: the core has an
+/// `Unpriced` notice for exactly this, and a token shown at $0.00 reads as
+/// worthless rather than unknown.
+fn custom_price(
+    slot: &Slot,
+    slots: &[Slot],
+    quotes: &[(usize, Vec<(Vec<usize>, Option<usize>)>, Vec<usize>)],
+    results: &[McResult],
+    protocol: Option<&str>,
+    native_price: Option<f64>,
+    native_decimals: u32,
+) -> Option<f64> {
+    let position = slots
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, slot))?;
+    let (_, direct, via_native) = quotes.iter().find(|(index, _, _)| *index == position)?;
+
+    let answered = |at: usize| results.get(at).filter(|result| result.success);
+    let decode = |result: &McResult| match protocol {
+        Some("solidly") => abi::dec_amounts_out(&result.data),
+        _ => abi::dec_u256(&result.data),
+    };
+
+    let groups: Vec<NativeQuoteGroup> = direct
+        .iter()
+        .map(|(indices, decimals_at)| NativeQuoteGroup {
+            amounts_out: indices
+                .iter()
+                .filter_map(|at| answered(*at).and_then(decode))
+                .collect(),
+            quote_decimals: decimals_at
+                .and_then(|at| answered(at))
+                .and_then(|result| abi::dec_u8(&result.data))
+                .map(u32::from),
+        })
+        .collect();
+    if let Some(price) = first_grouped_quote_price(&groups) {
+        return Some(price);
+    }
+
+    // Path B needs the coin's own price to convert with; without one, a
+    // token-per-coin ratio is not a dollar figure.
+    let native_price = native_price?;
+    let scale = 10f64.powi(i32::try_from(native_decimals).unwrap_or(i32::MAX));
+    for at in via_native {
+        let Some(amount) = answered(*at).and_then(decode) else {
+            continue;
+        };
+        let Ok(value) = amount.trim().parse::<f64>() else {
+            continue;
+        };
+        // A zero-output quote is a dead pool, not a free token.
+        if value > 0.0 && value.is_finite() {
+            return Some(value / scale * native_price);
+        }
+    }
+    None
+}
+
 /// One chain's tokens, priced as far as this cut can price them.
 fn chain_tokens_for(
     chain_id: u32,
@@ -366,6 +458,50 @@ fn chain_tokens_for(
         }
     }
 
+    // A custom token's quotes: the token against each stablecoin (path A), and
+    // against the wrapped native coin (path B, multiplied by the coin's own
+    // price). Ordered preferred-stable first, because
+    // `first_grouped_quote_price` takes the FIRST pool that answers and the
+    // order is the preference.
+    let mut custom_quotes: Vec<(usize, Vec<(Vec<usize>, Option<usize>)>, Vec<usize>)> = Vec::new();
+    if let Some(dex) = dex.as_ref() {
+        let stable_order = stable_preference(&stables);
+        for index in 0..slots.len() {
+            if slots[index].category != Category::Custom {
+                continue;
+            }
+            let (Some(contract), Some(amount_in)) = (
+                slots[index].contract.clone(),
+                slots[index].known_decimals.and_then(one_whole),
+            ) else {
+                continue;
+            };
+            let mut direct = Vec::new();
+            for stable_index in &stable_order {
+                let Some(stable) = stables.get(*stable_index) else {
+                    continue;
+                };
+                let indices =
+                    push_quote_calls(&mut calls, dex, &contract, &stable.contract, amount_in);
+                if !indices.is_empty() {
+                    direct.push((
+                        indices,
+                        slots
+                            .get(native_slots + *stable_index)
+                            .and_then(|slot| slot.decimals_at),
+                    ));
+                }
+            }
+            let via_native = match wrapped.as_ref() {
+                Some(wrapped) => push_quote_calls(&mut calls, dex, &contract, wrapped, amount_in),
+                None => Vec::new(),
+            };
+            if !direct.is_empty() || !via_native.is_empty() {
+                custom_quotes.push((index, direct, via_native));
+            }
+        }
+    }
+
     let local_feed_at = NATIVE_CHAINLINK_FEEDS
         .iter()
         .find(|(id, _)| *id == chain_id)
@@ -444,9 +580,15 @@ fn chain_tokens_for(
             // (`wallet-api.ts:498-527`), including why a de-peg gate was
             // considered and rejected.
             Category::Stable => Some(1.0),
-            // See the module header: the rule that would price this has no core
-            // home, and this cut may not give it one.
-            Category::Custom => None,
+            Category::Custom => custom_price(
+                slot,
+                &slots,
+                &custom_quotes,
+                &results,
+                dex.as_ref().map(|d| d.protocol),
+                native_price,
+                native_decimals,
+            ),
         };
         tokens.push(BalanceToken {
             chain_id,
@@ -675,6 +817,82 @@ mod tests {
         assert!(push_quote_calls(&mut calls, &mismatched, "0xin", "0xout", 1).is_empty());
     }
 
+    /// The preference order a custom token's quotes are tried in.
+    #[test]
+    fn the_preferred_stablecoin_is_quoted_first() {
+        let stable = |symbol: &str, kind: &str| StableToken {
+            symbol: symbol.to_owned(),
+            kind: kind.to_owned(),
+            contract: format!("0x{symbol}"),
+        };
+        // USDC.e first in chain order, native USDC second — the preference must
+        // move the native one to the front and leave the rest alone.
+        let stables = vec![
+            stable("USDT", "bridge"),
+            stable("USDC", "bridge"),
+            stable("USDC", "native"),
+            stable("DAI", "native"),
+        ];
+        assert_eq!(stable_preference(&stables), vec![2, 0, 1, 3]);
+
+        // Already first: nothing moves.
+        let leading = vec![stable("USDC", "native"), stable("DAI", "native")];
+        assert_eq!(stable_preference(&leading), vec![0, 1]);
+
+        assert!(stable_preference(&[]).is_empty());
+    }
+
+    /// The custom-token price rule, as the core applies it.
+    ///
+    /// Each group is scaled by its OWN quote token's decimals. A 6-decimal USDC
+    /// group and an 18-decimal DAI group under one shared scale mis-price by
+    /// 10^12, which is the bug the rule was extracted to prevent.
+    #[test]
+    fn a_custom_tokens_groups_are_each_scaled_by_their_own_quote_token() {
+        use vela_core::app::balance_dashboard::first_grouped_quote_price;
+
+        // No USDC pool, a live DAI pool: 1 token → 2.5 DAI, 18 decimals.
+        let groups = vec![
+            NativeQuoteGroup {
+                amounts_out: Vec::new(),
+                quote_decimals: Some(6),
+            },
+            NativeQuoteGroup {
+                amounts_out: vec!["2500000000000000000".to_owned()],
+                quote_decimals: Some(18),
+            },
+        ];
+        let price = first_grouped_quote_price(&groups)
+            .unwrap_or_else(|| unreachable!("the DAI pool answered"));
+        assert!((price - 2.5).abs() < 1e-9, "{price}");
+
+        // The first group that ANSWERS wins, not the largest.
+        let ordered = vec![
+            NativeQuoteGroup {
+                amounts_out: vec!["1000000".to_owned()],
+                quote_decimals: Some(6),
+            },
+            NativeQuoteGroup {
+                amounts_out: vec!["9000000".to_owned()],
+                quote_decimals: Some(6),
+            },
+        ];
+        let price = first_grouped_quote_price(&ordered)
+            .unwrap_or_else(|| unreachable!("the first pool answered"));
+        assert!(
+            (price - 1.0).abs() < 1e-9,
+            "the preferred pool must win: {price}"
+        );
+
+        // A zero-output quote is a dead pool, not a free token.
+        let dead = vec![NativeQuoteGroup {
+            amounts_out: vec!["0".to_owned()],
+            quote_decimals: Some(6),
+        }];
+        assert_eq!(first_grouped_quote_price(&dead), None);
+        assert_eq!(first_grouped_quote_price(&[]), None);
+    }
+
     /// The golden Safe, across every chain, through the pool.
     ///
     /// The assertion that matters is not the total: it is that Gnosis reports a
@@ -761,6 +979,62 @@ mod tests {
                     "chain {chain_id} is both answered and unreachable"
                 );
             }
+        });
+    }
+
+    /// A custom ERC-20, priced by a real DEX quote.
+    ///
+    /// GNO on Gnosis: a token the person added by hand, which the balance fetch
+    /// must both read and price. Before this the row came back with a real
+    /// amount and no value at all.
+    #[test]
+    #[ignore = "quotes a real DEX on Gnosis"]
+    fn a_custom_token_is_priced_by_the_chains_own_pools() {
+        crate::executor::storage::tests::with_temp_state("balances-custom-price", || {
+            chain_tokens::invalidate();
+            chainlink::invalidate();
+            const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            const GNO: &str = "0x9C58BAcC331c9aa871AFD802DB6379a98e80CEdb";
+
+            let saved = custom_tokens::save(custom_tokens::StoredToken {
+                id: format!("100_{GNO}"),
+                chain_id: 100,
+                contract_address: GNO.to_owned(),
+                symbol: "GNO".to_owned(),
+                name: "Gnosis Token".to_owned(),
+                decimals: 18,
+                network_name: "Gnosis".to_owned(),
+            });
+            assert!(saved, "could not seed the custom token");
+
+            let raw =
+                native_raw(100, GOLDEN).unwrap_or_else(|| unreachable!("Gnosis did not answer"));
+            let prices = chainlink::prices();
+            let tokens = chain_tokens_for(100, "xDAI", GOLDEN, &raw, &prices);
+
+            let gno = tokens
+                .iter()
+                .find(|token| token.symbol == "GNO")
+                .unwrap_or_else(|| unreachable!("the custom token was not read"));
+            println!(
+                "    GNO: {} @ {}",
+                gno.balance,
+                gno.price_usd
+                    .map_or_else(|| "unpriced".to_owned(), |p| format!("${p:.2}"))
+            );
+            assert_eq!(gno.decimals, 18);
+            assert_eq!(gno.token_address.as_deref(), Some(GNO));
+
+            // A band, not a figure: GNO's price moves, and a test that pins it
+            // goes red when the market does. What must hold is that a price
+            // arrived and is not a decode artefact.
+            let price = gno
+                .price_usd
+                .unwrap_or_else(|| unreachable!("GNO came back unpriced"));
+            assert!(
+                price > 1.0 && price < 10_000.0,
+                "implausible GNO price {price}"
+            );
         });
     }
 
