@@ -39,6 +39,8 @@ mod sel {
     pub const AGGREGATE3: &str = "82ad56cb"; // aggregate3((address,bool,bytes)[])
     pub const BALANCE_OF: &str = "70a08231"; // balanceOf(address)
     pub const DECIMALS: &str = "313ce567"; // decimals()
+    pub const SYMBOL: &str = "95d89b41"; // symbol()
+    pub const NAME: &str = "06fdde03"; // name()
     pub const QUOTE_V3: &str = "c6a5026a"; // quoteExactInputSingle((address,address,uint256,uint24,uint160))
     pub const GET_AMOUNTS_OUT: &str = "5509a1ac"; // getAmountsOut(uint256,(address,address,bool,address)[])
     pub const LATEST_ROUND_DATA: &str = "feaf968c"; // latestRoundData()
@@ -282,6 +284,18 @@ pub fn enc_decimals() -> String {
     format!("0x{}", sel::DECIMALS)
 }
 
+/// `symbol()`.
+#[must_use]
+pub fn enc_symbol() -> String {
+    format!("0x{}", sel::SYMBOL)
+}
+
+/// `name()`.
+#[must_use]
+pub fn enc_name() -> String {
+    format!("0x{}", sel::NAME)
+}
+
 /// Chainlink `latestRoundData()`.
 #[must_use]
 pub fn enc_latest_round() -> String {
@@ -398,6 +412,54 @@ pub fn dec_hex_quantity(hex: &str) -> Option<String> {
         return None;
     }
     word_decimal(&format!("{clean:0>64}"))
+}
+
+/// An ABI `string` return — `name()` and `symbol()`.
+///
+/// Two layouts, because ERC-20 predates the convention: the usual
+/// `[offset][length][data]`, and the **bytes32** a legacy token (MKR and its
+/// generation) returns as a single fixed word. A declared length that does not
+/// fit the payload is read as the second shape rather than trusted, because an
+/// out-of-range length is what a bytes32 answer looks like to an offset reader.
+///
+/// Decoded as UTF-8 so a multibyte symbol (`USD₮0`) survives, and `None` rather
+/// than a lossy replacement, because a mojibake symbol saved into somebody's
+/// token list is there forever.
+#[must_use]
+pub fn dec_string(hex: &str) -> Option<String> {
+    let data = body(hex);
+    if data.len() < 64 {
+        return None;
+    }
+    // A single word with no header: bytes32.
+    if data.len() < 128 {
+        return utf8_from_hex(data.get(..64)?);
+    }
+    let length = word_u64(data, 64).and_then(|v| usize::try_from(v).ok())?;
+    let end = length.checked_mul(2).and_then(|len| len.checked_add(128));
+    match end {
+        Some(end) if length > 0 && length <= 4096 && end <= data.len() => {
+            utf8_from_hex(data.get(128..end)?)
+        }
+        // Not offset-encoded after all — read the head as bytes32.
+        _ => utf8_from_hex(data.get(..64)?),
+    }
+}
+
+/// Hex bytes as UTF-8, stopping at the first NUL (a bytes32 answer is
+/// zero-padded, and a C-string terminator is not part of the name).
+fn utf8_from_hex(hex: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in 0..hex.len() / 2 {
+        let byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then_some(text)
 }
 
 /// Raw integer digits and a scale, as the human amount the core reads.
@@ -565,6 +627,34 @@ mod tests {
         let human = format_raw_balance("769970000000000000", 18);
         let value = vela_core::app::balance_dashboard::token_balance_double(&human);
         assert!((value - 0.769_97).abs() < 1e-12, "{value}");
+    }
+
+    /// Both `string` shapes, and the answers that must not become a name.
+    #[test]
+    fn a_symbol_decodes_from_either_layout_and_refuses_the_rest() {
+        // The usual layout: offset 0x20, length 4, "USDC".
+        let usdc = format!("0x{}{}{:0<64}", word(0x20), word(4), "55534443");
+        assert_eq!(dec_string(&usdc).as_deref(), Some("USDC"));
+
+        // Legacy bytes32 — one word, zero-padded. "MKR".
+        let mkr = format!("0x{:0<64}", "4d4b52");
+        assert_eq!(dec_string(&mkr).as_deref(), Some("MKR"));
+
+        // A multibyte symbol must survive intact: "USD₮0".
+        let tether = format!("0x{}{}{:0<64}", word(0x20), word(7), "555344e282ae30");
+        assert_eq!(dec_string(&tether).as_deref(), Some("USD\u{20ae}0"));
+
+        // A length past the payload is read as bytes32, not trusted.
+        let lying = format!("0x{:0<64}{}", "4d4b52", word(9_999));
+        assert_eq!(dec_string(&lying).as_deref(), Some("MKR"));
+
+        // Nothing that could be saved as a garbage symbol.
+        assert_eq!(dec_string("0x"), None);
+        assert_eq!(dec_string("0xzz"), None);
+        assert_eq!(dec_string(&format!("0x{}", word(0))), None, "all padding");
+        // Invalid UTF-8 must not become a replacement character.
+        let invalid = format!("0x{}{}{:0<64}", word(0x20), word(2), "fffe");
+        assert_eq!(dec_string(&invalid), None);
     }
 
     /// `eth_getBalance` answers a minimal quantity, not a padded word.

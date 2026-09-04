@@ -34,6 +34,7 @@ pub mod balances;
 pub mod chain_tokens;
 pub mod chainlink;
 pub mod contacts;
+pub mod custom_tokens;
 pub mod display_currency;
 pub mod identity;
 pub mod manage_tokens;
@@ -47,6 +48,7 @@ pub mod proxy;
 pub mod receive_watch;
 pub mod registry;
 pub mod storage;
+pub mod token_trust;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

@@ -56,7 +56,7 @@ use vela_core::app::network_admin::BUILTIN_CHAINS;
 use crate::executor::abi::{self, Call3, McResult};
 use crate::executor::chain_tokens::{self, ChainTokenData, DexInfo, StableToken};
 use crate::executor::pool::{self, PoolError};
-use crate::executor::{chainlink, manage_tokens};
+use crate::executor::{chainlink, custom_tokens};
 
 /// Uniswap-V3 fee tiers worth asking: 0.05%, 0.3%, PancakeSwap's 0.25%, and 1%
 /// for exotic pairs. Each is a separate pool and the deepest one wins.
@@ -324,7 +324,7 @@ fn chain_tokens_for(
         });
     }
 
-    for token in manage_tokens::read_tokens()
+    for token in custom_tokens::read()
         .into_iter()
         .filter(|token| token.chain_id == chain_id)
     {
@@ -340,7 +340,7 @@ fn chain_tokens_for(
             category: Category::Custom,
             // Read from the chain when the token was added, and all-or-nothing
             // then (`manage_tokens.rs`), so it is a fact rather than a guess.
-            known_decimals: Some(u32::from(token.decimals)),
+            known_decimals: Some(token.decimals),
             balance_at: Some(balance_at),
             decimals_at: None,
         });
