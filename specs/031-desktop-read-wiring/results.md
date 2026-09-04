@@ -1038,6 +1038,98 @@ wallet. The remaining mocks are reachable only from the gallery, or lead into
 | `gen-onboarding-types.mjs --check` | ✅ 25 types current |
 | `git diff 6324ba39..HEAD -- '*fixtures.rs'` | additive only — **no line removed** |
 
+## Phases 20–23 — 030's third list, finished
+
+030's closeout kept three lists: what was **wired**, what was **blocked on
+drawings**, and a third headed *"Also not wired, and merely unfinished rather
+than blocked"* — the wizard's search field, the RPC override field, and the
+endpoints / providers panels. That list sat untouched through all of 031's first
+nineteen phases, including its closeout. Four surfaces, all the same shape: the
+core was complete, the refusal was proven, and there was no box to type in.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **209 passed · 0 failed · 26 ignored** (031 opened at **125**) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ 36 states · `check-windows.sh` ✅ |
+| warnings (forced rebuild) | ✅ 1, pre-existing |
+| live | ✅ `network_admin` 3 |
+
+### One field, four surfaces
+
+`settings::components::editable_url_field` wears `url_field`'s clothes so a live
+panel and a mock one look identical. In every case the value lives in the
+**core** — a shell-side copy would be a second opinion about what was typed —
+and a keystroke dispatches Edited then Blurred, because the core's blur is what
+PERSISTS and a keystroke that never blurred is a setting the next launch has
+never heard of.
+
+### "We have not asked yet" is not a verdict
+
+The rule the balance hero established for a figure it does not have, applied
+four more times:
+
+- a **service endpoint** still being probed gets **no pill**, not a grey one;
+- a **provider key** still being tested gets **no support line** — "0 of 0"
+  printed mid-test reads as "this key works nowhere";
+- an **override probe** still running draws no latency badge;
+- a **chain the wizard could not reach** gets a **RETRY**, never four red
+  crosses. That is the core's invariant ③ and the whole reason `rpc_failure` is
+  a separate field from `compatible`: *"this chain does not work"* and *"we could
+  not ask"* are different sentences, and only one is fair to a chain nobody
+  managed to reach.
+
+A P-256 probe that never ran leaves its row **out** rather than drawing it as a
+failure — same rule, one level down.
+
+### Three states that had to be told apart in words
+
+| State | What the badge says | Why not the neighbouring one |
+|---|---|---|
+| not HTTPS | error, "HTTPS required" | a refusal to trust, not a slow answer |
+| HTTP 502 | error, `HTTP 502` | a different problem from "offline", with a different fix |
+| reachable, wrong service | **warning** | the core does not gate saves on it, so it must not look like a refusal |
+
+### The one refusal in the app, finally worded
+
+The RPC override is the only save this app can decline: the core probes the
+endpoint and, if it answers `eth_chainId` with **another chain's id**, writes
+nothing — a "Gnosis" endpoint that actually serves Polygon would route somebody's
+money to the wrong chain. 030 proved that refusal against a real endpoint and
+left the field read-only, so the refusal had never been *seen*.
+
+It now replaces the save hint, carrying both chain ids. A person who watched
+nothing happen has to be told why, and "saved" would be a lie.
+
+### The banner's chip finally leads somewhere
+
+Since phase 11 the unreachable-chain banner has been telling the truth and
+pointing at a dialog that could not act on it. Each chip now opens **its own**
+chain's editor — one "fix" button that always opened the first would send
+somebody to repair a network that is working — and the dialog reuses the same
+field the network card opens, because two editors for one override is two places
+a refusal has to be worded, and they would drift.
+
+No save button on the rescue dialog: the field persists on its own, and a button
+that only sometimes saves is worse than no button.
+
+### What the wizard would not let the shell re-decide
+
+The "Add network" CTA renders only when `can_add` says so. That flag is the
+core's whole judgement — resolved, checked, compatible, not already added — and
+re-deriving any part of it in the shell would be a second opinion about whether
+a chain is safe to add. Picking a suggestion **drops** a custom RPC typed for a
+different chain (checking chain A against chain B's endpoint is meaningless); a
+recheck **keeps** it, because a typed endpoint is usually the reason to recheck.
+
+### The remaining boundary, re-verified rather than inherited
+
+030 named three contacts surfaces as blocked on drawings that do not exist: the
+context-menu actions, an add/edit sheet, and a favourite control. Two of those
+are still true. The first — *"the context menus are pictures"* — is the same
+shape as the per-row listeners this cut added twice, and is **wire-able**; it is
+recorded as available work rather than as a blocker.
+
+
 ---
 
 # 交接:下一个会话从这里开始
@@ -1045,8 +1137,9 @@ wallet. The remaining mocks are reachable only from the gallery, or lead into
 工作区 `/Volumes/data/production/vela-wallet-native`,分支 `031-desktop-read-wiring`
 (叠在 `030-desktop-live-shell` 上,后者叠在 `029-native-repair` 上,均未合并)。
 
-**031 全部完工**:七台机器全接、七条 SC 全达标、**读路径上签了名的人能点到的每一个
-界面都读自己的钱包**。剩下的是花钱(032)和相机(扫码)。
+**031 全部完工**:七台机器全接、七条 SC 全达标、**签了名的人能点到的每一个读界面都
+读自己的钱包**,设置里四个只能看不能填的框也都能填了。剩下的是花钱(032)和相机
+(扫码)。
 
 ## 先读这三样
 
@@ -1068,7 +1161,7 @@ env -u all_proxy -u http_proxy -u https_proxy \
   cargo test executor::pool -- --ignored --test-threads=1
 ```
 
-基线:**205 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
+基线:**209 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
 warning。
 
 改了 `rust/` 之后还要跑(都在仓库根):
@@ -1088,10 +1181,11 @@ node rust/scripts/gen-onboarding-types.mjs --check
 |---|---|---|
 | 1 | 发送(DSD1–4) | **032**,花钱那一刀 |
 | 2 | 扫码(DS1) | 桌面**根本没有相机管线**;不是接线,是一个新功能 |
-| 3 | 联系人 增/改/分组/收藏 | 卡在没画的图(030 的边界,未移动) |
-| 4 | `ScanIncomingTransfers` 的**发送**记录 | 032 写同一个 store |
-| 5 | 余额**流式**到达(`ChainAssetsArrived`) | 需要 worker→resident 的事件推送 |
-| 6 | Windows 的日界线 | `GetTimeZoneInformation` 没接,按 UTC 分组 |
+| 3 | 联系人 **增/改 表单** 和 **收藏控件** | 真的卡在没画的图(030 的边界,已复核) |
+| 4 | 联系人 **右键菜单动作**(删除/重命名分组) | **不是卡住** —— 和本刀两次做过的"每行一个监听器"同形,可以接 |
+| 5 | `ScanIncomingTransfers` 的**发送**记录 | 032 写同一个 store |
+| 6 | 余额**流式**到达(`ChainAssetsArrived`) | 需要 worker→resident 的事件推送 |
+| 7 | Windows 的日界线 | `GetTimeZoneInformation` 没接,按 UTC 分组 |
 
 ## 四条容易踩的坑(我踩过)
 
