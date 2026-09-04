@@ -115,8 +115,15 @@ which is the most directly wrong thing in the client. Independently shippable.
 
 ### User Story 3 — The third machine costs nothing shared (Priority: P2)
 
-`display_currency` — 413 lines, 4 operations, the smallest of the three — is wired
-last, and doing so touches no shared plumbing at all.
+**`contacts` is wired third, and doing so touches no shared plumbing at all.**
+
+(Amended during phase 1. The draft named `display_currency` as the probe because it
+is smallest; it shipped *first* instead, to prove the road with the least code and to
+avoid a commit whose only artifact is eighteen dead-code warnings. The probe's power
+is being **third**, not smallest — it measures whether the road was paved, and any
+third machine measures that. It also improves the order: `network_admin` becomes
+second, and it is the one machine here that must do HTTP, so a road that needs
+changing is found at machine two rather than hidden behind an easy third.)
 
 **Why this priority**: It is the *measurement*, not a feature. 024's SC-008 proved the
 web's road was paved by wiring its third machine and diffing; this is the desktop
@@ -127,14 +134,14 @@ that phase's commit.
 
 **Acceptance Scenarios**:
 
-1. **Given** the currency picker, **When** a currency is chosen, **Then** it survives
+1. **Given** the contacts phase's commit, **When** its diffstat is read, **Then** it
+   touches zero lines in `core_host.rs`, `resident.rs`, `executor/mod.rs`,
+   `executor/storage.rs`, `executor/proxy.rs` and `main.rs`.
+2. **Given** the currency picker, **When** a currency is chosen, **Then** it survives
    a relaunch.
-2. **Given** no rate source in this cut, **When** an amount is shown, **Then** it
+3. **Given** no rate source in this cut, **When** an amount is shown, **Then** it
    renders the core's *degraded* presentation — **never a fabricated conversion**,
    because `rate: null` is not `rate: 1`.
-3. **Given** that phase's commit, **When** its diffstat is read, **Then** it touches
-   zero lines in `core_host.rs`, `resident.rs`, `executor/mod.rs`, `executor/storage.rs`,
-   `executor/proxy.rs` and `main.rs`.
 
 ## Requirements
 
@@ -177,7 +184,7 @@ that phase's commit.
   relaunch; a `vela.contacts` written by the web client renders correctly on desktop.
 - **SC-003**: Display currency survives a relaunch and renders degraded rather than
   fabricated when no rate exists.
-- **SC-004 (the paved-road measurement)**: Wiring the **third** machine touches
+- **SC-004 (the paved-road measurement)**: Wiring the **third** machine (`contacts`) touches
   **zero lines** in `src/core_host.rs`, `src/resident.rs`, `src/executor/mod.rs`,
   `src/executor/storage.rs`, `src/executor/proxy.rs` and `src/main.rs` — measured by
   `git diff --stat` of that phase's commit, pasted into results.md.
