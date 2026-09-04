@@ -383,3 +383,44 @@ Receipt discovery is `getLogs` over the transfer allowlist plus `token_trust`
 admission, and the records it persists are the same store 032's send path writes.
 Zero new records is a true statement about a scan that found none — the feed simply
 has nothing to celebrate yet.
+
+## Phase 6 — the feed reaches the screen
+
+`wallet/live.rs::activity_rows` and the home's activity list bound to `ActivityFeed`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **148 passed · 0 failed · 13 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · warnings 1, pre-existing |
+| `*fixtures.rs` deleted lines in 031 | ✅ **0** |
+
+### The bug this phase nearly shipped
+
+`FeedItem` carries both `value` and `decimals`, which reads like raw-integer-plus-scale
+— the same shape `BalanceToken` uses, where `balance` **is** raw. It is not. The web
+renders it with `trimBalance(item.value)` and the core sums it with `parseFloat`,
+neither of which scales: **`value` is the human amount already**.
+
+Scaling by `decimals` would have printed every activity figure 10¹⁸ times too large,
+and it would have looked deliberate — two fields that plainly belong together, used
+together. A test now pins it: `1.5` renders as `+1.5`.
+
+### Three render decisions the core deliberately does not make
+
+- **Headers are dropped here, not filtered out of the core.** `FeedView::rows`
+  interleaves day headers with items because the full Activity screen draws them; the
+  home preview is a flat short list. Asking the core for a different shape would move
+  a render decision into the machine.
+- **The kind comes from the record, not the item.** `FeedItem` has only a direction;
+  `FeedView::transactions` carries `kind`. Looking it up keeps the dApp distinction the
+  mocks draw — a swap is not "sent", and labelling it so loses the one word that
+  explains where the money went.
+- **Privacy is read from the BALANCE view**, not the feed's own flag. Every money
+  surface masks together; reading two flags is how one ends up out of step. The figure
+  goes, the unit stays — H5's rule, with a test asserting the number cannot survive.
+
+### The badge tint is the settings table
+
+Read through `settings::model::chain_tint` — the same table the network rows use, which
+is the same table the mocks use. A second colour map for the same chains is how one
+screen's Polygon stops matching another's.

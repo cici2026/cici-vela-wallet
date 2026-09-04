@@ -55,6 +55,7 @@ use crate::wallet::live as wallet_live;
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
+use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
@@ -732,7 +733,7 @@ impl WalletPage {
         let s_add = self.strings.action_add.clone();
 
         let balance = self.balance_model(cx);
-        let activity = fixtures::activity_default(&self.strings);
+        let activity = self.activity_models(cx);
         let assets = fixtures::assets_default(&self.strings);
 
         let pills = div()
@@ -1071,6 +1072,24 @@ impl WalletPage {
             .flat_map(|(_, rows)| rows)
             .nth(self.contact)
             .map(|row| row.address_full)
+    }
+
+    /// The activity rows: the core's feed for a real session, the mock's
+    /// otherwise.
+    ///
+    /// Privacy comes from the BALANCE view, not the feed's own: every money
+    /// surface masks together, and reading two different flags is how one of
+    /// them ends up out of step.
+    fn activity_models(&mut self, cx: &mut Context<Self>) -> Vec<fixtures::ActivityRowModel> {
+        if self.identity.is_none() {
+            return fixtures::activity_default(&self.strings);
+        }
+        let hidden = resident::resident::<BalanceDashboard>(cx)
+            .read(cx)
+            .view()
+            .hidden;
+        let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+        wallet_live::activity_rows(&feed, &self.strings, hidden)
     }
 
     /// The balance hero: the core's figure for a real session, the mock's

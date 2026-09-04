@@ -6,11 +6,15 @@
 
 use gpui::SharedString;
 
+use vela_core::app::activity_feed::{FeedDirection, FeedItem, FeedRow, FeedTxKind, FeedView};
 use vela_core::app::balance_dashboard::{BalanceNotice, BalanceView};
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
+use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::wallet::WalletStrings;
-use crate::wallet::fixtures::{BALANCE_MASK, BalanceModel, BalanceState, StatusKind};
+use crate::wallet::fixtures::{
+    ActivityKind, ActivityRowModel, BALANCE_MASK, BalanceModel, BalanceState, StatusKind,
+};
 
 /// The balance hero.
 ///
@@ -129,6 +133,144 @@ mod tests {
         WalletStrings::resolve(&crate::loc::Loc::from_env())
     }
 
+    use vela_core::app::activity_feed::{
+        ActivityFeed, Event as FeedEvent, FeedItem, FeedRow, FeedView,
+    };
+
+    fn feed_with(
+        rows: Vec<FeedRow>,
+        transactions: Vec<vela_core::app::activity_feed::FeedTxRecord>,
+    ) -> FeedView {
+        let mut host = CoreHost::<ActivityFeed>::new();
+        let _ = host.dispatch(FeedEvent::AccountSwitched {
+            address: "0xme".to_owned(),
+        });
+        FeedView {
+            rows,
+            transactions,
+            ..host.view()
+        }
+    }
+
+    fn item(id: &str, incoming: bool, value: Option<&str>, symbol: &str) -> FeedItem {
+        FeedItem {
+            id: id.to_owned(),
+            direction: if incoming {
+                FeedDirection::In
+            } else {
+                FeedDirection::Out
+            },
+            counterparty: Some("0xAbCdEf0000000000000000000000000000000001".to_owned()),
+            alias: None,
+            value: value.map(str::to_owned),
+            symbol: symbol.to_owned(),
+            decimals: Some(18),
+            usd_value: 0.0,
+            chain_id: 100,
+            timestamp: 1_756_000_000.0,
+            day_start_ms: 0.0,
+            tx_hash: None,
+            batch: None,
+        }
+    }
+
+    /// Day headers are dropped for the home preview — the mocks draw a flat
+    /// short list there — and the items keep the core's order.
+    #[test]
+    fn headers_are_dropped_and_items_keep_their_order() {
+        let view = feed_with(
+            vec![
+                FeedRow::Header {
+                    id: "day-0".to_owned(),
+                    day_start_ms: 0.0,
+                    timestamp: 1_756_000_000.0,
+                },
+                FeedRow::Item {
+                    item: item("a", false, Some("2"), "POL"),
+                },
+                FeedRow::Item {
+                    item: item("b", true, Some("120"), "USDT"),
+                },
+            ],
+            Vec::new(),
+        );
+        let rows = activity_rows(&view, &strings(), false);
+        assert_eq!(rows.len(), 2, "the header is not a row here");
+        assert_eq!(rows[0].unit, SharedString::from("POL"));
+        assert_eq!(rows[1].unit, SharedString::from("USDT"));
+    }
+
+    /// The sign is the direction's, and the minus is U+2212 — a hyphen does
+    /// not align under a digit, which is why the mocks use the real one.
+    #[test]
+    fn direction_drives_the_sign() {
+        let view = feed_with(
+            vec![
+                FeedRow::Item {
+                    item: item("a", false, Some("2"), "POL"),
+                },
+                FeedRow::Item {
+                    item: item("b", true, Some("120"), "USDT"),
+                },
+            ],
+            Vec::new(),
+        );
+        let rows = activity_rows(&view, &strings(), false);
+        assert_eq!(rows[0].amount, SharedString::from("\u{2212}2"));
+        assert!(!rows[0].positive);
+        assert_eq!(rows[1].amount, SharedString::from("+120"));
+        assert!(rows[1].positive);
+    }
+
+    /// `value` is the human amount already. Scaling it by `decimals` would
+    /// print every figure 10^18 times too large — and it would look deliberate.
+    #[test]
+    fn the_amount_is_not_scaled_by_decimals() {
+        let view = feed_with(
+            vec![FeedRow::Item {
+                item: item("a", true, Some("1.5"), "xDAI"),
+            }],
+            Vec::new(),
+        );
+        let rows = activity_rows(&view, &strings(), false);
+        assert_eq!(rows[0].amount, SharedString::from("+1.5"));
+    }
+
+    /// Privacy masks the FIGURE and keeps the unit — H5's rule — and it comes
+    /// from the balance view so every money surface masks together.
+    #[test]
+    fn hiding_masks_the_figure_and_keeps_the_unit() {
+        let view = feed_with(
+            vec![FeedRow::Item {
+                item: item("a", true, Some("120"), "USDT"),
+            }],
+            Vec::new(),
+        );
+        let rows = activity_rows(&view, &strings(), true);
+        assert_eq!(rows[0].unit, SharedString::from("USDT"), "the unit stays");
+        assert!(
+            !rows[0].amount.contains("120"),
+            "the figure must not survive the mask: {:?}",
+            rows[0].amount
+        );
+    }
+
+    /// A batch with mixed tokens has no sum, and the core says so by sending no
+    /// value. Inventing one would be arithmetic nobody asked for.
+    #[test]
+    fn a_batch_without_a_sum_prints_no_figure() {
+        let view = feed_with(
+            vec![FeedRow::Item {
+                item: item("a", false, None, ""),
+            }],
+            Vec::new(),
+        );
+        assert_eq!(
+            activity_rows(&view, &strings(), false)[0].amount,
+            SharedString::from("")
+        );
+    }
+
     /// The figure the mock draws, from a real total.
     #[test]
     fn a_known_total_renders_split_for_the_hero() {
@@ -187,4 +329,132 @@ mod tests {
             "the split took too much: {decimals:?}"
         );
     }
+}
+
+/// The chain tint for an activity badge.
+///
+/// Read out of `settings::model::chain_tint` — the same table the network rows
+/// use, which is the same table the mocks use. A second colour map for the same
+/// chains is how one screen's Polygon stops matching another's.
+fn badge(chain_id: u32) -> gpui::Hsla {
+    gpui::rgb(crate::settings::model::chain_tint(u64::from(chain_id)).unwrap_or(0x8A_8F_98)).into()
+}
+
+/// The activity rows the home preview shows.
+///
+/// **Headers are dropped here, not filtered out of the core.** `FeedView::rows`
+/// interleaves day headers with items because the full Activity screen draws
+/// them; the home preview is a short flat list and the mocks draw no headings in
+/// it. Asking the core for a different shape would move a render decision into
+/// the machine.
+#[must_use]
+pub fn activity_rows(view: &FeedView, s: &WalletStrings, hidden: bool) -> Vec<ActivityRowModel> {
+    view.rows
+        .iter()
+        .filter_map(|row| match row {
+            FeedRow::Header { .. } => None,
+            FeedRow::Item { item } => Some(activity_row(view, item, s, hidden)),
+        })
+        .collect()
+}
+
+/// What kind of event a row is.
+///
+/// `FeedItem` carries only a direction; the RECORD carries the kind, and
+/// `FeedView::transactions` is the account-scoped record list the core exposes
+/// beside the rows. Looking it up there keeps the dApp distinction the mocks
+/// draw — a swap is not "sent", and labelling it so loses the one word that
+/// explains where the money went.
+fn kind_of(view: &FeedView, item: &FeedItem, incoming: bool) -> ActivityKind {
+    let record_kind = view
+        .transactions
+        .iter()
+        .find(|record| record.id == item.id)
+        .and_then(|record| record.kind);
+    match record_kind {
+        Some(FeedTxKind::DappTx) => ActivityKind::Dapp,
+        // A signature is not money moving, but the home preview has no row for
+        // it; treating it as the direction says is the least wrong of the three
+        // shapes available, and the full Activity screen draws it properly.
+        _ if incoming => ActivityKind::Received,
+        _ => ActivityKind::Sent,
+    }
+}
+
+fn activity_row(
+    view: &FeedView,
+    item: &FeedItem,
+    s: &WalletStrings,
+    hidden: bool,
+) -> ActivityRowModel {
+    let incoming = item.direction == FeedDirection::In;
+    let kind = kind_of(view, item, incoming);
+
+    // Who it was with: the resolved alias if the core has one, else a shortened
+    // address, else nothing — a batch row has no single counterparty.
+    let who = item
+        .alias
+        .clone()
+        .or_else(|| item.counterparty.as_ref().map(|a| shorten_address(a)));
+    let subtitle = who.map_or_else(
+        || SharedString::from(""),
+        |name| {
+            SharedString::from(crate::wallet::fill(
+                if incoming { &s.from_name } else { &s.to_name },
+                "name",
+                &name,
+            ))
+        },
+    );
+
+    ActivityRowModel {
+        kind,
+        title: match kind {
+            ActivityKind::Sent => s.label_sent.clone(),
+            ActivityKind::Received => s.label_received.clone(),
+            ActivityKind::Dapp => s.label_dapp.clone(),
+        },
+        subtitle,
+        // Privacy masks the FIGURE and keeps the unit — H5's rule, and the same
+        // mask the hero uses, because a leak in one surface defeats it
+        // everywhere (the core's invariant ④ on the balance side).
+        amount: if hidden {
+            SharedString::from(crate::wallet::fixtures::MASK)
+        } else {
+            amount_text(item, incoming)
+        },
+        unit: SharedString::from(item.symbol.clone()),
+        positive: incoming,
+        badge: badge(item.chain_id),
+    }
+}
+
+/// `+120` / `−2`. The minus is U+2212, not a hyphen — the mocks use it and it
+/// is what aligns under a digit.
+fn amount_text(item: &FeedItem, incoming: bool) -> SharedString {
+    let Some(value) = item.value.as_deref() else {
+        // A multi-select batch has mixed tokens and no sum; the core says so by
+        // sending no value, and inventing one here would be arithmetic nobody
+        // asked for.
+        return SharedString::from("");
+    };
+    // `value` is the HUMAN amount already — "1.5", not raw wei. The web renders
+    // it with `trimBalance(item.value)` and the core sums it with `parseFloat`,
+    // neither of which scales by `decimals`. Scaling here would print every
+    // amount 10^18 times too large, and it would look deliberate.
+    let Ok(amount) = value.parse::<f64>() else {
+        return SharedString::from("");
+    };
+    let formatted = format_token_amount(amount, NumberPreset::CommaDot, false);
+    SharedString::from(format!(
+        "{}{formatted}",
+        if incoming { "+" } else { "\u{2212}" }
+    ))
+}
+
+fn shorten_address(address: &str) -> String {
+    if address.len() <= 14 {
+        return address.to_owned();
+    }
+    format!("{}…{}", &address[..6], &address[address.len() - 4..])
 }
