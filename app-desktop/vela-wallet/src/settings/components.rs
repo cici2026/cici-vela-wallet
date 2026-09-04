@@ -380,7 +380,7 @@ pub fn text_scale(theme: &Theme, steps: usize, index: usize) -> Div {
 // -- ChainMark / NetworkRow ---------------------------------------------------
 
 /// A chain's circular avatar — one letter over its own brand colour.
-pub fn chain_mark(letter: &'static str, color: u32, size: f32) -> Div {
+pub fn chain_mark(letter: gpui::SharedString, color: u32, size: f32) -> Div {
     div()
         .size(px(size))
         .flex_none()
@@ -406,9 +406,12 @@ pub fn network_row(
     id: impl Into<ElementId>,
     theme: &Theme,
     icons: &mut IconCache,
-    letter: &'static str,
+    // `SharedString`, not `&'static str`: a live network's name and
+    // lettermark come from the core at runtime (spec 030). The fixture
+    // path passes the same constants it always did, now via `.into()`.
+    letter: gpui::SharedString,
     color: u32,
-    name: &'static str,
+    name: gpui::SharedString,
     meta: gpui::SharedString,
     badge: Option<&Pill>,
     tag: Option<gpui::SharedString>,
@@ -824,7 +827,7 @@ pub fn rpc_banner(
                 .py(px(6.))
                 .rounded_full()
                 .bg(theme.bg_base)
-                .child(chain_mark(letter, color, 20.))
+                .child(chain_mark(letter.into(), color, 20.))
                 .child(
                     div()
                         .text_size(theme::text_row_sub())

@@ -12,6 +12,7 @@
 pub mod components;
 pub mod fixtures;
 pub mod live;
+pub mod model;
 
 use gpui::SharedString;
 

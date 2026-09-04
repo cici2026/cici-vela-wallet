@@ -39,6 +39,7 @@ use crate::settings::components::{
 };
 use crate::settings::fixtures::{self as settings_fixtures, SettingsPage, Tone, latency, pill};
 use crate::settings::live as settings_live;
+use crate::settings::model::NetworkRowModel;
 use crate::signing::SigningStrings;
 use crate::signing::components as signing_components;
 use crate::signing::fixtures as signing_fixtures;
@@ -52,6 +53,7 @@ use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
 use vela_core::app::display_currency::DisplayCurrency;
+use vela_core::app::network_admin::NetworkAdmin;
 
 use super::WalletStrings;
 use super::components::{
@@ -262,7 +264,11 @@ pub struct WalletPage {
     /// The centred dialog over the settings section, when one is open.
     settings_dialog: Option<SettingsDialog>,
     /// Which network row DST4 has expanded in place, if any.
-    settings_expanded_network: Option<&'static str>,
+    ///
+    /// A `SharedString` rather than a `&'static str` since spec 030: the ids
+    /// come from the core for a real session and from the fixtures for a design
+    /// surface, and the screen only ever compares one to another.
+    settings_expanded_network: Option<gpui::SharedString>,
     /// Which localization dropdown is open (DST3), by form-row id.
     settings_open_dropdown: Option<&'static str>,
     panel: PanelId,
@@ -327,9 +333,31 @@ impl WalletPage {
     }
 
     /// The wallet as a signed-in person sees it.
+    ///
+    /// `VELA_SECTION=settings|contacts|explore` starts it on that section
+    /// instead of 钱包 — the same env-pin family as `VELA_PAGE` and
+    /// `VELA_SETTINGS_STATE`, and added for the same reason that one was: the
+    /// LIVE surfaces (spec 030) are only reachable by clicking, so without this
+    /// no screenshot pass can ever see one. `VELA_PAGE=settings` is not the
+    /// same thing and must not become it — that route has no session behind it
+    /// and renders the mocks on purpose.
     pub fn signed_in(identity: Identity, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut page = Self::with_section(Section::Wallet, false, window, cx);
+        let section = match std::env::var("VELA_SECTION").as_deref() {
+            Ok("settings") => Section::Settings,
+            Ok("contacts") => Section::Contacts,
+            Ok("explore") => Section::Explore,
+            _ => Section::Wallet,
+        };
+        let mut page = Self::with_section(section, false, window, cx);
         page.identity = Some(identity);
+        // `VELA_SETTINGS_STATE` picks WHICH panel, on this path too. Without it
+        // `VELA_SECTION=settings` can only ever open 账户, so the live 网络 and
+        // 本地化 surfaces would still have no way to be screenshotted.
+        if section == Section::Settings
+            && let Some(tab) = GalleryTab::from_settings_env()
+        {
+            page.select_tab(tab, window);
+        }
         page
     }
 
@@ -1840,7 +1868,8 @@ impl WalletPage {
             _ => None,
         };
         // DST4 opens Ethereum in place — the one row the mock has expanded.
-        self.settings_expanded_network = (tab == GalleryTab::Dst4).then_some("ethereum");
+        self.settings_expanded_network =
+            (tab == GalleryTab::Dst4).then(|| gpui::SharedString::from("ethereum"));
         // DST3 is the only state with an open dropdown, and it hangs off 数字格式.
         self.settings_open_dropdown = (tab == GalleryTab::Dst3).then_some("number");
         self.panel = match tab {
@@ -2801,38 +2830,56 @@ impl WalletPage {
     }
 
     /// DST4 — the network list, expanding one row in place.
+    /// The 网络 rows: the core's for a real session, the mocks' otherwise.
+    ///
+    /// Gated on `identity` like every other live surface here — `VELA_PAGE=
+    /// settings` and the gallery have no session behind them, and a design
+    /// surface quietly reading live state stops being reviewable.
+    fn network_rows(&mut self, cx: &mut Context<Self>) -> Vec<NetworkRowModel> {
+        if self.identity.is_none() {
+            return settings_fixtures::network_rows();
+        }
+        let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
+        if !view.loaded {
+            // The core has not ruled yet. An EMPTY list, not a fixture one:
+            // a person's own settings screen must never show somebody else's
+            // networks while it waits (spec 030 FR-008).
+            return Vec::new();
+        }
+        settings_live::network_rows(&view)
+    }
+
     fn settings_networks(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
-        let expanded = self.settings_expanded_network;
+        let expanded = self.settings_expanded_network.clone();
+        let rows = self.network_rows(cx);
         let mut col = div().flex().flex_col();
-        for (i, id) in settings_fixtures::DESKTOP_NETWORK_IDS
-            .into_iter()
-            .enumerate()
-        {
-            let n = settings_fixtures::network(id);
+        for (i, n) in rows.into_iter().enumerate() {
             let meta = settings_fixtures::chain_meta(&self.settings, n.chain_id);
-            let badge = (!n.custom).then(|| latency(n.latency_ms, None));
+            let badge = n.latency_ms.map(|ms| latency(ms, None));
             let tag = n.custom.then(|| self.settings.network_custom.clone());
-            let is_expanded = expanded == Some(id);
+            let is_expanded = expanded.as_ref() == Some(&n.id);
             let row = network_row(
                 ElementId::from(("settings-network", i)),
                 theme,
                 &mut self.icons,
-                n.letter,
+                n.letter.clone(),
                 n.color,
-                n.name,
+                n.name.clone(),
                 meta,
                 badge.as_ref(),
                 tag,
                 n.custom,
                 is_expanded,
             );
+            let id = n.id.clone();
             col = col
                 .child(row.on_click(cx.listener(move |this, _, _, cx| {
-                    this.settings_expanded_network = if this.settings_expanded_network == Some(id) {
-                        None
-                    } else {
-                        Some(id)
-                    };
+                    this.settings_expanded_network =
+                        if this.settings_expanded_network.as_ref() == Some(&id) {
+                            None
+                        } else {
+                            Some(id.clone())
+                        };
                     cx.notify();
                 })))
                 .child(div().h(px(1.)).bg(theme.divider));
@@ -3303,7 +3350,7 @@ impl WalletPage {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(chain_mark("Z", 0x8c8c8c, 32.))
+                    .child(chain_mark("Z".into(), 0x8c8c8c, 32.))
                     .child(
                         div()
                             .flex_1()
@@ -3397,7 +3444,7 @@ impl WalletPage {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(chain_mark(n.letter, n.color, 32.))
+                    .child(chain_mark(n.letter.into(), n.color, 32.))
                     .child(
                         div()
                             .flex_1()

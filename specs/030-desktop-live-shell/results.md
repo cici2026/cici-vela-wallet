@@ -214,3 +214,80 @@ Chasing the warning count to zero found a real gap rather than tidying:
   request whose only honest signal is "resolved without throwing", because the browser
   hides the status. A desktop has no CORS, so it answers 2xx/3xx — strictly better
   information into a field the core already types as a bool.
+
+## Phase 3 — the 网络 panel is the core's, and the seam that made it possible
+
+`settings/model.rs` (new), `settings/live.rs::network_rows`, a fixture adapter,
+`page.rs`'s panel, and a widened `network_row` signature.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **115 passed · 0 failed · 6 ignored** |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced rebuild) | ✅ 1 real, pre-existing |
+| `scripts/sweep-gallery.sh` | ✅ every state rendered |
+| `*fixtures.rs` | ✅ **0 deleted lines** — purely additive |
+| `rust/` | ✅ untouched |
+
+### The seam this cut had to invent
+
+Web's 024 dropped `live.ts` in beside an existing `model.ts`. The desktop had **no
+model layer at all** — `page.rs` read `settings_fixtures::network(id)` and rendered
+its fields directly — so there was nothing for a live builder to plug into. Phase 3's
+real work was introducing one, narrowly: `NetworkRowModel`, plus a builder on each
+side of the seam producing it.
+
+`fixtures.rs` gained an *adapter*, not a fixture. Every value still comes from the
+constants above it, and a test asserts the adapter reproduces what `page.rs` drew
+before the seam existed, field by field — including the badge rule (a badge for every
+non-custom row, none for a custom one). Without that test, "the gallery is unchanged"
+would be an eyeball claim.
+
+### Two things the core has no business knowing
+
+A row needs a lettermark and a brand tint; the core knows neither, and should not.
+
+- **The tint is read out of `fixtures::NETWORKS` by chain id**, not duplicated. Those
+  colours are design data and the fixture file is where the design lives, so a live
+  Ethereum row is tinted by the same constant the mock is. Two colour tables is how
+  two renderings of one network start disagreeing.
+- **A chain the mocks never drew gets a neutral**, not a generated colour. Deriving a
+  hue from the chain id produces a brand-looking colour nobody chose for a network
+  nobody designed.
+
+And one thing the core *does* know, which the row must not flatten wrongly:
+`Checking`, `Error` and "never probed" all draw **no badge**, and none of them is a
+latency of zero. A test pins all three.
+
+### `VELA_SECTION`, and why a new env pin was justified
+
+The live surfaces are reachable only by clicking, so no screenshot pass could ever
+see one — exactly the gap `VELA_SETTINGS_STATE` was added for, whose own comment says
+it exists because "a left-alignment bug survived review on seven panels it also
+broke". `VELA_SECTION=settings|contacts|explore` starts the **signed-in** page on a
+section, and `VELA_SETTINGS_STATE` now applies on that path too.
+
+`VELA_PAGE=settings` is deliberately *not* the same thing and must not become it: that
+route has no session behind it and renders the mocks on purpose.
+
+### Verified in the real app, by log rather than by picture
+
+```
+[vela-wallet] wallet: locale `en`, gallery false, section Settings
+[vela-wallet] core: network_admin booting
+```
+
+The resident boots **only** when the live panel renders — with the wallet section
+showing, or on the fixture route, the count is zero, which is the laziness and the
+identity gate both working. (A screen capture was attempted first and proved nothing:
+it grabs whatever window is frontmost, not the app. The log line is the honest
+signal, which is what `Machine::LABEL` now earns its keep for.)
+
+### A false alarm worth writing down
+
+The first signed-in run landed on **onboarding**, not the wallet, and the seeded
+account looked ignored. The cause was my seed, not the code: I wrote the account in
+camelCase, and `Account` is plain snake_case serde on **both** clients — web's
+generated `Account.ts` says `public_key_hex`, `created_at_iso` too. Accounts are
+cross-client compatible exactly as they stand. Recorded because "the desktop stores a
+different shape" was a plausible-sounding conclusion that would have been wrong.

@@ -8,7 +8,10 @@
 
 use gpui::SharedString;
 
+use crate::settings::model::{NetworkRowModel, chain_tint, lettermark};
+
 use vela_core::app::display_currency::CurrencyView;
+use vela_core::app::network_admin::{NetProbeHealth, NetView};
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
 
 /// The sample figure the 本地化 mock prints beside the currency code.
@@ -65,6 +68,88 @@ pub fn currency_row_value(view: &CurrencyView, locale: &str) -> SharedString {
 mod tests {
     use super::*;
 
+    use crate::core_host::CoreHost;
+    use vela_core::app::network_admin::{Event as NetEvent, NetNetworkRow, NetworkAdmin};
+
+    /// A real `NetView` with the rows substituted.
+    ///
+    /// Built by booting the actual core rather than hand-constructing one: the
+    /// wizard, endpoint and provider sub-views have their own invariants, and a
+    /// literal I typed would be a guess about them that drifts the first time
+    /// they change.
+    fn view_with(networks: Vec<NetNetworkRow>) -> NetView {
+        let mut host = CoreHost::<NetworkAdmin>::new();
+        let _ = host.dispatch(NetEvent::Started);
+        NetView {
+            loaded: true,
+            networks,
+            ..host.view()
+        }
+    }
+
+    fn net_row(
+        chain_id: u32,
+        name: &str,
+        custom: bool,
+        health: Option<NetProbeHealth>,
+    ) -> NetNetworkRow {
+        NetNetworkRow {
+            id: format!("chain-{chain_id}"),
+            chain_id,
+            display_name: name.to_owned(),
+            native_symbol: "ETH".to_owned(),
+            is_custom: custom,
+            rpc_url: String::new(),
+            explorer_url: String::new(),
+            bundler_url: String::new(),
+            rpc_health: health,
+            explorer_health: None,
+            rpc_chain_mismatch: None,
+            rpc_save_deferred: false,
+        }
+    }
+
+    /// A live Ethereum row is tinted by the same constant the mock is. The
+    /// alternative — a second colour table in the live path — is how two
+    /// renderings of one network start disagreeing.
+    #[test]
+    fn a_known_chain_borrows_the_mock_s_brand_colour() {
+        let view = view_with(vec![net_row(1, "Ethereum", false, None)]);
+        let rows = network_rows(&view);
+        let fixture = crate::settings::fixtures::network("ethereum");
+        assert_eq!(rows[0].color, fixture.color);
+        assert_eq!(rows[0].letter, SharedString::from("E"));
+    }
+
+    /// A chain nobody drew gets the neutral, not an invented brand colour.
+    #[test]
+    fn an_undrawn_chain_gets_the_neutral_tint() {
+        let view = view_with(vec![net_row(31_337, "Anvil", true, None)]);
+        assert_eq!(network_rows(&view)[0].color, UNTINTED);
+    }
+
+    /// Three different core states draw no badge, and the row must not
+    /// distinguish them by inventing a zero.
+    #[test]
+    fn only_a_completed_probe_draws_a_latency_badge() {
+        let view = view_with(vec![
+            net_row(
+                1,
+                "Ok",
+                false,
+                Some(NetProbeHealth::Ok { latency_ms: 182.4 }),
+            ),
+            net_row(2, "Checking", false, Some(NetProbeHealth::Checking)),
+            net_row(3, "Errored", false, Some(NetProbeHealth::Error)),
+            net_row(4, "Unprobed", false, None),
+        ]);
+        let rows = network_rows(&view);
+        assert_eq!(rows[0].latency_ms, Some(182), "a measured probe rounds");
+        assert_eq!(rows[1].latency_ms, None, "checking is not zero");
+        assert_eq!(rows[2].latency_ms, None, "an error is not zero");
+        assert_eq!(rows[3].latency_ms, None);
+    }
+
     fn view(code: &str, rate: Option<f64>) -> CurrencyView {
         CurrencyView {
             code: code.to_owned(),
@@ -109,4 +194,40 @@ mod tests {
             SharedString::from("CHF · CHF\u{a0}1,234.56")
         );
     }
+}
+
+/// A neutral tint for a chain the mocks never drew.
+///
+/// `#8A8F98` — the design system's muted grey. The alternative is generating a
+/// colour from the chain id, which produces a brand-looking colour nobody chose
+/// for a network nobody designed.
+const UNTINTED: u32 = 0x8A_8F_98;
+
+/// The 网络 rows, from what the core loaded.
+///
+/// The core owns which networks exist, in what order, and whether each is
+/// custom. This adds only the two things it has no business knowing — a
+/// lettermark and a tint — and flattens the probe health to "is there a number".
+#[must_use]
+pub fn network_rows(view: &NetView) -> Vec<NetworkRowModel> {
+    view.networks
+        .iter()
+        .map(|row| NetworkRowModel {
+            id: SharedString::from(row.id.clone()),
+            name: SharedString::from(row.display_name.clone()),
+            letter: lettermark(&row.display_name),
+            color: chain_tint(u64::from(row.chain_id)).unwrap_or(UNTINTED),
+            chain_id: u64::from(row.chain_id),
+            // A badge is drawn only for a probe that came back with a figure.
+            // `Checking` and `Error` are states the core distinguishes and the
+            // row draws without a number, exactly as the mock does.
+            latency_ms: match row.rpc_health {
+                Some(NetProbeHealth::Ok { latency_ms }) => {
+                    Some(latency_ms.round().clamp(0.0, f64::from(u32::MAX)) as u32)
+                }
+                _ => None,
+            },
+            custom: row.is_custom,
+        })
+        .collect()
 }
