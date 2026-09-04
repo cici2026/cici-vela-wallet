@@ -27,6 +27,7 @@
 //! here at all — `Prompt` and `CompleteOnboarding` belong to the screen, which
 //! is why [`Performed`] exists.
 
+pub mod activity_feed;
 pub mod balance_dashboard;
 pub mod balances;
 pub mod contacts;
@@ -366,6 +367,57 @@ fn challenge_for(purpose: ProofPurpose) -> Vec<u8> {
         ProofPurpose::RecoverFirst | ProofPurpose::RecoverSecond => "vela-recover-",
     };
     format!("{label}{}", unix_millis()).into_bytes()
+}
+
+/// The device's UTC offset, in seconds, right now.
+///
+/// The core hands the shell every date decision that depends on where the
+/// machine is — `day_start_ms` is its words: "computed by the shell, which owns
+/// the device timezone". `vela-core` deliberately ships **no timezone
+/// database**, so this is the one fact it cannot derive and must be told.
+///
+/// `localtime_r` rather than a crate: the offset must include daylight saving
+/// *as of this instant*, which a fixed offset read once at startup would get
+/// wrong twice a year.
+#[cfg(unix)]
+fn local_utc_offset_seconds() -> i64 {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let time = unix_millis() / 1000;
+    let time: libc::time_t = time;
+    // SAFETY: `localtime_r` writes into a `tm` this call owns and reads a
+    // `time_t` it owns. It is the reentrant form precisely so it needs no
+    // global state and is safe to call from any thread.
+    let filled = unsafe { libc::localtime_r(&raw const time, &raw mut tm) };
+    if filled.is_null() {
+        return 0;
+    }
+    tm.tm_gmtoff
+}
+
+/// Windows has no `localtime_r`; `GetTimeZoneInformation` is the equivalent and
+/// is not wired yet.
+///
+/// The consequence is visible rather than subtle: the activity feed groups by
+/// UTC day on Windows, so a late-evening transaction files under tomorrow. A
+/// recorded debt, and a small one — but it is somebody's feed reading wrong for
+/// part of every day, not a rounding error.
+#[cfg(not(unix))]
+fn local_utc_offset_seconds() -> i64 {
+    0
+}
+
+/// Local midnight for an instant, as epoch milliseconds.
+///
+/// The activity feed groups by DAY, and a day is a local idea. Computing this
+/// in UTC would put a 20:00 transaction in Tokyo under tomorrow's heading for
+/// anybody east of Greenwich, and under yesterday's for anybody west — visibly
+/// wrong for part of every day rather than subtly wrong all of it.
+pub fn day_start_ms(timestamp_ms: f64) -> f64 {
+    const DAY_MS: f64 = 86_400_000.0;
+    #[allow(clippy::cast_precision_loss, reason = "an offset is at most 14 hours")]
+    let offset_ms = (local_utc_offset_seconds() * 1000) as f64;
+    let local = timestamp_ms + offset_ms;
+    (local / DAY_MS).floor() * DAY_MS - offset_ms
 }
 
 /// The same wall clock, as epoch milliseconds — what the wallet-state machines

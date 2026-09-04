@@ -323,3 +323,63 @@ is how storage tests work — and they simply cannot share a process. These are
 ```
 cargo test executor::pool -- --ignored --test-threads=1
 ```
+
+## Phase 5 — the activity feed, and the day boundary
+
+`executor/activity_feed.rs` (six operations) plus `executor::day_start_ms`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **143 passed · 0 failed · 13 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · warnings 1, pre-existing |
+| `check-windows.sh` | ✅ the `cfg(not(unix))` path type-checks |
+
+### The day boundary is the shell's, and getting it wrong is visible
+
+The core's words: *"LOCAL-midnight epoch ms — computed by the shell, which owns the
+device timezone."* `vela-core` deliberately ships **no timezone database**, so this is
+the one fact it cannot derive.
+
+Grouping by UTC day files a 20:00 transaction in Tokyo under **tomorrow**, and a 19:00
+one in New York under **today** when it belongs to yesterday. That is wrong for part of
+every day for everybody outside Greenwich — not a rounding error, a heading with the
+wrong transactions under it.
+
+So the offset comes from `localtime_r`, and `libc` moved from a Linux-only dependency
+to a `cfg(unix)` one. `localtime_r` rather than a value read once at startup, because
+the offset must include **daylight saving as of this instant** — a cached offset is
+wrong twice a year.
+
+**Windows has no `localtime_r`** and `GetTimeZoneInformation` is not wired, so it
+returns 0 and groups by UTC day. Recorded as a debt with its consequence spelled out
+rather than left as a silent `#[cfg]`. `check-windows.sh` type-checks that path.
+
+The test asserts the property rather than a figure, which is what makes it runnable on
+a machine whose timezone it does not know: two instants an hour apart share a
+boundary, two a day apart do not.
+
+### Three answers that are reports, not decisions
+
+- **A legacy row reports `kind: None`.** The core reads absent as `send` by its own
+  rule (`t.type ?? 'send'`). Substituting `Send` in the shell would hide a legacy row
+  from the core's own rule about legacy rows.
+- **Deleting a missing record answers `DeleteFailed`.** A delete that removed nothing
+  is a failure, not a quiet success: the row is still on the person's screen and the
+  core has to know it is still there.
+- **A haptic is answered on a machine with no haptics.** Skipped would leave the core
+  waiting; the celebration simply runs with one fewer sense.
+
+### Own accounts resolve locally, and case does not matter
+
+`ResolveRecipientIdentity` checks the person's own accounts first — on disk, no
+network — and compares lowercased. A wallet that misses its own account on casing
+labels it a stranger. The ENS/name-service half is the same waterfall
+`contacts::resolve_identity` still owes; they should land together rather than be
+written twice.
+
+### `ScanIncomingTransfers` answers zero, marked `// live in 032`
+
+Receipt discovery is `getLogs` over the transfer allowlist plus `token_trust`
+admission, and the records it persists are the same store 032's send path writes.
+Zero new records is a true statement about a scan that found none — the feed simply
+has nothing to celebrate yet.
