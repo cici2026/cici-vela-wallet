@@ -2597,23 +2597,50 @@ impl WalletPage {
 
         // The banner DSR1 draws over the wallet, kept above the panel content
         // so it reads as a condition of the app rather than of this panel.
-        let banner = if self.settings_dialog == Some(SettingsDialog::FixRpc) {
-            let text = settings_fixtures::banner_text(&self.settings);
-            let chips = settings_fixtures::BANNER_CHAINS
-                .iter()
-                .map(|id| {
-                    let n = settings_fixtures::network(id);
-                    (
-                        n.letter,
-                        n.color,
-                        n.name,
-                        self.settings.rpc_fix_action.clone(),
-                    )
-                })
-                .collect();
-            Some(rpc_banner(theme, &mut self.icons, text, chips))
-        } else {
-            None
+        //
+        // Live since 031, and this is SC-003's visible half: the fetch reports
+        // an unreachable chain separately from an empty one, the core turns
+        // that into `banner_chain_ids` (failed MINUS rate-limited), and this is
+        // where the person finally sees it. A correct verdict nobody is shown
+        // is, from the chair in front of the screen, no verdict.
+        let live_chips = self.identity.is_some().then(|| {
+            let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+            wallet_live::unreachable_chips(&view)
+        });
+        let action = self.settings.rpc_fix_action.clone();
+        let banner = match live_chips {
+            Some(chips) if !chips.is_empty() => {
+                let text = SharedString::from(crate::wallet::fill(
+                    &self.settings.rpc_unavailable_multiple,
+                    "count",
+                    &chips.len().to_string(),
+                ));
+                let chips = chips
+                    .into_iter()
+                    .map(|(letter, color, name)| (letter, color, name, action.clone()))
+                    .collect();
+                Some(rpc_banner(theme, &mut self.icons, text, chips))
+            }
+            // A real session with every chain reachable shows nothing — the
+            // mock state cannot override a live "all well".
+            Some(_) => None,
+            None if self.settings_dialog == Some(SettingsDialog::FixRpc) => {
+                let text = settings_fixtures::banner_text(&self.settings);
+                let chips = settings_fixtures::BANNER_CHAINS
+                    .iter()
+                    .map(|id| {
+                        let n = settings_fixtures::network(id);
+                        (
+                            SharedString::from(n.letter),
+                            n.color,
+                            SharedString::from(n.name),
+                            action.clone(),
+                        )
+                    })
+                    .collect();
+                Some(rpc_banner(theme, &mut self.icons, text, chips))
+            }
+            None => None,
         };
 
         div()

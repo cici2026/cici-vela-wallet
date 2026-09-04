@@ -358,6 +358,49 @@ mod tests {
         );
     }
 
+    /// SC-003's visible half: a chain that could not be reached becomes a chip,
+    /// and one that is merely rate-limited does not.
+    #[test]
+    fn an_unreachable_chain_becomes_a_chip_and_a_rate_limited_one_does_not() {
+        crate::executor::storage::tests::with_temp_state("banner-chips", || {
+            // Nothing wrong: no banner at all. An empty list is not a banner
+            // saying "0 networks unavailable".
+            assert!(unreachable_chips(&view(Some(10.0))).is_empty());
+
+            let mut down = view(Some(10.0));
+            down.banner_chain_ids = vec![100, 137];
+            let chips = unreachable_chips(&down);
+            assert_eq!(chips.len(), 2);
+            assert_eq!(chips[0].2, "Gnosis");
+            assert_eq!(chips[1].2, "Polygon");
+            assert_eq!(chips[0].0, "G");
+            // The tint is the settings table's, so the chip matches the network
+            // row for the same chain.
+            assert_eq!(
+                chips[0].1,
+                crate::settings::model::chain_tint(100)
+                    .unwrap_or_else(|| unreachable!("Gnosis has a tint"))
+            );
+
+            // A network the person added is named by the name they gave it —
+            // which is why these strings are owned rather than `&'static str`.
+            let networks = serde_json::json!([
+                { "chainId": 7_777_777, "displayName": "My testnet" }
+            ]);
+            if crate::executor::storage::write_value(
+                crate::executor::storage::KEY_CUSTOM_NETWORKS,
+                networks,
+            )
+            .is_err()
+            {
+                unreachable!("could not seed");
+            }
+            let mut custom = view(Some(10.0));
+            custom.banner_chain_ids = vec![7_777_777];
+            assert_eq!(unreachable_chips(&custom)[0].2, "My testnet");
+        });
+    }
+
     /// SC-001, end to end: the golden Safe's own money reaches the hero.
     ///
     /// Not a screenshot. This drives the real `balance_dashboard` machine over
@@ -404,6 +447,35 @@ mod tests {
             assert!(usd > 0.01 && usd < 1_000.0, "implausible total ${usd}");
         });
     }
+}
+
+/// The chains a person cannot reach right now, as the banner's chips.
+///
+/// **This is SC-003's visible half.** The fetch already reports an unreachable
+/// chain separately from an empty one, and the core already computes which of
+/// those deserve a banner. Without this the verdict is correct and invisible,
+/// which for the person looking at the screen is the same as absent.
+///
+/// The core's list, not `failed_chain_ids`: `banner_chain_ids` is failed MINUS
+/// rate-limited (invariant ⑦), because a rate limit lifts on its own and a
+/// "fix your RPC" banner that nags about one is telling somebody to repair
+/// something that is not broken.
+#[must_use]
+pub fn unreachable_chips(view: &BalanceView) -> Vec<(SharedString, u32, SharedString)> {
+    view.banner_chain_ids
+        .iter()
+        .map(|chain_id| {
+            let name = crate::executor::custom_tokens::network_name(*chain_id);
+            (
+                crate::settings::model::lettermark(&name),
+                // The same table the network rows and the activity badges read.
+                // A second colour map for the same chains is how one screen's
+                // Polygon stops matching another's.
+                crate::settings::model::chain_tint(u64::from(*chain_id)).unwrap_or(0x8A_8F_98),
+                SharedString::from(name),
+            )
+        })
+        .collect()
 }
 
 /// The chain tint for an activity badge.

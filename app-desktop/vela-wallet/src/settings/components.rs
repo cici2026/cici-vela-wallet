@@ -814,7 +814,15 @@ pub fn rpc_banner(
     theme: &Theme,
     icons: &mut IconCache,
     text: gpui::SharedString,
-    chips: Vec<(&'static str, u32, &'static str, gpui::SharedString)>,
+    // Owned strings, not `&'static str`: the chips are a chain list, and since
+    // 031 that list can come from a live `BalanceView` — a network the person
+    // added has a name nobody could have written into this binary.
+    chips: Vec<(
+        gpui::SharedString,
+        u32,
+        gpui::SharedString,
+        gpui::SharedString,
+    )>,
 ) -> Div {
     let mut row = div().flex().flex_wrap().gap(px(8.));
     for (letter, color, name, action) in chips {
@@ -827,7 +835,7 @@ pub fn rpc_banner(
                 .py(px(6.))
                 .rounded_full()
                 .bg(theme.bg_base)
-                .child(chain_mark(letter.into(), color, 20.))
+                .child(chain_mark(letter, color, 20.))
                 .child(
                     div()
                         .text_size(theme::text_row_sub())

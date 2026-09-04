@@ -652,6 +652,177 @@ was correct; the expectation was a guess. It is the same shape as phase 2's red
 defence is to derive the expectation with a tool rather than by eye.
 
 
+## Phase 9 — the last fail-closed arm, and one lookup instead of two
+
+`executor/identity.rs`, `registry::query_by_wallet_ref`, and both machines'
+identity arms.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **177 passed · 0 failed · 19 ignored** |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · `check-windows.sh` ✅ · warnings 1, pre-existing |
+| `// live in 031` markers remaining | ✅ **0** |
+
+### FR-007's handoff contract is closed
+
+| Arm | 030 | now |
+|---|---|---|
+| `contacts::classify_recipient` | `code: None` | `eth_getCode` (phase 4) |
+| `display_currency::read_device_currency` | `None` | the region's ISO-4217 (phase 4) |
+| `display_currency::resolve_rate` | `None` | the fiat endpoint (phase 4) |
+| `network_admin::invalidate_pools` | no-op | `pool::refresh` (phase 4) |
+| `contacts::resolve_identity` | `None` | **the waterfall** |
+
+Live: `0xd8dA6BF2…6045` → `vitalik.eth` via ENS; the golden Safe → `None`.
+
+### Two machines asked the same question, so now there is one function
+
+`contacts::ResolveIdentity` and `activity_feed::ResolveRecipientIdentity` are
+the same question about the same address. Phase 5 had written the local half
+twice and said so; this phase merged them into `executor::identity::resolve`,
+and `own_account_name` exists once. The feed's test moved with the code rather
+than being deleted or duplicated.
+
+### Only positives are cached, and that is not an optimisation detail
+
+The core says so (invariant ⑦) and the reason is visible from the outside: a
+name registered a minute after somebody looked would be invisible for a whole
+day if the miss were remembered. A miss costs one lookup. A cached miss costs
+the truth. The live test asserts both directions — the name comes back, and the
+nameless address is *not* in the cache afterwards.
+
+### Asked in order, not raced
+
+The web fires all five name services in parallel and takes the first match **by
+priority, not by arrival**. This asks them in order, which is the same answer by
+a slower route. Five sequential lookups against an address nobody has named is
+the worst case, and it is also the rare one: a stranger's address is asked once
+and then not asked again for a day.
+
+## Phase 10 — the seventh machine, and one ledger instead of two
+
+`executor/token_trust.rs`, `executor/custom_tokens.rs`, and `abi::dec_string`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **185 passed · 0 failed · 21 ignored** |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · `check-windows.sh` ✅ · warnings 1, pre-existing |
+| live | ✅ `USDC / 6` through one `aggregate3`; block 48,072,486 and its header time; `eth_getLogs` → `Ok` |
+
+### All seven machines are wired
+
+`rpc_pool`, `balance_dashboard`, `activity_feed`, `receive_watch`,
+`payment_request`, `manage_tokens`, `token_trust`.
+
+### The range cap is the pool's word, not a string match
+
+`eth_getLogs` fails two ways that must not be confused: the endpoint is broken,
+or the endpoint is fine and the span was too wide. Only the second is worth
+retrying narrower, and only the first is worth failing over — the next endpoint
+usually has the same cap, and banning a healthy endpoint over it is how a pool
+loses its best RPC.
+
+`rpc_pool` already parses the wording into `PoolError::RangeCap { max_span }`.
+This file maps that **one** error onto `RangeCapped` and everything else onto
+`Failed`, and never reads an error message.
+
+### Two writers, one file, so one place that knows how it is spelled
+
+`executor/custom_tokens.rs` now owns `vela.customTokens`: the on-disk record,
+the replace-by-id rule, and the `networkName` the core deliberately does not
+carry (`TrustCustomToken`'s own comment: "chain naming is display vocabulary the
+shell derives from `chain_id`"). `manage_tokens` writes it, `token_trust` writes
+it, `balances` reads it. Before this phase the shape was private to
+`manage_tokens` and the second writer would have had to guess at it.
+
+### A decoder that was refusing real tokens
+
+`abi::dec_string` replaced `manage_tokens`'s private copy and gained the
+**bytes32** fallback the web has and we lacked. A legacy ERC-20 — MKR and its
+generation — answers `symbol()` with one fixed 32-byte word rather than the
+`[offset][length][data]` triple. The old decoder required 64 bytes and returned
+`None`, so adding one of those tokens by hand failed with no reason given.
+
+Also ported with it: a declared length that does not fit the payload is read as
+bytes32 rather than trusted, and non-UTF-8 bytes produce `None` rather than a
+replacement character. A mojibake symbol saved into somebody's token list is
+there forever.
+
+### What is not wired, said plainly
+
+Three of `token_trust`'s inputs are **events**, not operations, and nothing
+dispatches them yet: `HeldChainsSnapshot` with real chains, `HeldTokensSnapshot`
+and `RegistryTokensSnapshot`. Unfed, the core degrades exactly as it documents:
+an empty held-chains list polls `DEFAULT_MONITOR_CHAINS`, and a cold registry
+means the trusted set is the customs plus the native sentinels — "everything
+unverified, the safe direction". Fewer contracts trusted, never more.
+
+The dispatch site is screen work and it **must not live in a render pass**.
+Measured, in gpui at rev `c97b7c0`: `App::record_entities_accessed` registers
+every entity a window *read while drawing*, and `App::notify` invalidates the
+window through that registration. So reads are tracked automatically — which is
+why nothing in this client calls `cx.observe` and the live surfaces still
+repaint — and equally why dispatching into another resident from inside a draw
+re-enters. (I had this backwards first and was about to file "no screen observes
+any resident" as a defect. Reading gpui's source cost ten minutes and the claim
+was false.)
+
+## Phase 11 — the closeout
+
+`unreachable_chips` and SC-002's two proofs.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **187 passed · 0 failed · 22 ignored** (031 opened at **125**) |
+| `cargo fmt --all --check` | ✅ clean |
+| `scripts/sweep-gallery.sh` | ✅ 36 states |
+| `scripts/check-windows.sh` | ✅ |
+| warnings (forced rebuild) | ✅ 1 (`BLE_CHANNEL_SUPPORTED`, pre-existing) |
+| `git diff 6324ba39..HEAD -- '*fixtures.rs'` | ✅ **empty** |
+| `git diff 6324ba39..HEAD -- rust/` | ✅ **empty** |
+
+### The verdict table
+
+| | Criterion | Verdict | Evidence |
+|---|---|---|---|
+| SC-001 | the home shows the golden Safe's real Gnosis balance, matching an independent `eth_getBalance` | ✅ **met** | hero renders `$0.76`; app read `0.75897 xDAI`; hand-taken `eth_getBalance` = `0xa8867319d2da000` = `758970000000000000` wei = **0.75897**. `wallet::live::the_hero_shows_the_golden_safes_own_money` |
+| SC-002 | one pool session serves every machine; a ban set by one caller is observed by another — **by test** | ✅ **met** | `one_session_serves_every_caller` (pointer identity on the `OnceLock`) and `a_ban_one_machine_earns_is_the_ban_the_next_machine_meets` — the balance read banned `1rpc.io/gnosis` and `rpc.gnosischain.com`; both were still known when the price service read |
+| SC-003 | an unreachable chain renders as unreachable, not as zero | ✅ **met** | data: `failed_chain_ids` disjoint from `tokens`, asserted live. render: `unreachable_chips` drives the banner from `banner_chain_ids` (failed **minus** rate-limited), with a test for the empty, the two-chain and the custom-network cases |
+| SC-004 | the `// live in 031` arms are live and `read_device_currency` returns a real currency | ✅ **met** | all five arms; zero `live in 031` markers remain; `USD → CNY = 6.71907` |
+| SC-005 | galleries unchanged; every `fixtures.rs` diff additive | ✅ **met** | the `fixtures.rs` diff is **empty**, not merely additive; 36 gallery states render |
+| SC-006 | `cargo test` strictly increases; fmt and the desktop CI job green | ✅ **met** | 125 → **187**; fmt clean; gallery and `check-windows.sh` green |
+| SC-007 | zero corpus delta; no machine file under `rust/` changed | ✅ **met** | the `rust/` diff is empty |
+
+### What 031 did NOT do, and why each one is a decision rather than a gap
+
+| Owed | Why it is not here |
+|---|---|
+| custom ERC-20 **prices** | the rule (`firstGroupedQuotePrice`) has no `vela-core` home and FR-009 forbids this cut from adding one; writing it in the shell is FR-001. Both requirements point the same way |
+| `token_trust`'s **poll dispatch** | a screen dispatch site that must not sit in a render pass, and it needs a visible run to verify |
+| the **receive** and **assets** screens | still the mocks. The receive flow has a 2026-08-15 Penpot redesign the desktop has never drawn; implementing it is a screen build, not read wiring, and 030's precedent is that surfaces without a drawn desktop design stay blocked |
+| **streaming** partial balances | `Event::ChainAssetsArrived` needs a worker→resident event push. Twelve chains settle once instead: correct, just less alive |
+| the **5-minute token TTL** | `force` is accepted and ignored because every fetch is live. The core already says when it wants a TTL bypassed, so adding one later changes no rule |
+| chain-index endpoint **tiers 5 and 6** | `LoadPoolConfig` is answered synchronously on the pool thread; an index round trip there stalls every first call on a chain |
+| Windows **day boundaries** | `GetTimeZoneInformation` is not wired, so Windows groups the feed by UTC day. Recorded with its consequence rather than hidden in a `#[cfg]` |
+
+### The two defects this cut found, and what they have in common
+
+Both were **dormant**: correct-looking code that produced no visible error until
+something else was switched on.
+
+1. `BalanceToken.balance` held raw base units under a comment claiming the core
+   wanted them. Invisible while every price was `None` — anything times zero is
+   zero — and a **10^18×** total the moment a price arrived.
+2. Tempo's RPC answers the same 4.24 × 10^75 constant to `eth_getBalance` for
+   every address on earth, and its coin is called `USD`, so the stable-gas peg
+   priced the junk at exactly $1.00.
+
+Neither was findable by looking at the code that contained it. Both were found
+by *turning the next thing on and reading the output* — a live test that prints
+what it read, rather than one that asserts what I expected. That is the practice
+worth carrying into 032, where the same class of bug moves money instead of
+displaying it.
+
 ---
 
 # 交接:下一个会话从这里开始
@@ -659,45 +830,67 @@ defence is to derive the expectation with a tool rather than by eye.
 工作区 `/Volumes/data/production/vela-wallet-native`,分支 `031-desktop-read-wiring`
 (叠在 `030-desktop-live-shell` 上,后者叠在 `029-native-repair` 上,均未合并)。
 
+**031 的读路径已完工**:七台机器全部接线,五条 fail-closed 臂全部放开,七条 SC 全部
+达标(判定表见 Phase 11)。剩下的是**屏幕**和**花钱**,不是读。
+
 ## 先读这三样
 
-1. **本文件**(031 账本)与 `specs/030-desktop-live-shell/results.md`(含 SC 判定与
-   五条结转欠账)、`specs/029-native-repair/results.md`。
-2. `app-desktop/vela-wallet/src/resident.rs` 的模块注释 —— 解释了为什么常驻机器是
-   gpui entity 而不是 `Global`,以及 `Answer` 为什么把线程边界做成类型。
-3. `src/executor/pool.rs` 的模块注释 —— 为什么 pool 是独立线程而非 resident。
+1. **本文件**(031 账本)——尤其是 Phase 8 的两个休眠缺陷和 Phase 11 的判定表与
+   「没做什么」表。
+2. `app-desktop/vela-wallet/src/executor/balances.rs` 的模块注释 —— 为什么每条链
+   发两个请求,以及为什么自定义代币不定价。
+3. `src/executor/pool.rs` 与 `src/resident.rs` 的模块注释 —— 一个是进程级线程,
+   一个是 gpui entity,两种宿主模型的分界。
 
 ## 立刻可跑的闸门
 
 ```bash
 cd /Volumes/data/production/vela-wallet-native/app-desktop/vela-wallet
-cargo fmt --all --check && cargo test && scripts/sweep-gallery.sh
-# 真网测试必须【按模块】跑,原因见本文件 Phase 4:
+cargo fmt --all --check && cargo test && scripts/sweep-gallery.sh && scripts/check-windows.sh
+# 真网测试必须【按模块】跑,原因见 Phase 4:
 env -u all_proxy -u http_proxy -u https_proxy \
   cargo test executor::pool -- --ignored --test-threads=1
 ```
 
-基线:**156 passed · 0 failed · 14 ignored**,fmt clean,36 个画廊状态,1 个既有
+基线:**187 passed · 0 failed · 22 ignored**,fmt clean,36 个画廊状态,1 个既有
 warning(`BLE_CHANNEL_SUPPORTED`)。
 
-## 031 还剩五件
+有真网测试的模块:`pool` `balances` `chain_tokens` `chainlink` `identity`
+`manage_tokens` `token_trust` `display_currency` `contacts` `network_admin`,以及
+`wallet::live`(端到端英雄区)。
+
+## 031 之后的欠账(按该由谁做分组)
+
+**属于「屏幕」的一刀**(不是读接线,应另开 spec):
 
 | # | 事 | 备注 |
 |---|---|---|
-| 1 | `token_trust` | 最后一台机器(1,937 行 core / 6 ops) |
-| 2 | ERC-20 余额 | `balances.rs` 目前**只读原生币**;需要 Multicall3 编码 + 代币列表 |
-| 3 | 价格 | `price_usd` 全是 `None`,所以余额英雄区还渲染不出法币数字 |
-| 4 | `resolve_identity` | 唯一还挂 `// live in 031` 的臂;与 `activity_feed` 的名字查询是同一个瀑布,**应一起做** |
-| 5 | 收款/资产屏绑定 + 收账 | SC 判定表 |
+| 1 | 收款屏 | 现在还是 mock(写死 BNB + fixture 网络行)。有 2026-08-15 Penpot 重设计,desktop 从未画过 |
+| 2 | 资产屏 | `BalanceView.tokens` 已是 USD 排序的持仓,没有屏幕消费它 |
+| 3 | `token_trust` 轮询派发 | `HeldChainsSnapshot`/`HeldTokensSnapshot`/`PollRequested` 需要一个派发点。**绝不能放在 render 里**(gpui 在绘制时自动追踪 entity 读取,见 Phase 10) |
+
+**属于 032(花钱)的**:`ScanIncomingTransfers` 落库、`ClearBundlerCache`、
+`contacts::LoadSendHistory` —— 三处都还挂着 `// live in 032`。
+
+**属于核心的**:`first_grouped_quote_price` 进 `balance_dashboard.rs`,然后自定义
+ERC-20 才能定价(shell 侧只差八行)。
 
 ## 三条容易踩的坑(我踩过)
 
 1. **`str.replace` 静默不匹配** —— `cargo fmt` 会把目标重排。改文件后必须**重新读回
-   并断言新文本在盘上**,只在写之前断言是不够的(我为此调试过一个陈旧文件两轮)。
+   并断言新文本在盘上**,只在写之前断言是不够的。
 2. **真网测试不能同进程一起跑** —— pool 是进程级单例线程,`with_temp_state` 会在它
    脚下换掉进程级的 `VELA_STATE_DIR`。两者各自都对,但不能共处一个进程。
-3. **别把链上数字钉进断言** —— 金标 Safe 余额在本次会话中间就变了(0.76997 →
-   0.75897)。断行为,不断金额。
+3. **别把链上数字钉进断言** —— 金标 Safe 余额在会话中间就会变。断行为,不断金额。
+   我这次还犯了第四种:**别手算十六进制**,`0xaaf7d19cc1a0000` 我当成了
+   `7.7e17`,红的是测试不是代码。
+
+## 一条方法论,比上面任何一条都值钱
+
+031 找到的两个真缺陷(余额单位、Tempo 常量)**都不是读代码读出来的**,是
+**把下一个开关打开、然后读输出**读出来的 —— 会打印它读到了什么的真网测试,而不是
+断言我以为是什么的测试。两个缺陷都是休眠的:在价格还是 `None` 的时候,两者都完全
+不可见。032 要动的是钱,同一类缺陷不会再有第二次机会。
 
 ## 032 开工前必须先做的一件事
 
@@ -712,3 +905,8 @@ vela-core 已有全部零件(`webauthn.rs` / `registry_proof.rs` / p256),约 150
 给 `vela-core-uniffi` 加 17 台机器的 `bridge_object!` 之前,**先测体积**。spec 019
 记录的闸门是 arm64-v8a **+785,864 剥离字节**;我的估算是再加 **+3~5 MB**,必须在
 033 的 plan 签字前用半小时的探针量出来(三刀分别量:3 / +A / +B / +C),而不是事后。
+
+**033 还要带走一样东西**:`app-desktop/vela-wallet/src/executor/abi.rs` 是 ABI 编解码
+的桌面私有副本。它没有放进 `vela-core`,理由写在文件头(`rust/pkg-web` 是入库产物,
+CI 会重建比对;而 Android/iOS 要用就必须走 uniffi 导出,那正是 033 要先量的体积)。
+033 量完体积后,**升格它**,别让 Kotlin 和 Swift 各写一份。

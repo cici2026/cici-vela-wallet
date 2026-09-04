@@ -676,6 +676,74 @@ mod tests {
         });
     }
 
+    /// SC-002's first half, and it is structural rather than empirical: there
+    /// is exactly ONE session, and no way to ask for a second.
+    ///
+    /// `sender()` hands back a `&'static Mutex` from a `OnceLock`, so pointer
+    /// identity is the whole proof — every caller in this process, from every
+    /// machine, is talking to the same thread and therefore to the same ban
+    /// map, endpoint statistics and race winners. The bug this forecloses is
+    /// the one the web port names in its own header: two sessions, an endpoint
+    /// banned by the balance fetch and retried by the activity read a second
+    /// later, and a ban map that disagrees with itself.
+    #[test]
+    fn one_session_serves_every_caller() {
+        assert!(
+            std::ptr::eq(sender(), sender()),
+            "a second pool session exists"
+        );
+    }
+
+    /// SC-002's second half: a ban one machine's read earns is in the state the
+    /// next machine's read meets.
+    ///
+    /// Chain 100's built-in default endpoint answers this HTTP client with 403
+    /// while curl gets 200 — a debt 030 recorded with no fix, and the reason
+    /// this is testable at all. The balance service reads Gnosis; the pool
+    /// meets that endpoint, classifies it and bans it. Then a DIFFERENT
+    /// machine's service reads the same chain and finds the ban already there.
+    #[test]
+    #[ignore = "hits the real Gnosis pool"]
+    fn a_ban_one_machine_earns_is_the_ban_the_next_machine_meets() {
+        storage::tests::with_temp_state("pool-shared-ban", || {
+            const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            assert!(read_bans().is_empty(), "a fresh state directory");
+
+            // Machine one: the balance dashboard's service.
+            let first = crate::executor::balances::fetch_all(GOLDEN);
+            assert!(!first.0.is_empty(), "nothing was read at all");
+            let after_first = read_bans();
+            for entry in &after_first {
+                println!("  banned by the balance read: {}", entry.url);
+            }
+            assert!(
+                !after_first.is_empty(),
+                "the 403 endpoint should have been banned"
+            );
+
+            // Machine two: the price service, a different caller entirely.
+            crate::executor::chainlink::invalidate();
+            let prices = crate::executor::chainlink::prices();
+            assert!(!prices.is_empty(), "the price read got nothing");
+
+            // Every ban the first read earned is still known. It was not
+            // rediscovered from an empty map, which is what a second session
+            // would have forced.
+            let after_second = read_bans();
+            for entry in &after_first {
+                assert!(
+                    after_second.iter().any(|later| later.url == entry.url),
+                    "{} was forgotten between callers",
+                    entry.url
+                );
+            }
+            println!(
+                "  {} ban(s) survived across two machines' reads",
+                after_first.len()
+            );
+        });
+    }
+
     /// The pool, against the real network, through the real routing.
     ///
     /// This is SC-002's evidence and it is deliberately a READ of the golden
