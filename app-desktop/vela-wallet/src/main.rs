@@ -22,6 +22,7 @@ mod onboarding_flow;
 mod outcome;
 mod passkey_directory;
 mod raster;
+mod resident;
 mod session;
 mod settings;
 mod signing;

@@ -29,6 +29,7 @@ use crate::explore::fixtures as explore_fixtures;
 use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
 use crate::loc::Loc;
+use crate::resident;
 use crate::session;
 use crate::settings::SettingsStrings;
 use crate::settings::components::{
@@ -37,6 +38,7 @@ use crate::settings::components::{
     storage_bar, storage_group, text_scale, url_field,
 };
 use crate::settings::fixtures::{self as settings_fixtures, SettingsPage, Tone, latency, pill};
+use crate::settings::live as settings_live;
 use crate::signing::SigningStrings;
 use crate::signing::components as signing_components;
 use crate::signing::fixtures as signing_fixtures;
@@ -49,6 +51,7 @@ use crate::theme::{
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
+use vela_core::app::display_currency::DisplayCurrency;
 
 use super::WalletStrings;
 use super::components::{
@@ -243,6 +246,10 @@ pub struct WalletPage {
     strings: WalletStrings,
     contacts: ContactsStrings,
     settings: SettingsStrings,
+    /// The resolved language tag. `Loc` is consumed at construction for its
+    /// strings; l10n formatting needs the tag itself, and re-reading the
+    /// environment once per frame to get it would be silly.
+    locale: gpui::SharedString,
     explore: ExploreStrings,
     signing: SigningStrings,
     /// Whether the explore column is showing a page or the start page.
@@ -410,6 +417,7 @@ impl WalletPage {
                 .map(FlowPanel::stack)
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
+            locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
             browsing: false,
@@ -2710,6 +2718,21 @@ impl WalletPage {
             .child(form_row(theme, avatar_label, avatar_control))
     }
 
+    /// What the 货币 row shows — the core's committed currency for a real
+    /// session, the mock's literal for the design surfaces.
+    ///
+    /// Gated on `identity` for the same reason `sign_out_row` is: `VELA_PAGE=
+    /// settings` and the gallery are design surfaces with no session behind
+    /// them, and a fixture screen quietly reading live state is how a gallery
+    /// stops being reviewable.
+    fn currency_value(&self, cx: &mut Context<Self>) -> gpui::SharedString {
+        if self.identity.is_none() {
+            return gpui::SharedString::from("USD · $1,234.56");
+        }
+        let view = resident::resident::<DisplayCurrency>(cx).read(cx).view();
+        settings_live::currency_row_value(&view, &self.locale)
+    }
+
     /// DST3 — currency, number, date and time formats.
     ///
     /// One of the four can be OPEN, and the mock's is 数字格式. The menu is an
@@ -2721,11 +2744,7 @@ impl WalletPage {
         let auto_note =
             gpui::SharedString::from(format!("{} · {}", s.note_automatic, s.note_system));
         let rows: [(&'static str, gpui::SharedString, gpui::SharedString); 4] = [
-            (
-                "currency",
-                s.currency.clone(),
-                gpui::SharedString::from("USD · $1,234.56"),
-            ),
+            ("currency", s.currency.clone(), self.currency_value(cx)),
             (
                 "number",
                 s.number_format.clone(),
