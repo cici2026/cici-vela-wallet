@@ -33,6 +33,7 @@ pub mod network_admin;
 pub mod passkey;
 #[cfg(target_os = "macos")]
 mod platform_macos;
+pub mod pool;
 pub mod proxy;
 pub mod registry;
 pub mod storage;

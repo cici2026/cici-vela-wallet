@@ -41,6 +41,7 @@ pub const KEY_CONTACT_GROUPS: &str = "vela.contactGroups";
 pub const KEY_CUSTOM_NETWORKS: &str = "vela.customNetworks";
 pub const KEY_NETWORK_CONFIG: &str = "vela.networkConfig";
 pub const KEY_RPC_PROVIDERS: &str = "vela.rpcProviders";
+pub const KEY_RPC_BANNED: &str = "vela.rpc.banned";
 pub const KEY_DISPLAY_CURRENCY: &str = "vela.displayCurrency";
 
 /// The storage failed in a way the core answers with `storage_failed`, never a

@@ -79,3 +79,65 @@ Gnosis endpoints. It is `registry.rs:362`'s **first** endpoint and it is Gnosis'
 default in the chains table. The pool's scoring and ban rules will meet it
 immediately, which makes it a useful first real test of exactly the behaviour this
 cut is wiring — and a reason not to assume any single endpoint answers.
+
+## Phase 1 — the routing authority
+
+`src/executor/pool.rs`: the `rpc_pool` machine on its own thread, with a blocking
+call API, six-tier endpoint collection, and bans that persist.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **128 passed · 0 failed · 9 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced) | ✅ 1, pre-existing |
+| live read through the pool | ✅ see below |
+
+### Why the pool is a thread, not a resident
+
+Every other machine lives in `resident.rs`, driven from the main thread and rendered
+by a screen. The pool has neither property: its callers are **background workers doing
+blocking HTTP** — the balance fetch, the activity read, a recipient probe — and they
+need an answer on the thread they are already on. Routing them through the main thread
+would put a multi-second round trip in front of the next frame, which is precisely
+what the resident host exists to avoid.
+
+So the pool owns a thread, and callers block on a reply channel. One `OnceLock`, and
+no way to make a second session — the ban map, per-endpoint statistics and race
+winners are facts about the network **every** caller shares. Two sessions means an
+endpoint banned by the balance fetch and retried by the activity read a second later.
+
+### The live read, and why it is the right test
+
+```
+golden Safe: 0.76997 xDAI via the pool
+second read agreed — one session, shared state
+```
+
+That figure matches an independent `eth_getBalance` taken by hand. And chain 100's
+**built-in default endpoint is `rpc.gnosischain.com`** — the one that answers this
+client with 403. So the pool could only produce that number by scoring it, failing
+over and reaching a different endpoint. A single-endpoint client cannot read this
+balance at all, which makes the inherited 403 debt the most useful possible first test
+of exactly what this phase wires.
+
+### What this file owns, and what it must never
+
+Two things the core cannot have: **the fetch**, and **the reply channel the caller is
+waiting on**. Everything about *where a call goes next* — six-tier source scoring, EMA
+latency, cooldowns, temp and permanent bans, four-way error classification, the
+three-pass sweep, the all-banned self-rescue — is `rpc_pool.rs`'s 1,975 lines. If this
+file grows an `if` that decides where a call goes, it is in the wrong file.
+
+Two details the core's comments insisted on and this file obeys:
+- **Bans are not filtered during collection.** "Do NOT filter banned URLs — bans are
+  this core's state." The shell offers every endpoint; the core decides which is dead.
+- **The body never enters the core.** A `PostOutcome` reports only whether there was
+  an `error` member; the shell holds the JSON per `(call_id, url)` and hands over the
+  one the verdict names. A 3 MB `eth_getLogs` answer stays out of the machine's state.
+
+### A tier deliberately not implemented, recorded rather than forgotten
+
+Tiers 5 and 6 are the chain index's endpoint list. `LoadPoolConfig` is answered
+synchronously on the pool thread, and an index round trip there would stall every
+first call on a chain behind an HTTP fetch. The core orders whatever it is given, so
+adding those tiers later changes no rule — it is a debt, not a divergence.
