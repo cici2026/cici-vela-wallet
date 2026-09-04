@@ -96,7 +96,13 @@ fn site(
 }
 
 pub fn uniswap() -> SiteModel {
-    site("uniswap", "Uniswap", "app.uniswap.org", "U", brand_uniswap())
+    site(
+        "uniswap",
+        "Uniswap",
+        "app.uniswap.org",
+        "U",
+        brand_uniswap(),
+    )
 }
 
 /// The favourites grid, in mock order (DE2).

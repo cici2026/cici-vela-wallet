@@ -13,7 +13,10 @@ use gpui::SharedString;
 use crate::loc::Loc;
 
 /// Every explore string, resolved once per locale (spec 022 §5 key map).
-#[allow(dead_code, reason = "the phone shells resolve the same struct; the desktop mocks (DE1–DE4) draw a subset")]
+#[allow(
+    dead_code,
+    reason = "the phone shells resolve the same struct; the desktop mocks (DE1–DE4) draw a subset"
+)]
 pub struct ExploreStrings {
     pub title: SharedString,
     pub search_placeholder: SharedString,
@@ -119,7 +122,10 @@ mod tests {
         for (value, key) in [
             (s.title.as_ref(), "explore.title"),
             (s.start_cta.as_ref(), "explore.startCta"),
-            (s.connection_explainer.as_ref(), "explore.connectionExplainer"),
+            (
+                s.connection_explainer.as_ref(),
+                "explore.connectionExplainer",
+            ),
             (s.close.as_ref(), "explore.close"),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");

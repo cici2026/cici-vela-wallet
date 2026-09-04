@@ -73,3 +73,83 @@ are all declared in `main.rs`; iOS `Gallery` is instantiated at `RootView.swift:
 With zero exemptions the guard reports exactly the two real orphans per platform and
 no false positives. A guard that ships pre-populated with exemptions nobody needs is
 a guard the next orphan hides behind.
+
+## Phase 2 — desktop wired
+
+`main.rs` +7 lines (portable verbatim from `969bf8fc`), `wallet/page.rs` (14 hunks
+hand re-applied), `icons.rs` (+9 variants), and the 379-line explore/signing render
+body appended into `impl WalletPage`.
+
+| Gate | Result |
+|---|---|
+| `cargo build` | ✅ |
+| `cargo test` | ✅ **93 passed · 0 failed · 5 ignored** (baseline 88/0/5) |
+| `cargo fmt --all --check` | ✅ clean |
+| clippy, files this phase touched | ✅ 0 warnings in `wallet/`, `explore/`, `signing/` |
+| `scripts/check-native-reachability.mjs` | ✅ desktop no longer listed (Android + iOS still red — phases 3 and 4) |
+| `VELA_PAGE=explore` | ✅ window opens, log reads `section Explore`, survives 6s; screenshot on file |
+| FR-003 fixtures | ✅ **every string literal byte-identical** in both `fixtures.rs` (only rustfmt reflow) |
+
+### The five tests that had never run
+
+```
+explore::tests::explore_strings_resolve_without_echo ... ok
+signing::tests::signing_strings_resolve_without_echo ... ok
+signing::tests::fill_replaces_named_vars ... ok
+signing::fixtures::tests::every_scenario_builds ... ok
+signing::fixtures::tests::unlimited_approval_cannot_be_confirmed_as_requested ... ok
+```
+
+The last one is one of the two product contracts 022's own commit message says the
+desktop asserts — *"an unlimited approval can never be signed as requested"*. It has
+been asserting nothing for two days.
+
+### Three tools were blind, not one
+
+Worth recording because it widens the lesson. The baseline `cargo fmt --all --check`
+was **clean**, and the moment `mod explore; mod signing;` landed it reported diffs in
+four files. rustfmt walks the module tree, so an undeclared directory is invisible to
+it for exactly the same reason it is invisible to rustc and to the test harness.
+Compiler, formatter and test runner all silently skipped 3,571 lines. A reachability
+check is not a nicety here; it is the only instrument that could see this.
+
+### Deviations from `969bf8fc` (the drift FR-004 predicted)
+
+1. **`ExternalLink` already exists.** The commit adds ten `Icon` variants; one of
+   them landed on `main` since. Nine added, no duplicate.
+2. **`Identity::display()` now returns `SharedString`**, not `String`. The branch's
+   `.child(SharedString::from(identity.display()))` is a useless conversion today and
+   fails `clippy -D warnings`. Rewritten to `.child(identity.display())`.
+3. **`Section` has a third variant now.** `Section::Wallet => GalleryTab::D1` became
+   `Section::Wallet | Section::Explore => GalleryTab::D1`, and the match also had to
+   keep covering `Section::Settings`, which did not exist on the branch.
+4. **Insertion point moved.** The 379-line body went in before `fn wallet_columns`,
+   which is at line 3,449 today against 1,886 then.
+
+Each is a place `git apply` would have produced a conflict or a silent wrong result.
+
+### Discovered defect — handed off, not fixed here
+
+With `VELA_LANG=en` the Explore screen renders **13 hardcoded CJK string literals**
+(11 in `explore/fixtures.rs`, 2 in `signing/fixtures.rs`): category titles 交易 /
+预测市场, relative timestamps 刚刚 / 昨天, subtitles 稳定币兑换 / 永续合约交易.
+These are wallet chrome, not site content, so 022's "the stand-in page's words are
+the site's" rule does not cover them — they should resolve from the corpus.
+
+**Not fixed in this feature, deliberately.** The fix needs corpus keys, and FR-007
+forbids regenerating the corpus while 026 is open — a corpus collision between two
+in-flight sessions is the documented root cause of the very loss this feature is
+repairing. Doing it twice would be the joke writing itself. Carried to the handoff.
+
+### Recorded debt — the desktop crate has never been clippy-clean
+
+`cargo clippy --all-targets -- -D warnings` fails on the **baseline** with 10
+warnings this feature did not introduce: 7 in `src/ctap/cable.rs`, 1 in
+`src/ctap/cable/l2cap.rs` (`Arc` that is not `Send`/`Sync`), 1 in `src/hardware.rs`,
+1 in `src/onboarding.rs` (both "very complex type"). Measured by stashing this
+feature's changes and re-running.
+
+Nothing here ever ran clippy, so nothing here was ever clean. The CI job in the next
+phase has to decide between gating at `-D warnings` (which means fixing 10 unrelated
+warnings in caBLE/Noise transport code) and gating lower. That decision is recorded
+in the phase that makes it, not smuggled into this one.

@@ -57,11 +57,7 @@ pub fn site_tile(id: ElementId, theme: &Theme, site: &SiteModel) -> Stateful<Div
         .items_center()
         .gap(px(8.))
         .cursor_pointer()
-        .child(letter_avatar(
-            site.letter.clone(),
-            site.tint,
-            TILE_AVATAR,
-        ))
+        .child(letter_avatar(site.letter.clone(), site.tint, TILE_AVATAR))
         .child(
             div()
                 .text_size(theme::text_row_sub())
@@ -120,11 +116,7 @@ pub fn site_row(
         .gap(px(12.))
         .py(px(10.))
         .cursor_pointer()
-        .child(letter_avatar(
-            site.letter.clone(),
-            site.tint,
-            ROW_AVATAR,
-        ))
+        .child(letter_avatar(site.letter.clone(), site.tint, ROW_AVATAR))
         .child(
             div()
                 .flex()
@@ -195,7 +187,13 @@ pub fn tab_strip(
             face = face.child(letter_avatar(site.letter.clone(), site.tint, 16.));
         }
         face = face
-            .child(div().flex_1().min_w(px(0.)).truncate().child(tab.title.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .child(tab.title.clone()),
+            )
             .child(icon_img(icons, Icon::X, false, theme.fg_muted, 12.));
         strip = strip.child(
             div()
@@ -206,19 +204,25 @@ pub fn tab_strip(
         let _ = &close_label;
     }
 
-    strip.child(
-        div()
-            .id("new-tab")
-            .mb(px(6.))
-            .w(px(20.))
-            .h(px(20.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .child(icon_img(icons, Icon::Plus, false, theme.fg_muted, 14.)),
-    )
-    .child(div().flex_1().child(div().h(px(1.)).child(new_tab_label.clone())).invisible())
+    strip
+        .child(
+            div()
+                .id("new-tab")
+                .mb(px(6.))
+                .w(px(20.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .child(icon_img(icons, Icon::Plus, false, theme.fg_muted, 14.)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .child(div().h(px(1.)).child(new_tab_label.clone()))
+                .invisible(),
+        )
 }
 
 /// One toolbar control — a 32 square with a tinted glyph.
@@ -320,14 +324,24 @@ pub fn toolbar(
         .bg(theme.bg_base)
         .border_b_1()
         .border_color(theme.divider)
-        .child(toolbar_control(theme, icons, Icon::ArrowLeft, theme.fg_base))
+        .child(toolbar_control(
+            theme,
+            icons,
+            Icon::ArrowLeft,
+            theme.fg_base,
+        ))
         .child(toolbar_control(
             theme,
             icons,
             Icon::ArrowRight,
             theme.fg_subtle,
         ))
-        .child(toolbar_control(theme, icons, Icon::RefreshCw, theme.fg_base))
+        .child(toolbar_control(
+            theme,
+            icons,
+            Icon::RefreshCw,
+            theme.fg_base,
+        ))
         .child(
             div()
                 .flex_1()

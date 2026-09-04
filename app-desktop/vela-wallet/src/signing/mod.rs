@@ -26,7 +26,10 @@ pub enum Tone {
 /// Every signing string, resolved once per locale. Roughly 95% of these keys
 /// predate spec 022: the shipping React Native sheet already had them, and
 /// reusing them is what keeps one wallet saying one thing about a transaction.
-#[allow(dead_code, reason = "the catalogue fills every field; the desktop panel (DCS1–8) renders a subset")]
+#[allow(
+    dead_code,
+    reason = "the catalogue fills every field; the desktop panel (DCS1–8) renders a subset"
+)]
 pub struct SigningStrings {
     pub panel_title: SharedString,
     pub signing_account: SharedString,
@@ -164,7 +167,10 @@ impl SigningStrings {
         let s = |key: &str| loc.t(&format!("componentsUi.signing.{key}"));
         let a = |key: &str| loc.t(&format!("componentsUi.signingApprove.{key}"));
         let raw = |key: &str| loc.t(&format!("componentsUi.signing.{key}")).to_string();
-        let raw_a = |key: &str| loc.t(&format!("componentsUi.signingApprove.{key}")).to_string();
+        let raw_a = |key: &str| {
+            loc.t(&format!("componentsUi.signingApprove.{key}"))
+                .to_string()
+        };
         Self {
             panel_title: s("signatureRequest"),
             signing_account: s("signingAccount"),
@@ -316,10 +322,19 @@ mod tests {
         let loc = Loc::from_env();
         let s = SigningStrings::resolve(&loc);
         for (value, key) in [
-            (s.panel_title.as_ref(), "componentsUi.signing.signatureRequest"),
-            (s.slide_to_confirm.as_ref(), "componentsUi.signing.slideToConfirm"),
+            (
+                s.panel_title.as_ref(),
+                "componentsUi.signing.signatureRequest",
+            ),
+            (
+                s.slide_to_confirm.as_ref(),
+                "componentsUi.signing.slideToConfirm",
+            ),
             (s.warn_drain.as_ref(), "componentsUi.signing.drainWarning"),
-            (s.value_unlimited.as_ref(), "componentsUi.signingApprove.unlimitedValue"),
+            (
+                s.value_unlimited.as_ref(),
+                "componentsUi.signingApprove.unlimitedValue",
+            ),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");
         }
@@ -329,9 +344,6 @@ mod tests {
 
     #[test]
     fn fill_replaces_named_vars() {
-        assert_eq!(
-            fill("{{a}} → {{b}}", &[("a", "x"), ("b", "y")]),
-            "x → y"
-        );
+        assert_eq!(fill("{{a}} → {{b}}", &[("a", "x"), ("b", "y")]), "x → y");
     }
 }

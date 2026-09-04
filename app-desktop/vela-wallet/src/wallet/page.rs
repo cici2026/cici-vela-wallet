@@ -23,6 +23,9 @@ use crate::contacts::components::{
     rail_row, row_divider, search_field, section_letter, text_action,
 };
 use crate::contacts::fixtures as contacts_fixtures;
+use crate::explore::ExploreStrings;
+use crate::explore::components as explore_components;
+use crate::explore::fixtures as explore_fixtures;
 use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
 use crate::loc::Loc;
@@ -34,6 +37,9 @@ use crate::settings::components::{
     storage_bar, storage_group, text_scale, url_field,
 };
 use crate::settings::fixtures::{self as settings_fixtures, SettingsPage, Tone, latency, pill};
+use crate::signing::SigningStrings;
+use crate::signing::components as signing_components;
+use crate::signing::fixtures as signing_fixtures;
 use crate::theme::{
     self, CONTACTS_BODY_PAD_TOP, CONTACTS_BUTTON_H, CONTACTS_HEADER_H, CONTACTS_HERO_AVATAR,
     CONTACTS_RAIL_LABEL_H, CONTACTS_RAIL_ROW_H, CONTACTS_RAIL_W, GALLERY_BAR_H, SETTINGS_DIALOG_W,
@@ -62,6 +68,13 @@ pub enum PanelId {
     AssetDetail,
     /// Spec 018 DC2 — the contacts third-column content.
     ContactDetail,
+    /// Spec 022 DE3 — what a connected site can and cannot do.
+    Connection,
+    /// Spec 022 DE4 / DCS1–8 — a signing request, beside the page that raised
+    /// it. That adjacency is the desktop's own anti-phishing advantage: the
+    /// request and the site making it can be read against each other without
+    /// dismissing either.
+    Signing,
     /// Spec 021 — whatever is on top of `flows`. The stack is the state; this
     /// variant only says the column belongs to it.
     Flow,
@@ -85,6 +98,8 @@ fn gallery_bar_caption_pad(caption: bool) -> f32 {
 pub enum Section {
     Wallet,
     Contacts,
+    /// Spec 022 — the browser. Same shell, third body.
+    Explore,
     /// Spec 023: the settings section — a second-level nav plus one panel,
     /// hosted in the same three-column shell contacts already reuses.
     Settings,
@@ -111,6 +126,10 @@ enum ContactsMenu {
     Header,
     /// Group-row context menu, top-left at the cursor (DC6 / M2).
     Group,
+    /// Spec 022 M3 — the browsing toolbar's ⋯ site menu.
+    Site,
+    /// Spec 022 M4 — right-click on a favourite tile (DE2).
+    Tile,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -224,6 +243,12 @@ pub struct WalletPage {
     strings: WalletStrings,
     contacts: ContactsStrings,
     settings: SettingsStrings,
+    explore: ExploreStrings,
+    signing: SigningStrings,
+    /// Whether the explore column is showing a page or the start page.
+    browsing: bool,
+    /// Which CS scenario the third column holds when `PanelId::Signing`.
+    signing_state: &'static str,
     section: Section,
     /// Which settings panel the second-level nav is showing (spec 023).
     settings_page: SettingsPage,
@@ -328,6 +353,11 @@ impl WalletPage {
         Self::with_section(Section::Contacts, false, window, cx)
     }
 
+    /// `VELA_PAGE=explore` opens straight onto the browser (spec 022).
+    pub fn explore(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::with_section(Section::Explore, false, window, cx)
+    }
+
     fn with_section(
         section: Section,
         gallery: bool,
@@ -342,6 +372,8 @@ impl WalletPage {
         let strings = WalletStrings::resolve(&loc);
         let contacts = ContactsStrings::resolve(&loc);
         let settings = SettingsStrings::resolve(&loc);
+        let explore = ExploreStrings::resolve(&loc);
+        let signing = SigningStrings::resolve(&loc);
 
         let page = cx.weak_entity();
         window
@@ -378,6 +410,10 @@ impl WalletPage {
                 .map(FlowPanel::stack)
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
+            explore,
+            signing,
+            browsing: false,
+            signing_state: "cs12",
             settings_page: SettingsPage::Account,
             settings_dialog: None,
             settings_expanded_network: None,
@@ -387,7 +423,7 @@ impl WalletPage {
             contacts_empty: false,
             menu: None,
             tab: match section {
-                Section::Wallet => GalleryTab::D1,
+                Section::Wallet | Section::Explore => GalleryTab::D1,
                 Section::Contacts => GalleryTab::Dc1,
                 Section::Settings => GalleryTab::Dst1,
             },
@@ -562,7 +598,11 @@ impl WalletPage {
                 s.nav_contacts.clone(),
                 Some(Section::Contacts),
             ),
-            (Icon::NavExplore, s.nav_explore.clone(), None),
+            (
+                Icon::NavExplore,
+                s.nav_explore.clone(),
+                Some(Section::Explore),
+            ),
             (
                 Icon::NavSettings,
                 s.nav_settings.clone(),
@@ -3409,6 +3449,379 @@ impl WalletPage {
             )
     }
 
+    // -- column 2: explore (spec 022 DE1–DE4) --------------------------------
+
+    /// The browser column: tab strip, toolbar, then either the start page or
+    /// the page being browsed. The start page is the same vocabulary the phone
+    /// draws — favourites grid, groups of rows — at desktop width.
+    fn explore_content(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let browsing = self.browsing;
+        let tabs = explore_fixtures::tabs(&self.explore, browsing);
+        let strip = explore_components::tab_strip(
+            theme,
+            &mut self.icons,
+            &tabs,
+            self.explore.new_tab.clone(),
+            self.explore.close_tab.clone(),
+        );
+        let identity = self.identity();
+        // The two trailing affordances open different things, so the page — not
+        // the component — carries their listeners.
+        let star =
+            explore_components::toolbar_control(theme, &mut self.icons, Icon::Star, theme.fg_base);
+        let dots = explore_components::toolbar_control(
+            theme,
+            &mut self.icons,
+            Icon::Ellipsis,
+            theme.fg_base,
+        );
+        let chip = explore_components::account_chip(
+            theme,
+            &mut self.identicons,
+            identity.name.clone(),
+            &identity.address,
+            browsing,
+        );
+        let trailing = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(star)
+            .child(
+                div()
+                    .id("site-menu")
+                    .cursor_pointer()
+                    .child(dots)
+                    .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                        this.menu = Some((ContactsMenu::Site, event.position(), Anchor::TopRight));
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("account-chip")
+                    .cursor_pointer()
+                    .child(chip)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel = if this.panel == PanelId::Connection {
+                            PanelId::None
+                        } else {
+                            PanelId::Connection
+                        };
+                        cx.notify();
+                    })),
+            );
+        let toolbar = explore_components::toolbar(
+            theme,
+            &mut self.icons,
+            browsing,
+            explore_fixtures::uniswap().host,
+            self.explore.search_placeholder.clone(),
+            trailing,
+        );
+
+        let body: gpui::AnyElement = if browsing {
+            explore_components::demo_page(&explore_fixtures::demo_page())
+                .child(
+                    // The site's own button is what raises a signing request;
+                    // the wallet never invents one.
+                    div()
+                        .id("demo-action")
+                        .absolute()
+                        .size_full()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.panel = PanelId::Signing;
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            self.explore_start(theme, cx).into_any_element()
+        };
+
+        div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(theme.bg_base)
+            .child(strip)
+            .child(toolbar)
+            .child(body)
+    }
+
+    /// DE1/DE2's start page.
+    fn explore_start(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+        let mut column = div()
+            .id("explore-start")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .p(px(32.))
+            .flex()
+            .flex_col();
+
+        let favorites = explore_fixtures::favorites();
+        column = column.child(section_header(
+            theme,
+            &mut self.icons,
+            self.explore.favorites.clone(),
+            self.explore.edit.clone(),
+        ));
+
+        let mut grid = div().flex().flex_wrap().gap(px(12.)).py(px(12.));
+        for (i, site) in favorites.iter().enumerate() {
+            grid = grid.child(
+                explore_components::site_tile(ElementId::from(("tile", i)), theme, site)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.browsing = true;
+                        cx.notify();
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                            this.menu = Some((ContactsMenu::Tile, event.position, Anchor::TopLeft));
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        grid = grid.child(explore_components::add_tile(
+            ElementId::from("tile-add"),
+            theme,
+            &mut self.icons,
+            self.explore.add.clone(),
+        ));
+        column = column.child(grid);
+
+        for group in explore_fixtures::groups(&self.explore) {
+            let action = match group.action {
+                explore_fixtures::GroupAction::Clear => self.explore.clear.clone(),
+                explore_fixtures::GroupAction::Edit => self.explore.edit.clone(),
+                explore_fixtures::GroupAction::Menu => SharedString::from("⋯"),
+            };
+            column = column.child(section_header(
+                theme,
+                &mut self.icons,
+                group.title.clone(),
+                action,
+            ));
+            let mut rows = div().flex().flex_col();
+            for (i, site) in group.sites.iter().enumerate() {
+                rows = rows.child(
+                    explore_components::site_row(
+                        ElementId::from((group.id, i)),
+                        theme,
+                        &mut self.identicons,
+                        site,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.browsing = true;
+                        cx.notify();
+                    })),
+                );
+            }
+            column = column.child(rows);
+        }
+
+        column
+    }
+
+    /// DE3's third column — what a connected site can and cannot do.
+    fn connection_body(&mut self, theme: &Theme) -> Div {
+        let site = explore_fixtures::uniswap();
+        let identity = self.identity();
+        let e = &self.explore;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(explore_components::letter_avatar(
+                        site.letter.clone(),
+                        site.tint,
+                        40.,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(theme::text_row_title())
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg_base)
+                                    .child(site.host.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme::text_row_sub())
+                                    .text_color(theme.success_base)
+                                    .child(SharedString::from(format!(
+                                        "{} · {}",
+                                        e.secure_site, e.connected_tag
+                                    ))),
+                            ),
+                    ),
+            )
+            .child(row_divider(theme))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(identicon_avatar(
+                        &mut self.identicons,
+                        &identity.address,
+                        40.,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .flex_1()
+                            .child(
+                                div()
+                                    .text_size(theme::text_row_title())
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(theme.fg_base)
+                                    .child(identity.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_size(theme::text_row_sub())
+                                    .text_color(theme.fg_muted)
+                                    .child(identity.display()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_muted)
+                            .child(self.explore.switch_account.clone()),
+                    ),
+            )
+            .child(row_divider(theme))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_muted)
+                            .child(self.explore.network.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .w(px(8.))
+                                    .h(px(8.))
+                                    .rounded_full()
+                                    .bg(fixtures::chain_ethereum()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme::text_row_title())
+                                    .text_color(theme.fg_base)
+                                    .child(SharedString::from("Ethereum")),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_muted)
+                    .child(self.explore.connection_explainer.clone()),
+            )
+            .child(outline_button(
+                ElementId::from("disconnect"),
+                theme,
+                &mut self.icons,
+                None,
+                self.explore.disconnect.clone(),
+            ))
+            .child(
+                div()
+                    .text_center()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_subtle)
+                    .child(self.explore.auto_request_hint.clone()),
+            )
+    }
+
+    /// DE4 / DCS1–8's third column — the signing request itself.
+    fn signing_body(&mut self, theme: &Theme) -> Div {
+        let model = signing_fixtures::build(self.signing_state, &self.signing);
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(signing_components::header(theme, &model));
+
+        for item in &model.blocks {
+            column = column.child(signing_components::block(theme, &mut self.icons, item));
+        }
+
+        column = column
+            .child(row_divider(theme))
+            // The disclosure, collapsed — the universal fallback renderer's
+            // entrance. Its five layers live in the phone shells today; the
+            // desktop mocks (DCS1–8) draw only this row.
+            .child(
+                div()
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon_img(
+                        &mut self.icons,
+                        Icon::ChevronRight,
+                        false,
+                        theme.fg_muted,
+                        12.,
+                    ))
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_muted)
+                            .child(self.signing.advanced_toggle.clone()),
+                    ),
+            );
+        if let Some(fee) = signing_components::fee(theme, &mut self.icons, &model.fee) {
+            column = column.child(fee);
+        }
+        column = column
+            .child(signing_components::signer_row(
+                theme,
+                &mut self.identicons,
+                model.signer_label.clone(),
+                model.signer_name.clone(),
+                &model.signer_seed,
+            ))
+            .child(signing_components::slide_to_confirm(
+                theme,
+                &mut self.icons,
+                model.confirm_label.clone(),
+                model.confirm_enabled,
+            ));
+        column
+    }
+
     fn wallet_columns(&mut self, theme: &Theme, caption: bool, cx: &mut Context<Self>) -> Div {
         let mut columns = div()
             .flex_1()
@@ -3418,6 +3831,7 @@ impl WalletPage {
         columns = match self.section {
             Section::Wallet => columns.child(self.content(theme, cx)),
             Section::Contacts => columns.child(self.contacts_content(theme, caption, cx)),
+            Section::Explore => columns.child(self.explore_content(theme, cx)),
             Section::Settings => columns
                 .child(self.settings_nav(theme, cx))
                 .child(self.settings_panel(theme, cx)),
@@ -3436,6 +3850,16 @@ impl WalletPage {
             PanelId::ContactDetail => {
                 let body = self.contact_detail_body(theme);
                 let title = self.contacts.section_contacts.clone();
+                columns.child(self.panel_scaffold(theme, title, body, cx))
+            }
+            PanelId::Connection => {
+                let body = self.connection_body(theme);
+                let title = self.explore.connection_title.clone();
+                columns.child(self.panel_scaffold(theme, title, body, cx))
+            }
+            PanelId::Signing => {
+                let body = self.signing_body(theme);
+                let title = self.signing.panel_title.clone();
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
             PanelId::Flow => match self.flows.last().copied() {
@@ -3506,6 +3930,8 @@ impl WalletPage {
         let model = match kind {
             ContactsMenu::Header => contacts_fixtures::header_dropdown(&self.contacts),
             ContactsMenu::Group => contacts_fixtures::group_context(&self.contacts),
+            ContactsMenu::Site => explore_fixtures::site_menu(&self.explore),
+            ContactsMenu::Tile => explore_fixtures::tile_menu(&self.explore),
         };
         let card = menu_card(theme, &mut self.icons, &model);
         Some(

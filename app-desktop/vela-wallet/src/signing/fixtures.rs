@@ -145,13 +145,19 @@ pub struct SigningModel {
 }
 
 /// The eight scenarios the desktop mocks pinned (DCS1–8 + DE4), in order.
-#[allow(dead_code, reason = "cross-platform scenario inventory (data-model.md §3)")]
+#[allow(
+    dead_code,
+    reason = "cross-platform scenario inventory (data-model.md §3)"
+)]
 pub const DESKTOP_STATES: [&str; 9] = [
     "cs1", "cs5", "cs11", "cs16", "cs24", "cs26", "cs32", "cs33", "cs12",
 ];
 
 /// Every scenario in the catalogue, phone and desktop alike.
-#[allow(dead_code, reason = "cross-platform scenario inventory (data-model.md §3)")]
+#[allow(
+    dead_code,
+    reason = "cross-platform scenario inventory (data-model.md §3)"
+)]
 pub const ALL_STATES: [&str; 33] = [
     "cs1", "cs2", "cs3", "cs4", "cs5", "cs6", "cs7", "cs8", "cs9", "cs10", "cs11", "cs12", "cs13",
     "cs14", "cs15", "cs16", "cs17", "cs18", "cs19", "cs20", "cs21", "cs22", "cs23", "cs24", "cs25",
@@ -471,9 +477,7 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                             (s.chip_custom.clone(), ChipState::Idle),
                             (s.chip_revoke.clone(), ChipState::Idle),
                         ],
-                        note: Some(
-                            format!("{} {}", s.unlimited_disabled, s.choose_prompt).into(),
-                        ),
+                        note: Some(format!("{} {}", s.unlimited_disabled, s.choose_prompt).into()),
                         resulting_total: None,
                     },
                     Block::Party {
@@ -996,7 +1000,11 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                     Block::Rows(vec![
                         row(s.label_typed_domain.clone(), "CoolProtocol · v2"),
                         row(s.label_type.clone(), "Order"),
-                        toned_row(s.label_signing_for.clone(), "dapp.example.com", Tone::Accent),
+                        toned_row(
+                            s.label_signing_for.clone(),
+                            "dapp.example.com",
+                            Tone::Accent,
+                        ),
                     ]),
                     Block::Code {
                         lines: vec![
@@ -1035,9 +1043,7 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                         ],
                         note: None,
                     },
-                    Block::Positive(
-                        fill(&s.ok_siwe, &[("domain", "app.ens.domains")]).into(),
-                    ),
+                    Block::Positive(fill(&s.ok_siwe, &[("domain", "app.ens.domains")]).into()),
                 ],
                 &s.sign_label,
             );
@@ -1110,9 +1116,7 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                             "060708091011121314151617181920".into(),
                             "2122232425262728293031…".into(),
                         ],
-                        note: Some(
-                            format!("({})", fill(&s.byte_size, &[("n", "80")])).into(),
-                        ),
+                        note: Some(format!("({})", fill(&s.byte_size, &[("n", "80")])).into()),
                     },
                     Block::Rows(vec![row(s.label_signing_for.clone(), "dapp.example.com")]),
                 ],
@@ -1312,9 +1316,7 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                 // too: a wrapper that showed only the outer call would show
                 // nothing at all.
                 Block::Card {
-                    title: Some(
-                        fill(&s.safe_inner_call, &[("action", &s.intent_send)]).into(),
-                    ),
+                    title: Some(fill(&s.safe_inner_call, &[("action", &s.intent_send)]).into()),
                     rows: vec![
                         row(s.label_amount.clone(), "250 USDC"),
                         row(s.label_recipient.clone(), "Alice Chen"),
@@ -1515,7 +1517,10 @@ mod tests {
         for state in ALL_STATES {
             let model = build(state, &strings);
             assert!(!model.blocks.is_empty(), "{state} has no blocks");
-            assert!(!model.confirm_label.is_empty(), "{state} has no slide label");
+            assert!(
+                !model.confirm_label.is_empty(),
+                "{state} has no slide label"
+            );
             assert!(!model.dapp_name.is_empty(), "{state} has no dApp name");
         }
     }
@@ -1528,9 +1533,9 @@ mod tests {
         let model = build("cs5", &strings);
         assert!(!model.confirm_enabled, "cs5 must not be confirmable");
         let disabled = model.blocks.iter().any(|b| match b {
-            Block::Allowance { chips, .. } => chips
-                .iter()
-                .any(|(_, state)| *state == ChipState::Disabled),
+            Block::Allowance { chips, .. } => {
+                chips.iter().any(|(_, state)| *state == ChipState::Disabled)
+            }
             _ => false,
         });
         assert!(disabled, "cs5 must disable the requested-amount chip");

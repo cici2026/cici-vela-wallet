@@ -122,36 +122,34 @@ pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
                         .child(caption),
                 );
             }
-            let mut value_row = div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(if *card {
-                            px(20.)
-                        } else if *compact {
-                            px(26.)
-                        } else {
-                            px(32.)
-                        })
-                        .font_weight(gpui::FontWeight::BOLD)
-                        .text_color(ink)
-                        .child(SharedString::from(format!("{}{}", line.sign, line.value))),
-                );
+            let mut value_row = div().flex().items_center().gap(px(8.)).child(
+                div()
+                    .text_size(if *card {
+                        px(20.)
+                    } else if *compact {
+                        px(26.)
+                    } else {
+                        px(32.)
+                    })
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(ink)
+                    .child(SharedString::from(format!("{}{}", line.sign, line.value))),
+            );
             if let Some(mark) = &line.token {
                 value_row = value_row.child(letter_avatar(mark.0.clone(), mark.1, 22.));
             }
-            col = col.child(value_row.child(
-                div()
-                    .text_size(theme::text_row_title())
-                    .text_color(if line.tone == Tone::Neutral {
-                        theme.fg_muted
-                    } else {
-                        ink
-                    })
-                    .child(line.symbol.clone()),
-            ));
+            col = col.child(
+                value_row.child(
+                    div()
+                        .text_size(theme::text_row_title())
+                        .text_color(if line.tone == Tone::Neutral {
+                            theme.fg_muted
+                        } else {
+                            ink
+                        })
+                        .child(line.symbol.clone()),
+                ),
+            );
             if let Some(text) = note.clone().or_else(|| line.fiat.clone()) {
                 col = col.child(
                     div()
@@ -271,7 +269,11 @@ pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
                         .items_center()
                         .opacity(if disabled { 0.45 } else { 1.0 })
                         .text_size(theme::text_row_sub())
-                        .text_color(if selected { theme.accent } else { theme.fg_base })
+                        .text_color(if selected {
+                            theme.accent
+                        } else {
+                            theme.fg_base
+                        })
                         .child(chip_label.clone()),
                 );
             }
@@ -317,7 +319,13 @@ pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
             }
             let mut wrap = div().flex().flex_col().gap(px(12.)).child(card);
             if let Some((total_label, total_value)) = resulting_total {
-                wrap = wrap.child(kv_row(theme, total_label, total_value, Tone::Neutral, false));
+                wrap = wrap.child(kv_row(
+                    theme,
+                    total_label,
+                    total_value,
+                    Tone::Neutral,
+                    false,
+                ));
             }
             wrap
         }
@@ -547,7 +555,13 @@ pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
     }
 }
 
-fn kv_row(theme: &Theme, label: &SharedString, value: &SharedString, tone: Tone, mono: bool) -> Div {
+fn kv_row(
+    theme: &Theme,
+    label: &SharedString,
+    value: &SharedString,
+    tone: Tone,
+    mono: bool,
+) -> Div {
     div()
         .py(px(10.))
         .flex()
@@ -648,7 +662,13 @@ pub fn fee(theme: &Theme, icons: &mut IconCache, fee: &FeeModel) -> Option<Div> 
                                 .text_color(theme.fg_muted)
                                 .child(title.clone()),
                         )
-                        .child(icon_img(icons, Icon::ChevronDown, false, theme.fg_muted, 12.)),
+                        .child(icon_img(
+                            icons,
+                            Icon::ChevronDown,
+                            false,
+                            theme.fg_muted,
+                            12.,
+                        )),
                 );
             for option in options {
                 let mut row = div()
@@ -754,7 +774,13 @@ pub fn slide_to_confirm(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon_img(icons, Icon::ArrowRight, false, theme.fg_inverse, 20.)),
+                .child(icon_img(
+                    icons,
+                    Icon::ArrowRight,
+                    false,
+                    theme.fg_inverse,
+                    20.,
+                )),
         )
         .child(
             div()
