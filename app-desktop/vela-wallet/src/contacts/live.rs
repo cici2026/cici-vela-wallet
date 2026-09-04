@@ -15,6 +15,7 @@ use gpui::SharedString;
 
 use vela_core::app::contacts::{Contact, ContactsView};
 
+use crate::contacts::fixtures::ContactDetailModel;
 use crate::contacts::model::{ContactRowModel, section_of, shorten};
 
 /// The name a row shows: the person's own label, else a resolved identity, else
@@ -36,6 +37,86 @@ fn display_name(contact: &Contact) -> SharedString {
             || shorten(&contact.address),
             |value| SharedString::from(value.to_owned()),
         )
+}
+
+/// One group's members — DC4.
+///
+/// `None` when the index names no group: the rail can change under an open
+/// view, and drawing whichever group slid into that slot would put somebody
+/// else's members under this group's name — with a 群发转账 button above them.
+#[must_use]
+pub fn group_members(
+    view: &ContactsView,
+    index: usize,
+) -> Option<(SharedString, Vec<ContactRowModel>)> {
+    let group = view.groups.get(index)?;
+    Some((
+        SharedString::from(group.name.clone()),
+        group.members.iter().map(row).collect(),
+    ))
+}
+
+/// One contact, in detail — DC2.
+///
+/// **The panel used to draw a FIXTURE while its delete and copy acted on the
+/// real contact.** So somebody clicking their cousin saw Alice's name, Alice's
+/// avatar and Alice's address, and the delete button removed the cousin. A
+/// mismatch is worse than a mock: a mock is honestly a picture, and this was a
+/// picture with a live weapon attached.
+///
+/// `None` when the index names nobody — the roster can change under an open
+/// panel, and drawing the row that took its place would silently swap who the
+/// delete button is pointed at.
+#[must_use]
+pub fn detail(
+    view: &ContactsView,
+    index: usize,
+    feed: &vela_core::app::activity_feed::FeedView,
+    wallet: &crate::wallet::WalletStrings,
+    hidden: bool,
+) -> Option<ContactDetailModel> {
+    let contact = rows(view).into_iter().nth(index)?;
+    let address = contact.address_full.to_string();
+    let lower = address.to_lowercase();
+    Some(ContactDetailModel {
+        name: contact.name.clone(),
+        // The ADDRESS, not the name: two contacts a person named the same must
+        // not draw the same avatar, and the avatar is how somebody checks they
+        // are looking at the right one.
+        seed: contact.address_full.clone(),
+        chips: view
+            .groups
+            .iter()
+            .filter(|group| {
+                group
+                    .members
+                    .iter()
+                    .any(|member| member.address.to_lowercase() == lower)
+            })
+            .map(|group| SharedString::from(group.name.clone()))
+            .collect(),
+        address_full: contact.address_full,
+        // What this person and I have actually exchanged, from the same feed
+        // the home draws. Matched on the counterparty, which is the only thing
+        // that makes a row "theirs".
+        activity: feed
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                vela_core::app::activity_feed::FeedRow::Item { item }
+                    if item
+                        .counterparty
+                        .as_ref()
+                        .is_some_and(|other| other.to_lowercase() == lower) =>
+                {
+                    Some(crate::wallet::live::activity_row(
+                        feed, item, wallet, hidden,
+                    ))
+                }
+                _ => None,
+            })
+            .collect(),
+    })
 }
 
 /// The group rail: the person's own groups, with how many people are in each.
@@ -65,18 +146,20 @@ pub fn groups(view: &ContactsView) -> Vec<(SharedString, SharedString, u32)> {
 /// One row per contact, in the core's order.
 #[must_use]
 pub fn rows(view: &ContactsView) -> Vec<ContactRowModel> {
-    view.contacts
-        .iter()
-        .map(|contact| {
-            let name = display_name(contact);
-            ContactRowModel {
-                section: section_of(&name),
-                name,
-                address_display: shorten(&contact.address),
-                address_full: SharedString::from(contact.address.clone()),
-            }
-        })
-        .collect()
+    view.contacts.iter().map(row).collect()
+}
+
+/// One contact as a row. The name precedence is `display_name`'s, and the
+/// section is derived from the name that will actually be drawn — deriving it
+/// from a different string is how a row files under a letter it does not show.
+fn row(contact: &Contact) -> ContactRowModel {
+    let name = display_name(contact);
+    ContactRowModel {
+        section: section_of(&name),
+        name,
+        address_display: shorten(&contact.address),
+        address_full: SharedString::from(contact.address.clone()),
+    }
 }
 
 /// The roster, grouped into the A–Z sections the screen draws.
@@ -146,6 +229,99 @@ mod tests {
         assert_eq!(rows[0].name, SharedString::from("Ada"));
         assert_eq!(rows[1].name, SharedString::from("bob.eth"));
         assert_eq!(rows[2].name, SharedString::from("0xcccc…0003"));
+    }
+
+    /// The detail is about the contact that was opened, and its avatar is
+    /// seeded by the address rather than the name.
+    #[test]
+    fn the_detail_is_about_the_contact_that_was_opened() {
+        use vela_core::app::activity_feed::{
+            ActivityFeed, Event as FeedEvent, FeedDirection, FeedItem, FeedRow, FeedView,
+        };
+        use vela_core::app::contacts::ContactGroupView;
+
+        let mut book = view(vec![
+            contact(
+                "0xAAA0000000000000000000000000000000000001",
+                Some("Alice"),
+                None,
+            ),
+            contact(
+                "0xBBB0000000000000000000000000000000000002",
+                Some("Cousin"),
+                None,
+            ),
+        ]);
+        book.groups = vec![ContactGroupView {
+            id: "g1".to_owned(),
+            name: "Family".to_owned(),
+            color: None,
+            members: vec![contact(
+                "0xBBB0000000000000000000000000000000000002",
+                Some("Cousin"),
+                None,
+            )],
+        }];
+
+        let mut host = crate::core_host::CoreHost::<ActivityFeed>::new();
+        let _ = host.dispatch(FeedEvent::AccountSwitched {
+            address: "0xme".to_owned(),
+        });
+        let feed = FeedView {
+            rows: vec![FeedRow::Item {
+                item: FeedItem {
+                    id: "t1".to_owned(),
+                    direction: FeedDirection::Out,
+                    // Cousin's, in a different case — the match must not care.
+                    counterparty: Some("0xbbb0000000000000000000000000000000000002".to_owned()),
+                    alias: None,
+                    value: Some("2".to_owned()),
+                    symbol: "xDAI".to_owned(),
+                    decimals: Some(18),
+                    usd_value: 2.0,
+                    chain_id: 100,
+                    timestamp: 1_788_500_000.0,
+                    day_start_ms: 0.0,
+                    tx_hash: None,
+                    batch: None,
+                },
+            }],
+            ..host.view()
+        };
+        let wallet = crate::wallet::WalletStrings::resolve(&crate::loc::Loc::from_env());
+
+        // Row 1 is the cousin, and the panel must be about the cousin.
+        let cousin =
+            detail(&book, 1, &feed, &wallet, false).unwrap_or_else(|| unreachable!("row 1 exists"));
+        assert_eq!(cousin.name, "Cousin");
+        assert_eq!(
+            cousin.address_full,
+            "0xBBB0000000000000000000000000000000000002"
+        );
+        // Seeded by the ADDRESS: two contacts named the same must not share an
+        // avatar, and the avatar is how somebody checks they have the right one.
+        assert_eq!(cousin.seed, cousin.address_full);
+        assert_eq!(cousin.chips, vec![SharedString::from("Family")]);
+        // Their own history, matched case-insensitively.
+        assert_eq!(cousin.activity.len(), 1);
+
+        // Alice is in no group and has nothing with me.
+        let alice =
+            detail(&book, 0, &feed, &wallet, false).unwrap_or_else(|| unreachable!("row 0 exists"));
+        assert_eq!(alice.name, "Alice");
+        assert!(alice.chips.is_empty());
+        assert!(alice.activity.is_empty());
+
+        // The roster moved: no panel rather than the wrong one.
+        assert!(detail(&book, 9, &feed, &wallet, false).is_none());
+
+        // And a group's members are that group's.
+        let (name, members) =
+            group_members(&book, 0).unwrap_or_else(|| unreachable!("group 0 exists"));
+        assert_eq!(name, "Family");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "Cousin");
+        assert!(group_members(&book, 5).is_none());
     }
 
     /// The rail lists the person's own groups, with the id each row needs.

@@ -199,7 +199,9 @@ pub fn group_members(group: usize) -> Vec<ContactFixture> {
 /// Third-column detail content: display-ready, straight from the canon.
 pub struct ContactDetailModel {
     pub name: SharedString,
-    pub seed: &'static str,
+    /// The identicon seed — the ADDRESS, always. Owned since 031, because a
+    /// live detail's seed is a real address rather than a `'static` literal.
+    pub seed: SharedString,
     /// Group-membership chips (家人); empty for ungrouped contacts.
     pub chips: Vec<SharedString>,
     pub address_full: SharedString,
@@ -209,7 +211,7 @@ pub struct ContactDetailModel {
 pub fn contact_detail(s: &ContactsStrings, c: &ContactFixture) -> ContactDetailModel {
     ContactDetailModel {
         name: c.name.into(),
-        seed: c.address_full,
+        seed: c.address_full.into(),
         chips: c.group.iter().map(|g| SharedString::from(*g)).collect(),
         address_full: c.address_full.into(),
         activity: if c.has_activity {

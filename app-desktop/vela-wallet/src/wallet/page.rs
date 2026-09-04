@@ -1050,8 +1050,19 @@ impl WalletPage {
         let all = self.contacts.all_contacts.clone();
         let groups_label = self.contacts.section_groups.clone();
         let new_group = self.contacts.group_new.clone();
+        // The count beside 全部联系人. A real session counts its own book; the
+        // mock's 12 under somebody's four contacts is the same small lie the
+        // group rail told.
         let total = if self.contacts_empty {
             0
+        } else if self.identity.is_some() {
+            u32::try_from(
+                self.contact_sections(cx)
+                    .iter()
+                    .map(|(_, rows)| rows.len())
+                    .sum::<usize>(),
+            )
+            .unwrap_or(u32::MAX)
         } else {
             contacts_fixtures::TOTAL_CONTACTS
         };
@@ -1145,6 +1156,26 @@ impl WalletPage {
             .flat_map(|(_, rows)| rows)
             .nth(self.contact)
             .map(|row| row.address_full)
+    }
+
+    /// DC2's model for a real session, or `None` to fall back to the mock.
+    fn contact_detail_model(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<contacts_fixtures::ContactDetailModel> {
+        if self.identity.is_none() {
+            return None;
+        }
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        if !view.loaded {
+            return None;
+        }
+        let hidden = resident::resident::<BalanceDashboard>(cx)
+            .read(cx)
+            .view()
+            .hidden;
+        let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+        contacts_live::detail(&view, self.contact, &feed, &self.strings, hidden)
     }
 
     /// The activity rows: the core's feed for a real session, the mock's
@@ -1332,10 +1363,27 @@ impl WalletPage {
     /// DC4: the group view — header with the accent 群发转账, member rows, the
     /// ghost 添加成员 row and the caption line.
     fn contacts_group_view(&mut self, theme: &Theme, group: usize, cx: &mut Context<Self>) -> Div {
-        let fixture = contacts_fixtures::GROUPS[group];
-        let members = contacts_fixtures::group_members_model(group);
-        let members_label = contacts_fixtures::members_count_label(&self.contacts, fixture.count);
-        let caption = contacts_fixtures::batch_send_caption(&self.contacts, fixture.count);
+        // The group this view is ABOUT. Falling back to whichever fixture sat
+        // at that index would put somebody else's members under this group's
+        // name — with a 群发转账 button above them.
+        let live = self.identity.is_some().then(|| {
+            let view = resident::resident::<Contacts>(cx).read(cx).view();
+            contacts_live::group_members(&view, group)
+        });
+        let (name, members) = match live {
+            Some(Some((name, members))) => (name, members),
+            Some(None) => (SharedString::from(""), Vec::new()),
+            None => {
+                let fixture = contacts_fixtures::GROUPS[group];
+                (
+                    SharedString::from(fixture.name),
+                    contacts_fixtures::group_members_model(group),
+                )
+            }
+        };
+        let count = u32::try_from(members.len()).unwrap_or(u32::MAX);
+        let members_label = contacts_fixtures::members_count_label(&self.contacts, count);
+        let caption = contacts_fixtures::batch_send_caption(&self.contacts, count);
         let batch_send = self.contacts.batch_send.clone();
         let add_member = self.contacts.add_member.clone();
 
@@ -1349,7 +1397,7 @@ impl WalletPage {
                     .text_size(theme::text_section())
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(theme.fg_base)
-                    .child(SharedString::from(fixture.name)),
+                    .child(name.clone()),
             )
             .child(
                 div()
@@ -1470,9 +1518,16 @@ impl WalletPage {
         // core's own roster, so a delete removes the row a person is looking at
         // rather than whatever the mock had at that index.
         let live_address = self.selected_contact_address(cx);
-        let contact =
-            contacts_fixtures::CONTACTS[self.contact.min(contacts_fixtures::CONTACTS.len() - 1)];
-        let model = contacts_fixtures::contact_detail(&self.contacts, &contact);
+        // The panel drew a FIXTURE while its delete and copy acted on the real
+        // contact — so somebody clicking their cousin saw Alice's name, Alice's
+        // avatar and Alice's address, and the delete removed the cousin. A
+        // mismatch is worse than a mock: a mock is honestly a picture, and this
+        // was a picture with a live weapon attached.
+        let model = self.contact_detail_model(cx).unwrap_or_else(|| {
+            let contact = contacts_fixtures::CONTACTS
+                [self.contact.min(contacts_fixtures::CONTACTS.len() - 1)];
+            contacts_fixtures::contact_detail(&self.contacts, &contact)
+        });
         let address_label = self.contacts.address_label.clone();
         // Copy the address the panel is ABOUT — the core's, for a real session.
         // Copying the mock's would put a stranger's address on somebody's
@@ -1508,7 +1563,7 @@ impl WalletPage {
             .gap(px(14.))
             .child(identicon_avatar(
                 &mut self.identicons,
-                model.seed,
+                model.seed.as_ref(),
                 CONTACTS_HERO_AVATAR,
             ))
             .child(
