@@ -27,6 +27,7 @@
 //! here at all — `Prompt` and `CompleteOnboarding` belong to the screen, which
 //! is why [`Performed`] exists.
 
+pub mod contacts;
 pub mod display_currency;
 pub mod network_admin;
 pub mod passkey;

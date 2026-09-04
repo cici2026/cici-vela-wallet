@@ -35,6 +35,9 @@ pub const KEY_SERVICE_ENDPOINTS: &str = "vela.serviceEndpoints";
 /// camelCase FIELD names inside, as the web and Expo clients — a record written
 /// on one client has to stay legible on another, which is what makes copying a
 /// wallet between machines work at all.
+pub const KEY_CONTACTS: &str = "vela.contacts";
+pub const KEY_CONTACTS_DISMISSED: &str = "vela.contacts.dismissed";
+pub const KEY_CONTACT_GROUPS: &str = "vela.contactGroups";
 pub const KEY_CUSTOM_NETWORKS: &str = "vela.customNetworks";
 pub const KEY_NETWORK_CONFIG: &str = "vela.networkConfig";
 pub const KEY_RPC_PROVIDERS: &str = "vela.rpcProviders";

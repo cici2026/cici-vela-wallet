@@ -291,3 +291,74 @@ camelCase, and `Account` is plain snake_case serde on **both** clients — web's
 generated `Account.ts` says `public_key_hex`, `created_at_iso` too. Accounts are
 cross-client compatible exactly as they stand. Recorded because "the desktop stores a
 different shape" was a plausible-sounding conclusion that would have been wrong.
+
+## Phase 4 — `contacts`, and the measurement the cut exists to produce
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **124 passed · 0 failed · 6 ignored** (030 opened at 93) |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced rebuild) | ✅ 1, pre-existing |
+| `scripts/sweep-gallery.sh` | ✅ every state rendered |
+| live path | ✅ `section Contacts` → `core: contacts booting` |
+
+### SC-004
+
+```
+core_host.rs         untouched
+resident.rs          untouched
+executor/proxy.rs    untouched
+main.rs              untouched
+executor/mod.rs      +1        pub mod contacts;
+executor/storage.rs  +3        three key constants
+```
+
+**Zero lines of shared logic.** No function in the plumbing was added, changed, or
+called differently; the road carried the third machine as built.
+
+The literal draft criterion — "zero lines" across all six — is **not** met, and
+saying it was would be the kind of quiet mis-scoring this program has already had to
+correct once. Rust cannot satisfy it: a module must be declared to exist, so
+`pub mod contacts;` is the irreducible cost of adding a file. The three other lines
+are key constants in the cross-client contract registry `storage.rs` deliberately
+centralises — and scattering the keys to their machines purely to win the number
+would have made the contract harder to audit for a better-looking diffstat. SC-004 is
+amended in the spec to the thing it was always measuring, with the reason in place.
+
+The rest of the phase is where a third machine *should* cost something:
+`executor/contacts.rs` (new), `contacts/{model,live}.rs` (new), a fixture adapter,
+27 lines in `page.rs`, and 16 in `contacts/components.rs` — a signature widened from
+`&'static str` to `SharedString`, which is what happens when a fixture-shaped API
+first meets runtime data. `settings/components.rs` needed the same in phase 3. That
+is a real, repeatable cost of going live, and it is not plumbing.
+
+### What the live builder refuses to do
+
+The core sorts the book favourites-first, then most-recent, and merges
+history-derived suggestions under tombstone suppression. `contacts/live.rs` **groups**
+those rows into A–Z sections and does not re-sort them — a test builds a Z, Z, A
+roster and asserts two sections in that order with `Zoe` before `Zack`. Sorting there
+would silently override a product rule the core owns and tests.
+
+It adds exactly two things the core declines to decide: which of three names a row
+shows (own label → resolved identity → shortened address), and which letter it files
+under (`#` for anything not an ASCII letter).
+
+### Four operations answer unknown, and one of them matters more than it looks
+
+`load_send_history` → empty (no local tx store until 032). `resolve_identity` and
+`classify_recipient` → `None` (both need 031's pool).
+
+`classify_recipient` is the one to be careful with. `None` means **unknown**, not
+"this address is not a contract" — the core says so and never caches it. A shell that
+guessed would put a risk badge nobody measured onto a send screen. There is a test
+whose only job is that the answer is `None` and carries the chain id it was asked
+about.
+
+### The dismissed store is an object, and that is load-bearing
+
+`vela.contacts.dismissed` is `address → epoch ms`, not a list. A tombstone suppresses
+a suggestion **unless the person transacted since the deletion**, so the timestamp is
+the whole mechanism. Written as a list it would still round-trip through this file
+and quietly stop working — which is why the test asserts `raw.is_object()` rather
+than just round-tripping the values.

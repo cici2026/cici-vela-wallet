@@ -23,6 +23,8 @@ use crate::contacts::components::{
     rail_row, row_divider, search_field, section_letter, text_action,
 };
 use crate::contacts::fixtures as contacts_fixtures;
+use crate::contacts::live as contacts_live;
+use crate::contacts::model::ContactRowModel;
 use crate::explore::ExploreStrings;
 use crate::explore::components as explore_components;
 use crate::explore::fixtures as explore_fixtures;
@@ -52,6 +54,7 @@ use crate::theme::{
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
+use vela_core::app::contacts::Contacts;
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::network_admin::NetworkAdmin;
 
@@ -1053,6 +1056,24 @@ impl WalletPage {
         ))
     }
 
+    /// The roster: the core's book for a real session, the mocks' otherwise.
+    fn contact_sections(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Vec<(gpui::SharedString, Vec<ContactRowModel>)> {
+        if self.identity.is_none() {
+            return contacts_fixtures::sections_model();
+        }
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        if !view.loaded {
+            // The core has not ruled yet. An empty roster, not a fixture one —
+            // a person's address book must never show somebody else's while it
+            // waits (spec 030 FR-008).
+            return Vec::new();
+        }
+        contacts_live::sections(&view)
+    }
+
     /// DC1: the A–Z sectioned roster.
     fn contacts_list(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let selected = match self.panel {
@@ -1069,7 +1090,7 @@ impl WalletPage {
             .flex_col();
 
         let mut index = 0usize;
-        for (letter, rows) in contacts_fixtures::sections() {
+        for (letter, rows) in self.contact_sections(cx) {
             list = list.child(section_letter(theme, letter));
             let last = rows.len() - 1;
             for (i, contact) in rows.iter().enumerate() {
@@ -1102,7 +1123,7 @@ impl WalletPage {
     /// ghost 添加成员 row and the caption line.
     fn contacts_group_view(&mut self, theme: &Theme, group: usize, cx: &mut Context<Self>) -> Div {
         let fixture = contacts_fixtures::GROUPS[group];
-        let members = contacts_fixtures::group_members(group);
+        let members = contacts_fixtures::group_members_model(group);
         let members_label = contacts_fixtures::members_count_label(&self.contacts, fixture.count);
         let caption = contacts_fixtures::batch_send_caption(&self.contacts, fixture.count);
         let batch_send = self.contacts.batch_send.clone();
@@ -2096,7 +2117,7 @@ impl WalletPage {
                 ElementId::from(("board-contact", i)),
                 theme,
                 &mut self.identicons,
-                &contact,
+                &contacts_fixtures::row_model(contact),
                 selected,
             ));
             rows = rows.child(row_divider(theme));

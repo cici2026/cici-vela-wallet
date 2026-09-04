@@ -7,6 +7,7 @@
 //! `icon_img` and the third-column scaffold all come from
 //! `crate::wallet::components`.
 
+use crate::contacts::model::ContactRowModel;
 use gpui::{
     Div, ElementId, InteractiveElement as _, ParentElement, SharedString, Stateful, Styled, div, px,
 };
@@ -19,7 +20,7 @@ use crate::theme::{
 };
 use crate::wallet::components::{empty_state, icon_img, identicon_avatar};
 
-use super::fixtures::{ContactFixture, MenuModel};
+use super::fixtures::MenuModel;
 
 /// Leading glyph size inside menu/rail rows (M1/M2 anatomy).
 const GLYPH_SM: f32 = 16.;
@@ -36,7 +37,10 @@ pub fn contact_row(
     id: impl Into<ElementId>,
     theme: &Theme,
     identicons: &mut IdenticonCache,
-    contact: &ContactFixture,
+    // The MODEL, not the fixture: a live row's name and address come from
+    // the core at runtime (spec 030). The mock path passes the same values
+    // through `fixtures::rows()`.
+    contact: &ContactRowModel,
     selected: bool,
 ) -> Stateful<Div> {
     let row = div()
@@ -51,7 +55,7 @@ pub fn contact_row(
         .cursor_pointer()
         .child(identicon_avatar(
             identicons,
-            contact.address_full,
+            &contact.address_full,
             CONTACTS_ROW_AVATAR,
         ))
         .child(
@@ -68,7 +72,7 @@ pub fn contact_row(
                         .text_color(theme.fg_base)
                         .whitespace_nowrap()
                         .truncate()
-                        .child(SharedString::from(contact.name)),
+                        .child(contact.name.clone()),
                 )
                 .child(
                     div()
@@ -77,7 +81,7 @@ pub fn contact_row(
                         .text_color(theme.fg_subtle)
                         .whitespace_nowrap()
                         .truncate()
-                        .child(SharedString::from(contact.address_display)),
+                        .child(contact.address_display.clone()),
                 ),
         );
     if selected {
@@ -96,7 +100,7 @@ pub fn row_divider(theme: &Theme) -> Div {
 
 /// Letter section header (DC1): the uppercase letter plus a hairline that runs
 /// to the end of the list column.
-pub fn section_letter(theme: &Theme, letter: &'static str) -> Div {
+pub fn section_letter(theme: &Theme, letter: gpui::SharedString) -> Div {
     div()
         .flex()
         .items_center()
