@@ -1130,6 +1130,90 @@ shape as the per-row listeners this cut added twice, and is **wire-able**; it is
 recorded as available work rather than as a blocker.
 
 
+## Phases 24–29 — the fixture sweep, and what it kept finding
+
+After phases 20–23 I asked what was left and got a clean-looking answer: four
+groups of machines, all gated on the send path, a browser engine, or a drawing.
+Then I ran one grep — **every `fixtures::` use, checked for an identity guard
+above it** — and it found six more live surfaces drawing mocks. Two of them were
+not merely wrong; they were dangerous.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **214 passed · 0 failed · 26 ignored** (031 opened at **125**) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ 36 states · `check-windows.sh` ✅ |
+| warnings (forced rebuild) | ✅ 1, pre-existing |
+| `// live in 032` markers | 2, both `ClearBundlerCache`, both genuinely waiting |
+
+### A picture with a live weapon attached
+
+The contact detail panel drew a **fixture** while its delete and copy acted on
+the **real** contact. Somebody clicking their cousin saw Alice's name, Alice's
+avatar and Alice's address — and the delete button removed the cousin.
+
+That is worse than a mock. A mock is honestly a picture. This had been a picture
+with a live weapon attached since 030 wired the delete, and it survived 030's
+closeout, 031's closeout, and my own "everything reachable is live" claim in
+phase 19.
+
+### A stale marker, and the test that should have caught it
+
+`contacts::LoadSendHistory` answered an empty list behind `// live in 032 —
+there is no local transaction store yet`. That stopped being true in **phase 14
+of this very cut**, when receipt discovery started writing to
+`vela.transactionHistory`.
+
+Its guard test was worse than useless: it asserted `txs.is_empty()` **without
+`with_temp_state`**, so it read whatever state directory the process pointed at
+and kept passing after a store appeared. A test that cannot tell an empty store
+from an unread one cannot notice the arm it was watching go live.
+
+### Copy did not copy
+
+`cx.write_to_clipboard` has been available all along and **nothing in the app
+used it**. The receive panel's "copy address" button, the receive QR's address
+card and the contact detail's address block were all decorative. A receive
+screen's entire job is to hand an address over, and until 031 both of its ways
+of doing that — the code and the button — were pictures.
+
+### Four more from the same grep
+
+| Surface | Was | Now |
+|---|---|---|
+| contacts group rail | 家人 / 工作 / 朋友 fixtures | the person's groups, each with its id |
+| group view (DC4) | `GROUPS[i]`'s members | that group's members, or nothing |
+| 全部联系人 count | the mock's 12 | the real book's size |
+| settings accounts (DST1) | real row 0 + **two strangers** | every account, switchable |
+| storage (DST7) | 2.4 MB / 216 records, to everybody | this device's measured file |
+| about (DST8) | **v1.0.0 (6ab8f)** while the crate was 0.1.1 | `CARGO_PKG_VERSION` |
+| add-network dialog subtitle | "Zora · 链 ID 7777777" over an unresolved wizard | the chain it actually resolved, or nothing |
+
+### `SwitchAccount` finally has a control
+
+`session.rs` wrote, about this very event, that *"an event with no control is
+dead code"*. The control — the account row — was drawn all along. It carries the
+**core's** index rather than the loop's, which is invariant ⑦'s whole point: a
+display reorder must not switch to the wrong wallet.
+
+### The lesson, stated as a procedure
+
+Three separate times this cut, a surface was wrong because somebody (twice, me)
+believed a claim instead of checking it: *"the desktop never drew receive"*,
+*"there is no local transaction store yet"*, *"the core exposes no account list
+yet"*. All three were true when written and false when read.
+
+The grep that finds this class costs ten seconds:
+
+```bash
+# every fixture use, and whether an identity guard stands above it
+grep -n 'fixtures::' src/wallet/page.rs
+```
+
+**A comment explaining why something is not wired is a claim with a timestamp on
+it.** When the reason is "X does not exist yet", the marker outlives the reason,
+and nothing in the type system will tell you.
+
+
 ---
 
 # 交接:下一个会话从这里开始
@@ -1161,7 +1245,7 @@ env -u all_proxy -u http_proxy -u https_proxy \
   cargo test executor::pool -- --ignored --test-threads=1
 ```
 
-基线:**209 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
+基线:**214 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
 warning。
 
 改了 `rust/` 之后还要跑(都在仓库根):
@@ -1182,7 +1266,8 @@ node rust/scripts/gen-onboarding-types.mjs --check
 | 1 | 发送(DSD1–4) | **032**,花钱那一刀 |
 | 2 | 扫码(DS1) | 桌面**根本没有相机管线**;不是接线,是一个新功能 |
 | 3 | 联系人 **增/改 表单** 和 **收藏控件** | 真的卡在没画的图(030 的边界,已复核) |
-| 4 | 联系人 **右键菜单动作**(删除/重命名分组) | **不是卡住** —— 和本刀两次做过的"每行一个监听器"同形,可以接 |
+| 4 | 联系人菜单的 **重命名/导入/导出** | 需要一个文本对话框和一个文件选择器;**删除分组已接** |
+| 4b | 设置账户页的 **新建/登录** 按钮 | 需要从已登录窗口回到 onboarding 的路由(导航决策,不是接线) |
 | 5 | `ScanIncomingTransfers` 的**发送**记录 | 032 写同一个 store |
 | 6 | 余额**流式**到达(`ChainAssetsArrived`) | 需要 worker→resident 的事件推送 |
 | 7 | Windows 的日界线 | `GetTimeZoneInformation` 没接,按 UTC 分组 |

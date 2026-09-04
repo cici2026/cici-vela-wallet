@@ -4248,6 +4248,25 @@ impl WalletPage {
         let kind = self.settings_dialog?;
         let s = &self.settings;
         let (title, subtitle) = match kind {
+            // The subtitle names the chain the wizard has RESOLVED, and there
+            // is none until somebody picks one. The mock's "Zora · 链 ID 7777777"
+            // sat over a live wizard that had resolved nothing, which is the
+            // dialog telling somebody it already knows what they are adding.
+            SettingsDialog::AddNetwork if self.identity.is_some() => (
+                s.add_network.clone(),
+                resident::resident::<NetworkAdmin>(cx)
+                    .read(cx)
+                    .view()
+                    .wizard
+                    .chain_info
+                    .map(|info| {
+                        gpui::SharedString::from(format!(
+                            "{} · {}",
+                            info.name,
+                            settings_fixtures::chain_meta(s, u64::from(info.chain_id))
+                        ))
+                    }),
+            ),
             SettingsDialog::AddNetwork => (
                 s.add_network.clone(),
                 Some(gpui::SharedString::from(format!(
