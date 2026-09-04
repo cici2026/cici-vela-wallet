@@ -205,15 +205,17 @@ screens) and what it did not (their routes), with a pointer to this feature.
   branch's diff against `main` over the three app directories is 3,775 insertions
   against **26,229 deletions**, and `git apply --check --3way` of the desktop hunk
   reports conflicts.
-- **FR-005 (Dead tests must run)**: After wiring, every `#[test]` / `@Test` inside
-  the previously-unreachable sources MUST execute in its platform's suite, and each
-  platform's total MUST exceed its recorded baseline. The pin is the **runtime**
-  count, not a `grep` of the source — on desktop those differ by seven and the
-  difference is the whole point: 100 `#[test]` exist, 5 are in the unreachable
-  modules and never compile, 2 are `#[cfg(target_os = "linux")]`, leaving
-  **88 passed / 5 ignored / 93 compiled** on macOS. Wiring must take that to
-  93 passed / 5 ignored / 98 compiled. Android and iOS baselines are recorded in
-  results.md at their first CI run.
+- **FR-005 (Dead tests must run)**: After wiring, every previously-unreachable
+  `#[test]` MUST execute in its platform's suite. **This bites on desktop only**, and
+  the asymmetry is the defect's own shape: on Android and iOS the explore/signing
+  sources always compiled — they were merely unrouted — so their fixture tests were
+  running all along. Only rustc skips a directory nobody declared. The pin is the
+  **runtime** count, not a `grep` of the source: on desktop those differ by seven and
+  the difference *is* the defect stated arithmetically — 100 `#[test]` exist, 5 are in
+  the unreachable modules and never compile, 2 are `#[cfg(target_os = "linux")]`,
+  leaving **88 passed / 5 ignored / 93 compiled** on macOS. Wiring must take that to
+  93 / 5 / 98. Android and iOS must simply not regress.
+
 - **FR-006 (CI covers the three clients)**: `.github/workflows/ci.yml` MUST gain a
   desktop job, a Gradle job and an xcodebuild job, each path-gated and always-on for
   `main`. Where a job cannot cover something (the desktop gallery sweep needs a
@@ -234,10 +236,10 @@ screens) and what it did not (their routes), with a pointer to this feature.
   `signing`; on the finished tree, all three pass. Both runs recorded in results.md.
 - **SC-002**: A signed-in person opens Explore and then the signing sheet on all
   three clients. Evidenced by one screenshot per client per screen.
-- **SC-003**: Test totals strictly increase on all three platforms. On desktop the
-  five previously-dead `#[test]` functions appear **by name** in the run output and
-  the result line reads `93 passed; 0 failed; 5 ignored` against the recorded
-  baseline of `88 passed; 0 failed; 5 ignored`.
+- **SC-003**: On desktop the five previously-dead `#[test]` functions appear **by
+  name** in the run output and the result line reads `93 passed; 0 failed; 5
+  ignored` against the recorded baseline of `88 passed; 0 failed; 5 ignored`.
+  Android and iOS do not regress. (They cannot increase — see FR-005.)
 - **SC-004**: Every gallery state renders unchanged; the cumulative diff of every
   `fixtures.*` file across the branch is empty.
 - **SC-005**: A PR that removes any one of the three wirings is red in CI. Proven by

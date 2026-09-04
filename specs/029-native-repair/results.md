@@ -153,3 +153,46 @@ Nothing here ever ran clippy, so nothing here was ever clean. The CI job in the 
 phase has to decide between gating at `-D warnings` (which means fixing 10 unrelated
 warnings in caBLE/Noise transport code) and gating lower. That decision is recorded
 in the phase that makes it, not smuggled into this one.
+
+## Phase 3 — Android wired
+
+`VelaNavHost.kt` only: the `EXPLORE` route constant, `ALL`, `DEVELOPER_ROUTES`, a
+direct `composable` for review, and — the substance — a `section` switch inside the
+signed-in `WALLET` route so 探索 selects a body rather than doing nothing.
+
+| Gate | Result |
+|---|---|
+| `./gradlew :app:compileDebugKotlin -PvelaSkipRustBuild` | ✅ (only two pre-existing `LocalClipboardManager` deprecations) |
+| `./gradlew :app:testDebugUnitTest` | ✅ **118 run · 0 failed · 0 skipped** |
+| `DeveloperRoutesTest` with `EXPLORE` added | ✅ still green |
+| `check-native-reachability.mjs` | ✅ Android no longer listed |
+
+Re-expressed against today's shell rather than the branch's, which is why FR-004
+forbids patching. Three collisions:
+
+1. The branch's `WalletScreen(model, onSelectTab)` predates spec 021's
+   `FlowHost` / `rememberFlowNavState`, so the section switch had to be composed
+   *around* the flow stack rather than replacing the call.
+2. **The branch routes Settings to `session.signOut()`.** Spec 023 fixed exactly that
+   — `VelaNavHost.kt:270-278` still carries the warning ("tapping 设置 to change your
+   language logged you out instead"). Applying the hunk as written would have
+   reintroduced a shipped regression. It routes to `VelaDestinations.SETTINGS`.
+3. Back had to be taught the new state: it unwinds the flow stack first, then leaves
+   探索 for 钱包. Backing out of a browser should land on the wallet, not on Welcome.
+
+**Test totals do not move on Android, and that is correct.** Its explore/signing
+sources always compiled — they were merely unrouted — so their fixture tests were
+running all along. Only rustc skips a directory nobody declared, which is why the
+five newly-live tests are a desktop-only phenomenon. FR-005 was corrected to say so
+rather than asserting a uniform increase it cannot get.
+
+### A fresh checkout cannot build Android or iOS
+
+Recorded because it is a hard input to the CI design, and it surprised me:
+`rust/bindings/kotlin/` (consumed in place as a `kotlin.srcDir`),
+`app-android/.../jniLibs/` and `app-ios/VelaCoreKit/Artifacts/` are **all
+gitignored**. Building Android here needed `cargo build --release -p
+vela-core-uniffi` plus a `uniffi-bindgen` run first (2m24s cold). Any CI job has to
+do the same, and `xcodebuild -list` fails outright without the xcframework — not with
+a missing-scheme error, but with *"local binary target 'VelaCoreFFI' … does not
+contain a binary artifact"*.
