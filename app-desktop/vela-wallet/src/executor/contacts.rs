@@ -409,6 +409,66 @@ mod tests {
         }
     }
 
+    /// Delete, and stay deleted.
+    ///
+    /// The whole write path in one test: an event mutates the core's ledger,
+    /// the core asks for a write, this executor persists it, and a FRESH core
+    /// over the same directory agrees. A shell that acknowledged the write
+    /// without performing it would pass every in-memory assertion and lose the
+    /// change on the next launch.
+    #[test]
+    fn a_deleted_contact_stays_deleted_across_a_relaunch() {
+        storage::tests::with_temp_state("contacts-delete", || {
+            write_list(
+                storage::KEY_CONTACTS,
+                &[contact("0xabc", "Ada"), contact("0xdef", "Bob")],
+                |c: &Contact| StoredContact::from(c),
+            );
+
+            let drain = |host: &mut CoreHost<Contacts>, event: Event| {
+                let mut pending = host.dispatch(event);
+                while let Some(next) = pending.pop() {
+                    match Contacts::perform(&next.operation) {
+                        Answer::Now(result) => pending.extend(host.resolve(next.id, result)),
+                        _ => continue,
+                    }
+                }
+            };
+
+            let mut host = CoreHost::<Contacts>::new();
+            drain(
+                &mut host,
+                Event::AccountSwitched {
+                    my_address: Some("0xme".to_owned()),
+                },
+            );
+            assert_eq!(host.view().contacts.len(), 2, "both were loaded");
+
+            drain(
+                &mut host,
+                Event::Delete {
+                    address: "0xabc".to_owned(),
+                    now_ms: 1_756_000_000_000.0,
+                },
+            );
+            let remaining = host.view().contacts;
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].address, "0xdef");
+
+            // The launch that matters: a new core, the same disk.
+            let mut relaunched = CoreHost::<Contacts>::new();
+            drain(
+                &mut relaunched,
+                Event::AccountSwitched {
+                    my_address: Some("0xme".to_owned()),
+                },
+            );
+            let after = relaunched.view().contacts;
+            assert_eq!(after.len(), 1, "the delete did not reach the disk");
+            assert_eq!(after[0].address, "0xdef");
+        });
+    }
+
     /// Saved, then gone after a relaunch — through the real loop.
     #[test]
     fn a_saved_contact_survives_a_relaunch() {

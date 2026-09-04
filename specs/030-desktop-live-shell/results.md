@@ -362,3 +362,65 @@ a suggestion **unless the person transacted since the deletion**, so the timesta
 the whole mechanism. Written as a list it would still round-trip through this file
 and quietly stop working — which is why the test asserts `raw.is_object()` rather
 than just round-tripping the values.
+
+## Phase 5 — the first write path, end to end
+
+Deleting a contact now dispatches `Event::Delete` and the change reaches the disk.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **125 passed · 0 failed · 6 ignored** |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced) | ✅ 1, pre-existing |
+| `scripts/sweep-gallery.sh` | ✅ every state rendered (36) |
+| real-network probes | ✅ `chainId 100` · `getCode 172 bytes` · `P256 → 0x…0001` |
+
+The test that matters is `a_deleted_contact_stays_deleted_across_a_relaunch`: an event
+mutates the core's ledger, the core asks for a write, the executor persists it, and a
+**fresh core over the same directory** agrees. A shell that acknowledged the write
+without performing it would pass every in-memory assertion and lose the change on the
+next launch — which is the failure a round-trip inside one process cannot see.
+
+Two guards on the delete itself:
+- It is `None`-gated on a real session, so the **fixture panel cannot mutate a real
+  ledger**. A picture must not delete anything.
+- The address comes from the **core's own roster** by row position, not from
+  `CONTACTS[index]`. Deleting "whatever the mock had at that index" is a bug that
+  would only appear once the two lists diverged.
+
+`executor::now_ms` is new and public: a mutation carries the time the *shell*
+observed, which is what keeps the core a pure function of its inputs — the same
+argument `now_iso` already makes one function above it.
+
+**A false alarm, recorded.** The sweep failed once with "could not read the state
+count", which looks like a rendering regression and is not: at `DWELL=1` immediately
+after a rebuild the app had not printed its startup line before the script read the
+log. At the default dwell it is green, and the gallery prints `36 states` on demand.
+
+## Status — what is live, and what is not
+
+Three machines are wired and driving real screens. **030 is not finished**, and the
+remainder is interaction surfaces rather than plumbing:
+
+| Surface | State |
+|---|---|
+| 设置 → 网络 list | ✅ live (core's rows, probes, health) |
+| 设置 → 本地化 → 货币 | ✅ live (committed code, degraded when unpriced) |
+| 通讯录 roster | ✅ live (core's book, A–Z grouped) |
+| 通讯录 delete | ✅ live, persists across relaunch |
+| 通讯录 add / edit / favourite / groups | ⬜ not wired |
+| 添加网络 wizard (search → probe → add) | ⬜ not wired |
+| RPC override edit + chain-mismatch refusal | ⬜ not wired |
+| 端点 / 服务商 panels | ⬜ not wired |
+
+### SC verdicts so far
+
+| SC | Verdict |
+|---|---|
+| SC-001 network added survives relaunch | ⬜ **not yet** — probes verified live against Gnosis, but the wizard that would add one is not wired |
+| SC-002 contacts CRUD survives relaunch | ◐ **partial** — delete proven end to end; add/edit/groups pending |
+| SC-003 currency survives, degrades honestly | ✅ |
+| SC-004 the paved-road measurement | ✅ as amended (zero shared logic; 4 declaration lines) |
+| SC-005 galleries unchanged, fixtures additive | ✅ 0 deleted lines across every `fixtures.rs` |
+| SC-006 tests up, fmt and CI green | ✅ 93 → 125 |
+| SC-007 zero `rust/`, zero corpus delta | ✅ |

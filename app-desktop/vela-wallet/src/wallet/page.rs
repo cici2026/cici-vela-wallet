@@ -54,7 +54,7 @@ use crate::theme::{
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
-use vela_core::app::contacts::Contacts;
+use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::network_admin::NetworkAdmin;
 
@@ -1056,6 +1056,21 @@ impl WalletPage {
         ))
     }
 
+    /// The address of the row the detail panel is about, for a real session.
+    ///
+    /// `None` on the design surfaces, which is what stops a fixture panel from
+    /// mutating a real ledger.
+    fn selected_contact_address(&mut self, cx: &mut Context<Self>) -> Option<gpui::SharedString> {
+        if self.identity.is_none() {
+            return None;
+        }
+        self.contact_sections(cx)
+            .into_iter()
+            .flat_map(|(_, rows)| rows)
+            .nth(self.contact)
+            .map(|row| row.address_full)
+    }
+
     /// The roster: the core's book for a real session, the mocks' otherwise.
     fn contact_sections(
         &mut self,
@@ -1255,8 +1270,13 @@ impl WalletPage {
     }
 
     /// DC2's third-column body: hero, pill actions, address, 最近往来, footer.
-    fn contact_detail_body(&mut self, theme: &Theme) -> Div {
-        let contact = contacts_fixtures::CONTACTS[self.contact];
+    fn contact_detail_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        // The address the panel is about. For a real session it comes from the
+        // core's own roster, so a delete removes the row a person is looking at
+        // rather than whatever the mock had at that index.
+        let live_address = self.selected_contact_address(cx);
+        let contact =
+            contacts_fixtures::CONTACTS[self.contact.min(contacts_fixtures::CONTACTS.len() - 1)];
         let model = contacts_fixtures::contact_detail(&self.contacts, &contact);
         let address_label = self.contacts.address_label.clone();
         let recent = self.contacts.recent_activity.clone();
@@ -1360,7 +1380,31 @@ impl WalletPage {
                 Some(Icon::Pencil),
                 edit,
             ))
-            .child(destructive_text_button("contact-delete", theme, delete));
+            .child(
+                destructive_text_button("contact-delete", theme, delete).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        // Only a real session deletes anything: the fixture
+                        // panel is a picture, and a picture must not mutate a
+                        // ledger.
+                        let Some(address) = live_address.clone() else {
+                            return;
+                        };
+                        let now_ms = crate::executor::now_ms();
+                        resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                ContactEvent::Delete {
+                                    address: address.to_string(),
+                                    now_ms,
+                                },
+                                cx,
+                            );
+                        });
+                        // The panel was about a row that no longer exists.
+                        this.panel = PanelId::None;
+                        cx.notify();
+                    },
+                )),
+            );
 
         div()
             .h_full()
@@ -3935,7 +3979,7 @@ impl WalletPage {
                 columns.child(self.panel_scaffold(theme, "BNB".into(), body, cx))
             }
             PanelId::ContactDetail => {
-                let body = self.contact_detail_body(theme);
+                let body = self.contact_detail_body(theme, cx);
                 let title = self.contacts.section_contacts.clone();
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }

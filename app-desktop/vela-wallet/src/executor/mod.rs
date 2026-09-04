@@ -365,6 +365,13 @@ fn challenge_for(purpose: ProofPurpose) -> Vec<u8> {
     format!("{label}{}", unix_millis()).into_bytes()
 }
 
+/// The same wall clock, as epoch milliseconds — what the wallet-state machines
+/// stamp their mutations with. Public since spec 030: an event carries the time
+/// the SHELL observed, so the core stays a pure function of its inputs.
+pub fn now_ms() -> f64 {
+    unix_millis() as f64
+}
+
 fn unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
