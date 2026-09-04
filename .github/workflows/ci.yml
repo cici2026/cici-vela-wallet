@@ -133,6 +133,18 @@ jobs:
         run: |
           node scripts/lint-lottie-assets.mjs --self-test
           node scripts/lint-lottie-assets.mjs
+      # Every screen family a native client ships must be reachable from that
+      # client's navigation root. Spec 022 shipped 9,695 lines of drawn UI across
+      # three clients that no person could open, and every gate here stayed green
+      # — because on each platform the COMPILER was happy: rustc never reads a
+      # directory nobody declared, and Kotlin/Swift happily compile a screen
+      # nothing routes to. Only navigation can see it.
+      #
+      # Static on purpose: no cargo, no gradle, no xcodebuild, well under a
+      # second. A guard that needs a 25-minute toolchain is a guard somebody
+      # eventually skips — which is the failure mode it exists to prevent.
+      - name: Native screens are reachable
+        run: node scripts/check-native-reachability.mjs
       # Byte-parity between the Rust core and the JS library the app still ships on
       # native — over every address literal in the repo plus 200k random seeds.
       - name: Identicon parity (Rust core vs the shipped JS library)
