@@ -141,3 +141,66 @@ Tiers 5 and 6 are the chain index's endpoint list. `LoadPoolConfig` is answered
 synchronously on the pool thread, and an index round trip there would stall every
 first call on a chain behind an HTTP fetch. The core orders whatever it is given, so
 adding those tiers later changes no rule — it is a debt, not a divergence.
+
+## Phase 2 — the wallet reads its own money
+
+`executor/balances.rs` (the multi-chain fetch the core delegates whole) and
+`executor/balance_dashboard.rs` (seven operations, the 24h total cache, the privacy
+flag).
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **133 passed · 0 failed · 10 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean |
+| warnings (forced) | ✅ 1, pre-existing |
+| `scripts/sweep-gallery.sh` | ✅ every state rendered |
+
+### The live read, across every chain
+
+```
+11 chains answered, 1 did not
+  chain 100 : 769970000000000000 xDAI
+  unreachable: [4217]
+```
+
+`769970000000000000` wei is **0.76997 xDAI** — the golden Safe's known balance, now
+reached through the pool's routing rather than a hand-written endpoint list.
+
+**The second line is the one that matters.** Tempo comes back in `failed_chain_ids`,
+not as a zero-balance token, and a test asserts the two lists are disjoint. A wallet
+that renders an unreachable chain as empty **under-reports somebody's money and looks
+completely normal doing it** — which is SC-003, and the reason the core takes the two
+lists separately rather than a single token array.
+
+### Scope of this cut, stated rather than implied
+
+**Native coins only.** ERC-20 needs Multicall3 aggregation and a token list; prices
+need a source. Both are additive: the core already accepts a `Vec<BalanceToken>` and
+already knows what an unpriced one means. `price_usd` is `None`, never `0` and never
+`1` — the same discipline `display_currency` made explicit in 030.
+
+Two more deliberate gaps, marked in the code rather than left to be discovered:
+- **`force` is accepted and ignored**, because this cut keeps no 5-minute shell TTL —
+  every fetch is live. Adding the TTL later changes no core rule, since the core
+  already says when it wants one bypassed.
+- **No streaming.** The core supports `ChainAssetsArrived` so a home fills in as
+  chains answer; that needs a way to push events into a resident from a worker, which
+  this cut does not build. Twelve chains run in parallel and settle once — correct,
+  just less alive.
+
+### The split the cache respects
+
+The core's words: *"The shell applies the 24h TTL"* and *"The CORE decides when this
+may happen — the complete-results-only write gate."* Both halves are obeyed exactly.
+Expiry reads as **absent**, not as a stale figure — the hero would rather show a
+skeleton than yesterday's number presented as today's — and this file never writes
+uninvited, because caching a total assembled from a partial fetch is how a wallet
+remembers a number that was never true.
+
+### A red that was my test, not the code
+
+`only_unexpired_rows_reach_the_switcher` failed with 0 rows where 1 was expected. The
+cause was the test seeding a fixed past timestamp while the operation reads the
+**real** clock — so both rows were legitimately expired and the executor was right.
+Fixed by seeding from the same clock. Worth recording because the failure looked
+exactly like a broken TTL.
