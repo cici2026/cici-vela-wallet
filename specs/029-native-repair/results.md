@@ -196,3 +196,68 @@ vela-core-uniffi` plus a `uniffi-bindgen` run first (2m24s cold). Any CI job has
 do the same, and `xcodebuild -list` fails outright without the xcframework — not with
 a missing-scheme error, but with *"local binary target 'VelaCoreFFI' … does not
 contain a binary artifact"*.
+
+## Phase 4 — iOS wired, and the three CI jobs
+
+`RootView.swift` only, plus the shared scheme the project never had.
+
+| Gate | Result |
+|---|---|
+| `xcodebuild -list` | ✅ resolves `VelaWallet` — it could not before (see below) |
+| `xcodebuild test` (iPhone 16 / iOS 18.2) | ✅ **130 tests in 13 suites passed**, 0 failures |
+| `xcodebuild test` (iPhone 17 Pro / iOS 26.2, the CI resolver's pick) | ✅ same 130 / 13 / 0 |
+| Generated Swift bindings drift | ✅ none — `build-ios-xcframework.sh` refreshed them to byte-identical |
+| `check-native-reachability.mjs` | ✅ **green on all three platforms** |
+
+### The scheme the project never had
+
+`xcshareddata/xcschemes/` did not exist. Xcode autocreates a per-user scheme under
+`xcuserdata/` the first time anybody opens the project, which is exactly why nobody
+noticed: it works on every machine that has ever opened the project and on no machine
+that has not. A shared `VelaWallet.xcscheme` is now committed, with
+`VelaWalletUITests` skipped — `ScreenshotSweepTests` launches the app once per gallery
+fixture to pull images out of the `.xcresult`, which is a review instrument for a
+person, not a gate.
+
+### Two destination traps, both hit, both now designed out
+
+1. `-destination 'platform=iOS Simulator,name=iPhone 16'` is **ambiguous** the moment
+   a machine has that device under two runtimes; xcodebuild answers by printing every
+   simulator it knows and failing.
+2. `OS=latest` does **not** mean "the newest runtime that has this device" — it means
+   the newest runtime, which here (26.2) offers no iPhone 16 at all.
+
+The job therefore *resolves* a UDID from `simctl list devices available -j` rather
+than spelling a destination. Verified by running the resolver's own pick.
+
+### A reporting trap worth writing down
+
+`xcodebuild` prints **`Executed 0 tests, with 0 failures`** and then
+`** TEST SUCCEEDED **`. That zero is not a failure and not a skip: `VelaWalletTests`
+uses Swift Testing (`@Test`), which reports on its own line —
+`✔ Test run with 130 tests in 13 suites passed`. A CI job (or a person) grepping for
+the XCTest line would read a green suite of 130 as an empty one. The job comment says
+so at the point of use.
+
+### The CI jobs (FR-006)
+
+| Job | Runner | Covers |
+|---|---|---|
+| `desktop` | ubuntu-24.04 | `fmt --check`, `clippy --all-targets`, `cargo test` |
+| `android` | ubuntu-24.04 | generate Kotlin bindings → `assembleDebug` + `testDebugUnitTest` |
+| `ios` | macos-15 | build xcframework (cached) → `xcodebuild test` on a resolved simulator |
+
+Three things stated in the jobs' own comments rather than left for a reader to assume:
+
+- **`sweep-gallery.sh` is not in the desktop job.** It opens real windows; a runner has
+  no display. It stays a local gate, and saying so stops the next person assuming a
+  coverage that does not exist.
+- **Clippy is `--all-targets`, not `-D warnings`.** The baseline carries ten warnings
+  in caBLE/Noise transport code because nothing ever ran clippy here. Fixing transport
+  code is not this feature's business (AI-CODING-RULES §2), and a gate that starts red
+  is a gate somebody disables. Raising it is a named task for whoever clears the ten.
+- **Both native jobs must generate their bindings first.** `rust/bindings/kotlin/`
+  and `VelaCoreKit/Artifacts/` are gitignored, so a fresh checkout cannot build either
+  app. The iOS xcframework is cached on `hashFiles('rust/crates/**', 'rust/Cargo.lock')`
+  because macos-15 minutes bill at ten times linux — that cache is the difference
+  between a ~6-minute job and a ~25-minute one.
