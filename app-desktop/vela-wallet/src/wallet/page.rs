@@ -36,8 +36,8 @@ use crate::session;
 use crate::settings::SettingsStrings;
 use crate::settings::components::{
     CalloutTone, callout, chain_mark, check_list, danger_card, dropdown_menu, dropdown_trigger,
-    form_row, key_value_row, network_row, rpc_banner, segmented, settings_nav_row, status_pill,
-    storage_bar, storage_group, text_scale, url_field,
+    editable_url_field, form_row, key_value_row, network_row, rpc_banner, segmented,
+    settings_nav_row, status_pill, storage_bar, storage_group, text_scale, url_field,
 };
 use crate::settings::fixtures::{self as settings_fixtures, SettingsPage, Tone, latency, pill};
 use crate::settings::live as settings_live;
@@ -60,7 +60,7 @@ use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
-use vela_core::app::network_admin::NetworkAdmin;
+use vela_core::app::network_admin::{Event as NetEvent, NetworkAdmin};
 use vela_core::app::payment_request::PaymentRequest;
 use vela_core::app::receive_watch::ReceiveWatch;
 
@@ -296,6 +296,8 @@ pub struct WalletPage {
     /// validates the address and clears the found cards on every keystroke, so
     /// a second copy here would be a second opinion about what was typed.
     add_token_focus: gpui::FocusHandle,
+    /// One per editable settings field, made on first use.
+    endpoint_focuses: Vec<gpui::FocusHandle>,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
     /// core's sorted `tokens`.
     ///
@@ -486,6 +488,7 @@ impl WalletPage {
             tx_detail: None,
             asset_detail: None,
             add_token_focus: cx.focus_handle(),
+            endpoint_focuses: Vec::new(),
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -1163,6 +1166,18 @@ impl WalletPage {
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
         wallet_live::chain_rows(&view, &self.strings)
+    }
+
+    /// The focus handle for one editable settings field, made on first use.
+    ///
+    /// A handle per field rather than one shared: focus is which box the
+    /// keystrokes go into, and a shared handle would send them to whichever
+    /// field drew last.
+    fn endpoint_focus(&mut self, index: usize, cx: &mut Context<Self>) -> gpui::FocusHandle {
+        while self.endpoint_focuses.len() <= index {
+            self.endpoint_focuses.push(cx.focus_handle());
+        }
+        self.endpoint_focuses[index].clone()
     }
 
     /// D3's model: the selected holding, or the mock's BNB.
@@ -2800,7 +2815,12 @@ impl WalletPage {
     }
 
     /// Column 3: the panel the nav selected.
-    fn settings_panel(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn settings_panel(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let (title, description) = match self.settings_page {
             SettingsPage::Account => (self.settings.nav_account.clone(), None),
             SettingsPage::Appearance => (self.settings.nav_appearance.clone(), None),
@@ -2890,7 +2910,7 @@ impl WalletPage {
             SettingsPage::Localization => self.settings_localization(theme, cx),
             SettingsPage::Networks => self.settings_networks(theme, cx),
             SettingsPage::RpcProviders => self.settings_providers(theme),
-            SettingsPage::Endpoints => self.settings_endpoints(theme),
+            SettingsPage::Endpoints => self.settings_endpoints(theme, window, cx),
             SettingsPage::Storage => self.settings_storage(theme),
             SettingsPage::About => self.settings_about(theme),
         };
@@ -3423,7 +3443,12 @@ impl WalletPage {
     }
 
     /// DST6 — the four services the wallet leans on.
-    fn settings_endpoints(&mut self, theme: &Theme) -> Div {
+    fn settings_endpoints(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let copy = settings_fixtures::endpoint_copy(&self.settings);
         let mut col = div().flex().flex_col().gap(px(24.)).child(
             div()
@@ -3432,6 +3457,56 @@ impl WalletPage {
                 .text_color(theme.fg_muted)
                 .child(self.settings.endpoints_desc.clone()),
         );
+
+        // Live since 031. 030 recorded this panel as "unfinished rather than
+        // blocked", and it was: the core already probes all four endpoints,
+        // holds the drafts and persists them on blur behind its own gate. What
+        // was missing was a field somebody could type in.
+        if self.identity.is_some() {
+            let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
+            for (i, endpoint) in view.endpoints.iter().enumerate() {
+                let (label, hint) = copy.get(i).cloned().unwrap_or_default();
+                let badge = settings_live::endpoint_badge(&endpoint.health, &self.settings);
+                let field = endpoint.field;
+                let focus = self.endpoint_focus(i, cx);
+                col = col.child(editable_url_field(
+                    ElementId::from(("endpoint", i)),
+                    theme,
+                    Some(label),
+                    &endpoint.value,
+                    // The DEFAULT is the placeholder, so an empty field shows
+                    // what it will fall back to rather than nothing.
+                    gpui::SharedString::from(endpoint.default_value.clone()),
+                    badge.as_ref(),
+                    Some(hint),
+                    settings_live::endpoint_tone(&endpoint.health),
+                    &focus,
+                    window,
+                    move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                        let entity = resident::resident::<NetworkAdmin>(cx);
+                        entity.update(cx, |resident, cx| {
+                            // Edited, then blurred. The desktop has no blur
+                            // event of its own yet, and the core's blur is what
+                            // PERSISTS — so a keystroke that never blurred
+                            // would be a setting the next launch has never
+                            // heard of. Re-probing per keystroke is the cost;
+                            // the core debounces nothing here and neither does
+                            // the RN screen.
+                            resident.dispatch(
+                                NetEvent::EndpointEdited {
+                                    field,
+                                    value: text.clone(),
+                                },
+                                cx,
+                            );
+                            resident.dispatch(NetEvent::EndpointBlurred { field }, cx);
+                        });
+                    },
+                ));
+            }
+            return self.endpoints_footer(col, theme);
+        }
+
         for (i, endpoint) in settings_fixtures::ENDPOINTS.iter().enumerate() {
             let (label, hint) = copy[i].clone();
             // Over a second the pill says WHY it is amber. Without the word a
@@ -3452,6 +3527,11 @@ impl WalletPage {
                 None,
             ));
         }
+        self.endpoints_footer(col, theme)
+    }
+
+    /// The reset / self-host row under the endpoint fields.
+    fn endpoints_footer(&mut self, col: Div, theme: &Theme) -> Div {
         col.child(
             div()
                 .flex()
@@ -4334,7 +4414,7 @@ impl WalletPage {
             Section::Explore => columns.child(self.explore_content(theme, cx)),
             Section::Settings => columns
                 .child(self.settings_nav(theme, cx))
-                .child(self.settings_panel(theme, cx)),
+                .child(self.settings_panel(theme, window, cx)),
         };
         columns = match self.panel {
             PanelId::None => columns,

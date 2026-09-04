@@ -492,6 +492,81 @@ pub fn network_row(
 
 // -- UrlField -----------------------------------------------------------------
 
+/// The same field, EDITABLE — the endpoint and provider-key surfaces.
+///
+/// 030 recorded these as "unfinished rather than blocked": the refusal behind
+/// them was already proven, and `ui::text_field` already existed. This is that
+/// field, wearing `url_field`'s clothes so a live panel and a mock one look
+/// identical.
+///
+/// The value lives in the CORE — `NetView`'s endpoint drafts, which the machine
+/// re-probes on every keystroke and persists on blur behind its own chain-id
+/// gate. A shell-side copy would be a second opinion about what was typed.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one field, one call site, all data"
+)]
+pub fn editable_url_field(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    label: Option<gpui::SharedString>,
+    value: &str,
+    placeholder: gpui::SharedString,
+    badge: Option<&Pill>,
+    hint: Option<gpui::SharedString>,
+    tone: Option<Tone>,
+    focus: &gpui::FocusHandle,
+    window: &gpui::Window,
+    on_change: impl Fn(String, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> Div {
+    let mut col = div().flex().flex_col().gap(px(8.));
+    if label.is_some() || badge.is_some() {
+        let mut head = div().flex().items_center().justify_between().gap(px(8.));
+        if let Some(label) = label {
+            head = head.child(
+                div()
+                    .text_size(theme::text_label())
+                    .text_color(theme.fg_subtle)
+                    .child(label),
+            );
+        }
+        if let Some(badge) = badge {
+            head = head.child(status_pill(theme, badge));
+        }
+        col = col.child(head);
+    }
+    let strings = crate::ui::NameFieldStrings {
+        label: gpui::SharedString::from(""),
+        placeholder,
+        helper: gpui::SharedString::from(""),
+        too_long_hint: gpui::SharedString::from(""),
+    };
+    col = col.child(crate::ui::text_field(
+        id,
+        theme,
+        &strings,
+        value,
+        // The ERROR border is the core's verdict, not a length check: an
+        // endpoint that answered for another chain is the thing worth drawing
+        // red, and the core is what decided that.
+        matches!(tone, Some(Tone::Error)),
+        false,
+        focus,
+        window,
+        on_change,
+    ));
+    if let Some(hint) = hint {
+        col = col.child(
+            div()
+                .text_size(theme::text_label())
+                .line_height(px(16.))
+                .text_color(theme.fg_subtle)
+                .child(hint),
+        );
+    }
+    col
+}
+
 /// A labelled mono field: a label row that may carry a latency pill, the value
 /// in a sunken box, and an optional hint under it. Every endpoint on
 /// DST4 / DST5 / DST6 / DSR1 is one of these.

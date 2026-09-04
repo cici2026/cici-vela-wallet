@@ -8,10 +8,12 @@
 
 use gpui::SharedString;
 
+use crate::settings::SettingsStrings;
+use crate::settings::fixtures::{Pill, Tone};
 use crate::settings::model::{NetworkRowModel, chain_tint, lettermark};
 
 use vela_core::app::display_currency::CurrencyView;
-use vela_core::app::network_admin::{NetProbeHealth, NetView};
+use vela_core::app::network_admin::{NetProbeHealth, NetServiceHealth, NetView};
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
 
 /// The sample figure the 本地化 mock prints beside the currency code.
@@ -205,6 +207,64 @@ const UNTINTED: u32 = 0x8A_8F_98;
 
 /// The 网络 rows, from what the core loaded.
 ///
+/// One service endpoint's badge: how it answered, in the words the mocks use.
+///
+/// `Checking` gets NO pill rather than a neutral one. A grey badge beside a
+/// field reads as a verdict, and "we have not asked yet" is not one — the same
+/// rule the balance hero applies to a figure it does not have.
+#[must_use]
+pub fn endpoint_badge(health: &NetServiceHealth, s: &SettingsStrings) -> Option<Pill> {
+    match health {
+        NetServiceHealth::Checking => None,
+        NetServiceHealth::Ok { latency_ms, .. } => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a measured latency"
+            )]
+            let ms = latency_ms.max(0.0) as u32;
+            Some(crate::settings::fixtures::latency(
+                ms,
+                (ms >= 1000).then_some(s.network_slow.as_ref()),
+            ))
+        }
+        // Not HTTPS is a REFUSAL to trust, not a slow answer, and it must not
+        // wear the same colour as a working endpoint.
+        NetServiceHealth::NotHttps => Some(crate::settings::fixtures::pill(
+            Tone::Error,
+            s.health_https_required.clone(),
+        )),
+        NetServiceHealth::Unreachable { http_status, .. } => {
+            Some(crate::settings::fixtures::pill(
+                Tone::Error,
+                match http_status {
+                    // "HTTP 502" and "Connection failed" are different problems
+                    // and lead to different fixes.
+                    Some(status) => SharedString::from(format!("HTTP {status}")),
+                    None => s.health_offline.clone(),
+                },
+            ))
+        }
+        // Reachable, but not the service it must be. A WARNING, not an error:
+        // the core does not gate saves on it, so the badge must not look like a
+        // refusal.
+        NetServiceHealth::InvalidResponse { .. } => Some(crate::settings::fixtures::pill(
+            Tone::Warn,
+            s.health_invalid.clone(),
+        )),
+    }
+}
+
+/// The tone the field's own border takes.
+#[must_use]
+pub fn endpoint_tone(health: &NetServiceHealth) -> Option<Tone> {
+    match health {
+        NetServiceHealth::NotHttps | NetServiceHealth::Unreachable { .. } => Some(Tone::Error),
+        NetServiceHealth::Ok { .. } => Some(Tone::Ok),
+        NetServiceHealth::Checking | NetServiceHealth::InvalidResponse { .. } => None,
+    }
+}
+
 /// The core owns which networks exist, in what order, and whether each is
 /// custom. This adds only the two things it has no business knowing — a
 /// lettermark and a tint — and flattens the probe health to "is there a number".
@@ -230,4 +290,81 @@ pub fn network_rows(view: &NetView) -> Vec<NetworkRowModel> {
             custom: row.is_custom,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    fn strings() -> SettingsStrings {
+        SettingsStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// Each health state gets its own badge — and "checking" gets none.
+    #[test]
+    fn a_probe_that_has_not_answered_wears_no_verdict() {
+        let s = strings();
+
+        // Not asked yet. A grey badge beside a field reads as a verdict, and
+        // this is not one — the same rule the hero applies to a figure it does
+        // not have.
+        assert!(endpoint_badge(&NetServiceHealth::Checking, &s).is_none());
+        assert!(endpoint_tone(&NetServiceHealth::Checking).is_none());
+
+        let ok = endpoint_badge(
+            &NetServiceHealth::Ok {
+                latency_ms: 62.0,
+                rate_count: None,
+            },
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("ok has a badge"));
+        assert_eq!(ok.label, "62ms");
+        assert!(matches!(ok.tone, Tone::Ok));
+
+        // Over a second the pill says WHY it is amber.
+        let slow = endpoint_badge(
+            &NetServiceHealth::Ok {
+                latency_ms: 1_200.0,
+                rate_count: None,
+            },
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("ok has a badge"));
+        assert!(matches!(slow.tone, Tone::Warn));
+        assert!(slow.label.contains("1.2s"));
+
+        // Not HTTPS is a refusal to trust, not a slow answer.
+        let insecure = endpoint_badge(&NetServiceHealth::NotHttps, &s)
+            .unwrap_or_else(|| unreachable!("not-https has a badge"));
+        assert!(matches!(insecure.tone, Tone::Error));
+        assert_eq!(insecure.label, s.health_https_required);
+
+        // "HTTP 502" and "offline" are different problems with different fixes.
+        let refused = endpoint_badge(
+            &NetServiceHealth::Unreachable {
+                http_status: Some(502),
+                latency_ms: None,
+            },
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("unreachable has a badge"));
+        assert_eq!(refused.label, "HTTP 502");
+        let offline = endpoint_badge(
+            &NetServiceHealth::Unreachable {
+                http_status: None,
+                latency_ms: None,
+            },
+            &s,
+        )
+        .unwrap_or_else(|| unreachable!("unreachable has a badge"));
+        assert_eq!(offline.label, s.health_offline);
+
+        // Reachable but not the right service: a WARNING, because the core does
+        // not gate saves on it and the badge must not look like a refusal.
+        let wrong = endpoint_badge(&NetServiceHealth::InvalidResponse { latency_ms: 40.0 }, &s)
+            .unwrap_or_else(|| unreachable!("invalid has a badge"));
+        assert!(matches!(wrong.tone, Tone::Warn));
+        assert!(endpoint_tone(&NetServiceHealth::InvalidResponse { latency_ms: 40.0 }).is_none());
+    }
 }

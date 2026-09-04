@@ -102,6 +102,11 @@ pub struct SettingsStrings {
     pub endpoint_relay_hint: SharedString,
     pub endpoint_fiat: SharedString,
     pub endpoint_fiat_hint: SharedString,
+    /// The three ways a service endpoint can be wrong, in the same words the
+    /// RN `ServiceHealthBadge` uses — one wording per state across clients.
+    pub health_https_required: SharedString,
+    pub health_offline: SharedString,
+    pub health_invalid: SharedString,
     pub endpoints_reset: SharedString,
     pub endpoints_guide: SharedString,
     // storage panel
@@ -230,6 +235,9 @@ impl SettingsStrings {
             endpoint_relay_hint: s("settingsModals.endpoints.bundlerHint"),
             endpoint_fiat: s("settingsModals.endpoints.fiatLabel"),
             endpoint_fiat_hint: s("settingsModals.endpoints.fiatHint"),
+            health_https_required: s("settingsModals.health.httpsRequired"),
+            health_offline: s("settingsModals.health.offline"),
+            health_invalid: s("settingsModals.health.invalid"),
             endpoints_reset: s("settingsModals.endpoints.resetToDefaults"),
             endpoints_guide: s("settingsModals.endpoints.selfHostGuide"),
             storage_subtitle: s("settings.storage.subtitle"),
