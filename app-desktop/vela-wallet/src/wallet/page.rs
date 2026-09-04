@@ -692,7 +692,8 @@ impl WalletPage {
         }
 
         let mut networks = div().flex().flex_col().gap(px(2.)).flex_1().min_h(px(0.));
-        for (i, row) in fixtures::chains(s).iter().enumerate() {
+        let chain_rows = self.chain_models(cx);
+        for (i, row) in chain_rows.iter().enumerate() {
             networks = networks.child(chain_row(
                 ElementId::from(("chain", i)),
                 theme,
@@ -753,7 +754,7 @@ impl WalletPage {
 
         let balance = self.balance_model(cx);
         let activity = self.activity_models(cx);
-        let assets = fixtures::assets_default(&self.strings);
+        let assets = self.asset_models(cx);
 
         let pills = div()
             .flex()
@@ -1109,6 +1110,29 @@ impl WalletPage {
             .hidden;
         let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
         wallet_live::activity_rows(&feed, &self.strings, hidden)
+    }
+
+    /// The home's asset strip: the person's holdings, or the mocks'.
+    ///
+    /// Note what is NOT here — a fallback to the fixture list while a real
+    /// wallet is still counting. An empty strip under a counting hero is the
+    /// truth; six of somebody else's tokens under it is the wrong screen this
+    /// whole cut exists to fix.
+    fn asset_models(&mut self, cx: &mut Context<Self>) -> Vec<fixtures::AssetRowModel> {
+        if self.identity.is_none() {
+            return fixtures::assets_default(&self.strings);
+        }
+        let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+        wallet_live::asset_rows(&view, &self.strings, &self.locale)
+    }
+
+    /// The home's network list: the chains this person actually holds on.
+    fn chain_models(&mut self, cx: &mut Context<Self>) -> Vec<fixtures::ChainRowModel> {
+        if self.identity.is_none() {
+            return fixtures::chains(&self.strings);
+        }
+        let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+        wallet_live::chain_rows(&view, &self.strings)
     }
 
     /// The balance hero: the core's figure for a real session, the mock's

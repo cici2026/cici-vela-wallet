@@ -13,7 +13,8 @@ use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::wallet::WalletStrings;
 use crate::wallet::fixtures::{
-    ActivityKind, ActivityRowModel, BALANCE_MASK, BalanceModel, BalanceState, StatusKind,
+    ActivityKind, ActivityRowModel, AssetRowModel, BALANCE_MASK, BalanceModel, BalanceState,
+    ChainRowModel, Fiat, StatusKind,
 };
 
 /// The balance hero.
@@ -358,6 +359,58 @@ mod tests {
         );
     }
 
+    /// The home strip lists the core's holdings, in the core's order, and says
+    /// nothing about a chain nobody holds anything on.
+    #[test]
+    fn the_home_strips_show_only_what_the_person_holds() {
+        crate::executor::storage::tests::with_temp_state("home-strips", || {
+            use vela_core::app::balance_dashboard::BalanceToken;
+            let token =
+                |chain_id: u32, symbol: &str, balance: &str, price: Option<f64>| BalanceToken {
+                    chain_id,
+                    symbol: symbol.to_owned(),
+                    name: symbol.to_owned(),
+                    balance: balance.to_owned(),
+                    decimals: 18,
+                    token_address: None,
+                    price_usd: price,
+                    spam: false,
+                };
+            let mut held = view(Some(100.0));
+            held.tokens = vec![
+                token(1, "ETH", "0.05", Some(2_000.0)),
+                token(100, "xDAI", "0.75897", Some(1.0)),
+                token(100, "USDC", "12", Some(1.0)),
+            ];
+            let s = strings();
+
+            let assets = asset_rows(&held, &s, "en-US");
+            assert_eq!(assets.len(), 3);
+            // The core's order, kept: it already sorted by value.
+            assert_eq!(assets[0].ticker, "ETH");
+            assert_eq!(assets[0].chain, "Ethereum");
+            assert!(matches!(&assets[0].fiat, Fiat::Value(v) if v.as_ref() == "$100.00"));
+
+            let chains = chain_rows(&held, &s);
+            // "All networks" plus the TWO chains held on — not the twelve the
+            // wallet knows about.
+            assert_eq!(chains.len(), 3);
+            assert_eq!(chains[0].name, s.all_networks);
+            assert_eq!(chains[0].count, 2, "the count is the chains listed");
+            assert!(chains[0].dot.is_none(), "all is not a chain");
+            assert!(chains[0].selected);
+            assert_eq!(chains[1].name, "Ethereum");
+            assert_eq!(chains[1].count, 1);
+            assert_eq!(chains[2].name, "Gnosis");
+            assert_eq!(chains[2].count, 2);
+
+            // Still counting: an empty strip, never somebody else's tokens.
+            let counting = view(None);
+            assert!(asset_rows(&counting, &s, "en-US").is_empty());
+            assert_eq!(chain_rows(&counting, &s).len(), 1, "only the all row");
+        });
+    }
+
     /// SC-003's visible half: a chain that could not be reached becomes a chip,
     /// and one that is merely rate-limited does not.
     #[test]
@@ -476,6 +529,103 @@ pub fn unreachable_chips(view: &BalanceView) -> Vec<(SharedString, u32, SharedSt
             )
         })
         .collect()
+}
+
+/// The home's asset strip — the person's holdings, most valuable first.
+///
+/// The core already sorted and filtered them (`sortAndFilterHoldings`: zero
+/// balances dropped, highest value first), so this only renders. Re-sorting
+/// here would be a second opinion about which holding matters most.
+///
+/// Empty while the core is still counting, and empty is right: the strip
+/// simply has no rows yet. The hero next to it is already saying "counting" in
+/// the one place that can say it without inventing a figure.
+#[must_use]
+pub fn asset_rows(view: &BalanceView, s: &WalletStrings, locale: &str) -> Vec<AssetRowModel> {
+    let unpriced: std::collections::BTreeSet<(u32, String)> = view
+        .unpriced_tokens
+        .iter()
+        .map(|token| {
+            (
+                token.chain_id,
+                token.token_address.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    view.tokens
+        .iter()
+        .map(|token| {
+            let key = (
+                token.chain_id,
+                token.token_address.clone().unwrap_or_default(),
+            );
+            let amount = token.balance.parse::<f64>().unwrap_or(0.0);
+            AssetRowModel {
+                ticker: SharedString::from(token.symbol.clone()),
+                chain: SharedString::from(crate::executor::custom_tokens::network_name(
+                    token.chain_id,
+                )),
+                badge: badge(token.chain_id),
+                balance: if view.hidden {
+                    SharedString::from(crate::wallet::fixtures::MASK)
+                } else {
+                    SharedString::from(format_token_amount(amount, NumberPreset::CommaDot, false))
+                },
+                fiat: if view.hidden {
+                    Fiat::Masked
+                } else if unpriced.contains(&key) {
+                    Fiat::NoPrice(s.no_price.clone())
+                } else {
+                    Fiat::Value(SharedString::from(format_fiat(
+                        amount * token.price_usd.unwrap_or(0.0),
+                        "USD",
+                        "$",
+                        locale,
+                        FiatOptions::default(),
+                    )))
+                },
+            }
+        })
+        .collect()
+}
+
+/// The home's network list: every chain the person holds something on, with
+/// how many assets are on it, under an "all networks" row.
+///
+/// Only chains with a holding. A list of twelve networks where eleven say "0"
+/// is a list nobody reads — and the eleven are not wrong, they are noise. The
+/// count on the "all" row is the number of chains listed, so the two halves of
+/// the strip cannot disagree.
+#[must_use]
+pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
+    let mut order: Vec<u32> = Vec::new();
+    for token in &view.tokens {
+        if !order.contains(&token.chain_id) {
+            order.push(token.chain_id);
+        }
+    }
+    let mut rows = vec![ChainRowModel {
+        name: s.all_networks.clone(),
+        // The neutral dot: "all" is not a chain and must not wear one's colour.
+        dot: None,
+        count: u32::try_from(order.len()).unwrap_or(u32::MAX),
+        selected: true,
+    }];
+    for chain_id in order {
+        rows.push(ChainRowModel {
+            name: SharedString::from(crate::executor::custom_tokens::network_name(chain_id)),
+            dot: Some(badge(chain_id)),
+            count: u32::try_from(
+                view.tokens
+                    .iter()
+                    .filter(|token| token.chain_id == chain_id)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+            selected: false,
+        });
+    }
+    rows
 }
 
 /// The chain tint for an activity badge.
