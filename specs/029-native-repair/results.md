@@ -261,3 +261,45 @@ Three things stated in the jobs' own comments rather than left for a reader to a
   app. The iOS xcframework is cached on `hashFiles('rust/crates/**', 'rust/Cargo.lock')`
   because macos-15 minutes bill at ten times linux — that cache is the difference
   between a ~6-minute job and a ~25-minute one.
+
+## Phase 5 — the guard was wrong, and proving SC-005 is what found it
+
+SC-005 says a regression must be *proven* red, "not by assertion". Doing that
+honestly broke the guard twice, and both breaks were real.
+
+**First probe — my probe was wrong, not the guard.** Deleting Android's
+`const val EXPLORE` left the guard green, which looked like a blind spot. It is not:
+removing a route constant breaks *compilation*, not reachability, and the build jobs
+own that. The two instruments cover different classes, which is the argument for
+having both.
+
+**Second probe — a genuine blind spot.** Deleting the `ExploreScreen(` *call* left
+the guard green, because the surviving `import ...feature.explore.ExploreScreen` line
+matched the package check. Kotlin warns about an unused import; it does not error. So
+a dead screen looked reachable, and the guard would have re-certified the exact defect
+this feature exists to repair. Imports are now stripped before anything is matched.
+
+**Stripping imports then produced false positives** — `contacts`, `settings` and
+`signing` all flagged, and all three are reachable. The heuristic was wrong at the
+root: it looked for a screen whose *filename* matched, one hop from the navigation
+root. But contacts renders through `ContactsRoute`, not `ContactsScreen`, and
+**`signing` is never rendered by the navigation root at all — the browser raises it.**
+
+Reachability is a graph, not a grep. The check is now a transitive walk: collect what
+each family declares (`fun X(` on Kotlin, `struct X: View` on Swift), start from the
+navigation root, and keep following into families already reached. A signing sheet
+reachable only through Explore is correctly reachable; if Explore's call is deleted,
+**both** explore and signing go red, which is the truth.
+
+| Direction | Result |
+|---|---|
+| New guard vs. the original broken tree (`f9bcb278`) | ✅ finds all 6 orphans across 3 platforms |
+| New guard vs. the fixed tree | ✅ green, **zero false positives** |
+| Delete desktop `mod explore;` | ✅ red — `explore` |
+| Delete Android's `ExploreScreen(` call | ✅ red — `explore, signing` (transitivity working) |
+| Delete iOS's `ExploreScreen(` call | ✅ red — `Explore` |
+
+The lesson is not about this script. A guard is a claim, and a claim nobody has seen
+fail is a claim nobody has tested. Two of the three checks in the first version were
+wrong, and the only reason that is known is that SC-005 refused to accept an
+assertion.

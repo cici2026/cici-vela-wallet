@@ -78,47 +78,90 @@ const failures = [];
 	}
 }
 
-// --- Android: a feature package no navigation destination reaches -----------
+// A screen family is reachable if the navigation root renders one of its
+// composables/views, OR if some already-reachable family does. Reachability is
+// TRANSITIVE and both platforms rely on it: `signing` is never rendered by the
+// navigation root — the browser raises it — so a check that only looked one hop
+// from the root would call the signing sheet dead while a person can open it.
+//
+// Imports are stripped before anything is matched. An `import
+// ...feature.explore.ExploreScreen` line survives the deletion of every call to
+// it (Kotlin warns about an unused import; it does not error), so counting
+// imports as usage lets a dead screen look reachable. Found the honest way, by
+// deleting the call and watching an earlier version of this check stay green.
+function reachableFamilies({ base, navPath, isSource, declPattern }) {
+	const strip = (text) =>
+		text
+			.split('\n')
+			.filter((line) => !line.trimStart().startsWith('import '))
+			.join('\n');
+
+	const families = dirs(base);
+	const declares = new Map(); // family -> Set<symbol it declares>
+	const body = new Map(); // family -> its own source, imports stripped
+
+	for (const family of families) {
+		const files = readdirSync(join(ROOT, base, family)).filter(isSource);
+		const text = files.map((f) => read(join(base, family, f))).join('\n');
+		body.set(family, strip(text));
+		declares.set(
+			family,
+			new Set([...text.matchAll(declPattern)].map((m) => m[1]))
+		);
+	}
+
+	const renders = (text, family) => [...declares.get(family)].some((sym) => text.includes(`${sym}(`));
+
+	const reached = new Set();
+	let frontier = [strip(read(navPath))];
+	while (frontier.length) {
+		const next = [];
+		for (const text of frontier) {
+			for (const family of families) {
+				if (reached.has(family)) continue;
+				if (renders(text, family)) {
+					reached.add(family);
+					next.push(body.get(family));
+				}
+			}
+		}
+		frontier = next;
+	}
+	return families.filter((f) => !reached.has(f));
+}
+
+// --- Android ---------------------------------------------------------------
 {
-	const nav = read(
-		'app-android/vela-wallet/app/src/main/java/app/getvela/wallet/navigation/VelaNavHost.kt'
-	);
-	const base = 'app-android/vela-wallet/app/src/main/java/app/getvela/wallet/feature';
-	const orphans = dirs(base).filter((feature) => {
-		if (EXEMPT.android.has(feature)) return false;
-		// Reachable if the nav host names the package, or renders any screen from it.
-		if (nav.includes(`feature.${feature}.`)) return false;
-		const screens = readdirSync(join(ROOT, base, feature))
-			.filter((f) => f.endsWith('Screen.kt') || f.endsWith('Sheet.kt'))
-			.map((f) => f.replace(/\.kt$/, ''));
-		return !screens.some((s) => nav.includes(`${s}(`));
-	});
+	const orphans = reachableFamilies({
+		base: 'app-android/vela-wallet/app/src/main/java/app/getvela/wallet/feature',
+		navPath: 'app-android/vela-wallet/app/src/main/java/app/getvela/wallet/navigation/VelaNavHost.kt',
+		isSource: (f) => f.endsWith('.kt'),
+		declPattern: /^fun ([A-Z][A-Za-z0-9]*)\(/gm
+	}).filter((f) => !EXEMPT.android.has(f));
 	if (orphans.length) {
 		failures.push(
-			`android: ${orphans.length} feature package(s) no VelaNavHost destination ` +
-				`reaches: ${orphans.join(', ')}\n` +
-				`         Fix: add a VelaDestinations route and a composable(...) for each.`
+			`android: ${orphans.length} feature package(s) nothing reachable from ` +
+				`VelaNavHost renders: ${orphans.join(', ')}\n` +
+				`         Fix: add a VelaDestinations route and a composable(...), or render ` +
+				`it from a screen that already has one.`
 		);
 	}
 }
 
-// --- iOS: a Features/ folder RootView never instantiates --------------------
+// --- iOS -------------------------------------------------------------------
 {
-	const root = read('app-ios/VelaWallet/VelaWallet/App/RootView.swift');
-	const base = 'app-ios/VelaWallet/VelaWallet/Features';
-	const orphans = dirs(base).filter((feature) => {
-		if (EXEMPT.ios.has(feature)) return false;
-		const screens = readdirSync(join(ROOT, base, feature))
-			.filter((f) => f.endsWith('Screen.swift') || f.endsWith('Sheet.swift'))
-			.map((f) => f.replace(/\.swift$/, ''));
-		if (!screens.length) return false;
-		return !screens.some((s) => root.includes(`${s}(`));
-	});
+	const orphans = reachableFamilies({
+		base: 'app-ios/VelaWallet/VelaWallet/Features',
+		navPath: 'app-ios/VelaWallet/VelaWallet/App/RootView.swift',
+		isSource: (f) => f.endsWith('.swift'),
+		declPattern: /^struct ([A-Z][A-Za-z0-9]*): View/gm
+	}).filter((f) => !EXEMPT.ios.has(f));
 	if (orphans.length) {
 		failures.push(
-			`ios: ${orphans.length} Features/ folder(s) RootView.swift never ` +
-				`instantiates: ${orphans.join(', ')}\n` +
-				`     Fix: add a PageOverride.Page case and render the screen from RootView.`
+			`ios: ${orphans.length} Features/ folder(s) nothing reachable from ` +
+				`RootView.swift renders: ${orphans.join(', ')}\n` +
+				`     Fix: add a PageOverride.Page case and render it from RootView, or ` +
+				`render it from a view that RootView already reaches.`
 		);
 	}
 }
