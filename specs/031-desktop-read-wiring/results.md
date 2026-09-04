@@ -825,22 +825,238 @@ displaying it.
 
 ---
 
+# The second half — 031 finishes the screens
+
+Phase 11 called 031 closed on its seven success criteria. The founder read the
+closeout and said: *if something is missing, add it — we want the functionality
+complete.* This is that.
+
+## A correction to phase 11's closeout, and what it cost
+
+Phase 11's "what 031 did NOT do" table said the receive flow "has a 2026-08-15
+Penpot redesign the desktop has never drawn". **That was wrong.** `src/flows/`
+holds **19 drawn panels** — DR1/DR2/DR3 receive, DT1/DT4 assets, DA1/DA2/DA3
+activity, DT3 add-token, DSD1–4 send. They were never undrawn. They were
+unbound.
+
+I asserted it from a memory note rather than from `ls src/flows/`, and the cost
+was real: it turned nine phases of available work into a deferral. The check
+that would have caught it took eleven seconds.
+
+## Phase 12 — assets, activity and receive read the cores
+
+`flows/live.rs`, the same fixtures/live split `wallet`, `settings` and
+`contacts` already have.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **194 passed** (from 187) |
+| live | ✅ the panel lists `0.75897 xDAI Gnosis $0.76`, and its sum equals the hero's total to the cent |
+
+Two rules carried from the hero, because they are the same rules: privacy masks
+the figure and keeps the unit, and the guided-empty body waits for the core to
+rule — telling somebody their wallet is empty while it is still being counted is
+the assets-panel version of the fake `$0`.
+
+An unpriced holding says **"no price"**, never `$0.00`. `$0.00` reads as
+worthless; the core keeps `unpriced_tokens` for exactly this distinction.
+
+DR1L's rows bind one listener each, so stepping into "Gnosis" shows Gnosis. The
+fixture keeps its single first-row listener — every mock row opens the same
+picture, and twelve identical closures to say so would be noise.
+
+## Phase 13 — the QR was not a QR
+
+`flows::components::qr_card` drew a deterministic decorative pattern. Its own
+comment said **"Never encodes data"** — and the live receive screen drew it too.
+A person pointed a phone at their own wallet and got nothing, or worse, believed
+they had.
+
+`qrcode` 0.14 was **already a dependency** (onboarding's caBLE FIDO:/ code uses
+it). The fix was to use it. No payload keeps the designed pattern, which is why
+the gallery is unchanged: a mock has no address to encode and the drawing is
+what it is meant to show.
+
+**What the code says is `payment_request`'s decision**, not the shell's:
+`qr_value` is the bare recipient in address mode and the EIP-681 URI in request
+mode. Encoding the address here would work today and silently drop an amount the
+moment the request builder lands.
+
+Opening the QR panel boots `receive_watch` — reading the resident IS the start
+event — so US3's "a deposit lands and is noticed without a manual refresh" is
+live. Arrivals render as `ReceiveScreen.tsx`'s `depositBox` draws them, and
+`detected` gates the section rather than a non-empty list: they are the core's
+two separate answers and only the first means announce.
+
+## Phase 14 — incoming payments reach the feed
+
+`ScanIncomingTransfers` was answering zero. It now runs the whole
+`syncReceivedTransfers` pipeline.
+
+`token_trust` became a **session on a thread** — `pool.rs`'s shape, not
+`resident.rs`'s — because its callers are background workers. One session
+matters for a specific reason: the trusted-contract allowlist is assembled from
+three inputs that arrive separately (held chains, held tokens, the registry's
+stablecoins). A second session starts with none of them and degrades to "customs
+plus the native sentinels" — safe, and blind to a plain USDC payment.
+
+The balance fetch feeds those three, because **that fetch IS the observation**.
+
+A wave of pending operations runs in parallel: six chains' block numbers have
+nothing to say to each other, and serially a poll is a minute of waiting for a
+screen whose job is to notice money arriving. Measured: one chain in 1.3s.
+
+```
+4 incoming in the scan window
+  49750000 USDC from 0xb45373129b4220160b92bd2320869f44d48ecd01
+   4975000 USDC from 0xb45373129b4220160b92bd2320869f44d48ecd01
+   5812428 USDC from 0x082738d007001080a00099a000004f3006152085
+   5812428 USDC from 0xe3fff29d4dc930ebb787fecd49ee5963dadf60b6
+```
+
+That test points at a busy Curve pool on Gnosis, not at us. It **cannot** assert
+a non-empty result — whether anything landed in the last hundred blocks is a
+stranger's business — so it asserts what must hold about whatever it finds, and
+prints the count as the evidence a person reads.
+
+Two ingest rules: a non-native token whose metadata would not resolve is
+**skipped**, not stored at a guessed 18 decimals (which on a 6-decimal token
+stores a misleading "+0 tokens"); and **no `usd` is written at all**, because the
+core re-derives it on read including the stablecoin fallback. Writing `"$0.00"`
+would store a claim over a rule.
+
+## Phase 15 — the rule goes where rules go
+
+Phase 8 left custom ERC-20s unpriced because `firstGroupedQuotePrice` had no
+`vela-core` home and both ways out broke a requirement. With 026 merged and the
+functionality asked for, the rule went into `balance_dashboard.rs`.
+
+`first_grouped_quote_price` is deliberately **not** `best_native_dex_price`. The
+native path takes the maximum because every group prices the same coin and the
+deepest pool is least distorted. A custom token's groups are tried in a stated
+order — preferred stablecoin first — so the first pool that answers is the one
+the caller asked for, and a maximum would silently promote whichever stable
+quoted highest.
+
+Each group is scaled by **its own** quote token's decimals. That is the whole
+point: on a chain holding both a 6-decimal (USDC) and an 18-decimal (DAI) entry,
+a token with no USDC pool but a live DAI pool was priced 10^12 times too high.
+
+Live: **GNO added by hand on Gnosis prices at $118.67** through a real SushiSwap
+V3 quote.
+
+`rust/pkg-web` was regenerated, because a `vela-core` source change changes it
+and CI rebuilds and compares. Same wasm size (3,630,664 bytes), new content hash.
+Re-verified: **46,408 conformance cases** green through the shipped artifact, 25
+onboarding wire types current, `vela-core`'s own tests green.
+
+## Phase 16 — a transaction opens its own detail
+
+Row listeners bind per row, each carrying its record's id. `history_ids` walks
+the feed exactly as `panels::history` draws it — two walks that could disagree
+would open the **wrong transaction**, which on a money screen is worse than
+opening nothing.
+
+A pending or failed transfer does not wear the confirmed chip
+(`componentsTx.detail.statusPending/statusFailed` — the same keys the RN
+`TxStatusBadge` reads, so three clients say one word about one state). A
+`usd_value` of 0 means unknown, not free, so the fiat line is empty.
+
+## Phase 17 — the home stops showing a stranger's assets
+
+The wallet home drew its asset strip from `fixtures::assets_default` and its
+network list from `fixtures::chains` — **for a signed-in person too**. The hero
+said `$0.76` and the six rows beneath it said BNB 0.8533, ETH 0.2253, USDT
+53.4836. Under somebody's real name and address.
+
+That is the exact screen spec 031's *Why* names, and it survived twelve phases
+because the hero was the part everyone looked at, including me. The lesson is
+narrow and worth keeping: **a screen is not wired until every list on it is**.
+
+`chain_rows` lists only chains with something on them — twelve networks where
+eleven say "0" is a list nobody reads — and the "all" row's count is the number
+of chains listed, so the two halves cannot disagree.
+
+## Phase 18 — the asset panel is about the asset you opened
+
+Clicking a holding opened D3 hard-coded to BNB whichever row was clicked.
+`asset_detail` is now an index into the core's sorted holdings, set by the row
+that was clicked.
+
+Neither this panel nor the transaction detail falls back to the mock when its
+subject disappears. A refresh re-ordering the holdings under an open panel would
+otherwise silently swap which asset somebody is looking at — **and the next thing
+they do on that panel is send it**.
+
+## Phase 19 — a token can actually be added
+
+DT3L had a read-only well showing a hard-coded USDT contract above a card for a
+token nobody had looked up.
+
+`ui::text_field` already existed, so the work was threading `&Window` into the
+panel render and putting the value where it belongs: `MtokView::input_address`
+is the **only** copy, because the core validates the address and clears the found
+cards on every keystroke.
+
+The desktop drawing has no search button — the found card simply appears — so
+the search fires as soon as the core says the address is one. WHEN to ask is the
+shell's; whether the ask may **run** is still the core's.
+
+The card says which of three things is true, never nothing: not searched,
+searching, or searched and there is nothing there.
+
+## Where the desktop stands
+
+| Surface | State |
+|---|---|
+| balance hero, asset strip, network list | ✅ live |
+| activity preview + full panel + tx detail | ✅ live |
+| asset detail (D3) | ✅ live |
+| receive: network list, QR, deposit watch | ✅ live |
+| add token (DT3) | ✅ live |
+| settings: networks, localization, currency | ✅ live (030/031) |
+| contacts: roster, delete, identity | ✅ live (030/031) |
+| **send (DSD1–4)** | ⛔ spec 032 |
+| **scanner (DS1)** | ⛔ no camera pipeline on desktop at all |
+| contacts add/edit/groups/favourite | ⛔ blocked on drawings (030's boundary) |
+
+Everything a signed-in person can reach on the read path now reads their own
+wallet. The remaining mocks are reachable only from the gallery, or lead into
+032's money path.
+
+## Final gates
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **205 passed · 0 failed · 26 ignored** (031 opened at **125**) |
+| `cargo fmt --all --check` | ✅ clean |
+| `scripts/sweep-gallery.sh` | ✅ 36 states, unchanged |
+| `scripts/check-windows.sh` | ✅ |
+| warnings (forced rebuild) | ✅ 1, pre-existing |
+| `build-web.mjs --check` | ✅ current |
+| `verify-web.mjs` | ✅ 46,408 conformance cases |
+| `gen-onboarding-types.mjs --check` | ✅ 25 types current |
+| `git diff 6324ba39..HEAD -- '*fixtures.rs'` | additive only — **no line removed** |
+
+---
+
 # 交接:下一个会话从这里开始
 
 工作区 `/Volumes/data/production/vela-wallet-native`,分支 `031-desktop-read-wiring`
 (叠在 `030-desktop-live-shell` 上,后者叠在 `029-native-repair` 上,均未合并)。
 
-**031 的读路径已完工**:七台机器全部接线,五条 fail-closed 臂全部放开,七条 SC 全部
-达标(判定表见 Phase 11)。剩下的是**屏幕**和**花钱**,不是读。
+**031 全部完工**:七台机器全接、七条 SC 全达标、**读路径上签了名的人能点到的每一个
+界面都读自己的钱包**。剩下的是花钱(032)和相机(扫码)。
 
 ## 先读这三样
 
-1. **本文件**(031 账本)——尤其是 Phase 8 的两个休眠缺陷和 Phase 11 的判定表与
-   「没做什么」表。
-2. `app-desktop/vela-wallet/src/executor/balances.rs` 的模块注释 —— 为什么每条链
-   发两个请求,以及为什么自定义代币不定价。
-3. `src/executor/pool.rs` 与 `src/resident.rs` 的模块注释 —— 一个是进程级线程,
-   一个是 gpui entity,两种宿主模型的分界。
+1. **本文件** —— 尤其是「第二半」开头那条**更正**(我凭记忆断言"桌面没画过收款
+   流",实际上 `src/flows/` 有 19 块画好的板;这个错误让九个 phase 的活变成了一条
+   "推迟"。`ls src/flows/` 只要十一秒)。
+2. `app-desktop/vela-wallet/src/flows/live.rs` 与 `src/wallet/live.rs` 的模块注释
+   —— fixtures/live 分工,以及"还在数的时候画什么"。
+3. `src/executor/{pool,token_trust}.rs` 的模块注释 —— 两台机器为什么是**独立线程**
+   而不是 gpui resident,以及"一个会话"为什么是要紧事而不是洁癖。
 
 ## 立刻可跑的闸门
 
@@ -852,61 +1068,52 @@ env -u all_proxy -u http_proxy -u https_proxy \
   cargo test executor::pool -- --ignored --test-threads=1
 ```
 
-基线:**187 passed · 0 failed · 22 ignored**,fmt clean,36 个画廊状态,1 个既有
-warning(`BLE_CHANNEL_SUPPORTED`)。
+基线:**205 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
+warning。
+
+改了 `rust/` 之后还要跑(都在仓库根):
+```bash
+node rust/scripts/build-web.mjs --check      # pkg-web 是入库产物,CI 会重建比对
+node rust/scripts/verify-web.mjs             # 46,408 条一致性用例
+node rust/scripts/gen-onboarding-types.mjs --check
+```
 
 有真网测试的模块:`pool` `balances` `chain_tokens` `chainlink` `identity`
-`manage_tokens` `token_trust` `display_currency` `contacts` `network_admin`,以及
-`wallet::live`(端到端英雄区)。
+`manage_tokens` `token_trust` `display_currency` `contacts` `network_admin`,
+以及 `wallet::live`(端到端英雄区)、`flows::live`(端到端资产屏)。
 
-## 031 之后的欠账(按该由谁做分组)
+## 031 之后还缺的(全部不是"读")
 
-**属于「屏幕」的一刀**(不是读接线,应另开 spec):
-
-| # | 事 | 备注 |
+| # | 事 | 归属 |
 |---|---|---|
-| 1 | 收款屏 | 现在还是 mock(写死 BNB + fixture 网络行)。有 2026-08-15 Penpot 重设计,desktop 从未画过 |
-| 2 | 资产屏 | `BalanceView.tokens` 已是 USD 排序的持仓,没有屏幕消费它 |
-| 3 | `token_trust` 轮询派发 | `HeldChainsSnapshot`/`HeldTokensSnapshot`/`PollRequested` 需要一个派发点。**绝不能放在 render 里**(gpui 在绘制时自动追踪 entity 读取,见 Phase 10) |
+| 1 | 发送(DSD1–4) | **032**,花钱那一刀 |
+| 2 | 扫码(DS1) | 桌面**根本没有相机管线**;不是接线,是一个新功能 |
+| 3 | 联系人 增/改/分组/收藏 | 卡在没画的图(030 的边界,未移动) |
+| 4 | `ScanIncomingTransfers` 的**发送**记录 | 032 写同一个 store |
+| 5 | 余额**流式**到达(`ChainAssetsArrived`) | 需要 worker→resident 的事件推送 |
+| 6 | Windows 的日界线 | `GetTimeZoneInformation` 没接,按 UTC 分组 |
 
-**属于 032(花钱)的**:`ScanIncomingTransfers` 落库、`ClearBundlerCache`、
-`contacts::LoadSendHistory` —— 三处都还挂着 `// live in 032`。
+## 四条容易踩的坑(我踩过)
 
-**属于核心的**:`first_grouped_quote_price` 进 `balance_dashboard.rs`,然后自定义
-ERC-20 才能定价(shell 侧只差八行)。
-
-## 三条容易踩的坑(我踩过)
-
-1. **`str.replace` 静默不匹配** —— `cargo fmt` 会把目标重排。改文件后必须**重新读回
-   并断言新文本在盘上**,只在写之前断言是不够的。
-2. **真网测试不能同进程一起跑** —— pool 是进程级单例线程,`with_temp_state` 会在它
-   脚下换掉进程级的 `VELA_STATE_DIR`。两者各自都对,但不能共处一个进程。
-3. **别把链上数字钉进断言** —— 金标 Safe 余额在会话中间就会变。断行为,不断金额。
-   我这次还犯了第四种:**别手算十六进制**,`0xaaf7d19cc1a0000` 我当成了
-   `7.7e17`,红的是测试不是代码。
-
-## 一条方法论,比上面任何一条都值钱
-
-031 找到的两个真缺陷(余额单位、Tempo 常量)**都不是读代码读出来的**,是
-**把下一个开关打开、然后读输出**读出来的 —— 会打印它读到了什么的真网测试,而不是
-断言我以为是什么的测试。两个缺陷都是休眠的:在价格还是 `None` 的时候,两者都完全
-不可见。032 要动的是钱,同一类缺陷不会再有第二次机会。
+1. **`str.replace` 静默不匹配** —— `cargo fmt` 会把目标重排。改完必须**读回并断言**。
+2. **真网测试不能同进程一起跑** —— pool 是进程级单例线程,`with_temp_state` 会换掉
+   进程级的 `VELA_STATE_DIR`。
+3. **别把链上数字钉进断言**,也**别手算十六进制** —— 两样我都栽过。
+4. **别凭记忆断言仓库里有什么**。见本文件的更正。
 
 ## 032 开工前必须先做的一件事
 
 **固定密钥集签名者要用 Rust 写进 vela-core(`dev-fixtures` feature),而且要在 032
-的**第一个** phase,不是花钱那一刀里。** 那三把是裸 P-256 私钥,而 desktop/Android/iOS
-每条签名路径都通向**导不进密钥的真实认证器**,所以金标密钥集目前在三端一条路都走不
-通。这是三刀花钱 spec 共同的前置条件;放到 032 中段才发现,验收标准就无法满足。
-vela-core 已有全部零件(`webauthn.rs` / `registry_proof.rs` / p256),约 150 行。
+的**第一个** phase。** 那三把是裸 P-256 私钥,而 desktop/Android/iOS 每条签名路径都
+通向**导不进密钥的真实认证器**,所以金标密钥集目前在三端一条路都走不通。这是三刀花
+钱 spec 共同的前置条件。vela-core 已有全部零件,约 150 行。
 
 ## 033 开工前必须先测的一件事
 
 给 `vela-core-uniffi` 加 17 台机器的 `bridge_object!` 之前,**先测体积**。spec 019
-记录的闸门是 arm64-v8a **+785,864 剥离字节**;我的估算是再加 **+3~5 MB**,必须在
-033 的 plan 签字前用半小时的探针量出来(三刀分别量:3 / +A / +B / +C),而不是事后。
+记录的闸门是 arm64-v8a **+785,864 剥离字节**;估算再加 **+3~5 MB**,必须在 plan 签字
+前用探针量出来(三刀分别量),而不是事后。
 
 **033 还要带走一样东西**:`app-desktop/vela-wallet/src/executor/abi.rs` 是 ABI 编解码
-的桌面私有副本。它没有放进 `vela-core`,理由写在文件头(`rust/pkg-web` 是入库产物,
-CI 会重建比对;而 Android/iOS 要用就必须走 uniffi 导出,那正是 033 要先量的体积)。
-033 量完体积后,**升格它**,别让 Kotlin 和 Swift 各写一份。
+的桌面私有副本,理由写在文件头。033 量完体积后**升格它**,别让 Kotlin 和 Swift 各写
+一份。
