@@ -3083,6 +3083,118 @@ impl WalletPage {
     }
 
     /// DST1 — the accounts, the way out, and the one irreversible button.
+    /// DST1, live: every account this person has, with the active one marked.
+    ///
+    /// Clicking another row switches to it. `SwitchAccount` has existed since
+    /// 019 with nothing to trigger it — "an event with no control is dead
+    /// code", as `session.rs` put it about this very event — and the control
+    /// was drawn all along.
+    fn settings_account_live(
+        &mut self,
+        theme: &Theme,
+        session: &vela_core::app::session::SessionView,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let s = &self.settings;
+        // The COUNT is real; the total beside it is not stated at all, because
+        // the switcher's cached per-account totals are a `balance_dashboard`
+        // read this panel does not do. A figure that covers one account and is
+        // labelled "total" would be worse than no figure.
+        let summary = gpui::SharedString::from(crate::wallet::fill(
+            &s.accounts_count,
+            "count",
+            &session.accounts.len().to_string(),
+        ));
+        let sign_out = s.sign_out_button.clone();
+        let sign_out_desc = s.sign_out_desc.clone();
+        let erase_title = s.erase_title.clone();
+        let erase_subtitle = s.erase_subtitle.clone();
+        let erase_confirm = s.erase_confirm.clone();
+
+        let mut list = div().flex().flex_col();
+        for row in &session.accounts {
+            let active = row.index == session.active_index;
+            // The core's own index, not the loop's: it survives a display
+            // reorder, which is exactly what invariant ⑦ is about.
+            let index = row.index;
+            let address = row.account.address.clone();
+            let display = crate::wallet::live::shorten_address(&address);
+            let mut card = div()
+                .id(ElementId::from(("settings-account", index)))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .py(px(12.))
+                .child(identicon_avatar(&mut self.identicons, &address, 40.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(theme::text_row_title())
+                                .text_color(theme.fg_base)
+                                .child(gpui::SharedString::from(row.account.name.clone())),
+                        )
+                        .child(
+                            div()
+                                .font_family(theme::font_mono())
+                                .text_size(theme::text_row_sub())
+                                .text_color(theme.fg_subtle)
+                                .child(gpui::SharedString::from(display)),
+                        ),
+                );
+            if active {
+                card = card.child(icon_img(
+                    &mut self.icons,
+                    Icon::Check,
+                    false,
+                    theme.accent,
+                    18.,
+                ));
+            } else {
+                // Only the OTHER rows are a switch. Clicking the one you are
+                // already on should do nothing, not re-run a switch.
+                card = card
+                    .cursor_pointer()
+                    .hover(|el| el.bg(theme.bg_sunken))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        session::switch_account(index, cx);
+                        cx.notify();
+                    }));
+            }
+            list = list.child(card).child(div().h(px(1.)).bg(theme.divider));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .pb(px(12.))
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_subtle)
+                    .child(summary),
+            )
+            .child(list)
+            // The create / sign-in buttons need a route back INTO onboarding
+            // from a signed-in window, which is a navigation decision this cut
+            // does not make. Drawing them dead would be worse than not drawing
+            // them: a button that highlights and does nothing is a promise
+            // broken every time it is pressed.
+            .child(self.settings_account_footer(
+                theme,
+                sign_out,
+                sign_out_desc,
+                erase_title,
+                erase_subtitle,
+                erase_confirm,
+                cx,
+            ))
+    }
+
     fn settings_account(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let s = &self.settings;
         let summary = settings_fixtures::accounts_summary(s);
@@ -3093,6 +3205,15 @@ impl WalletPage {
         let erase_title = s.erase_title.clone();
         let erase_subtitle = s.erase_subtitle.clone();
         let erase_confirm = s.erase_confirm.clone();
+
+        // Live since 031. The comment this replaced said "the core exposes no
+        // account list yet" — `SessionView.accounts` does, and has since 019.
+        // So a person with three wallets saw their own on the first row and two
+        // strangers' under it.
+        let session = session::view(cx);
+        if !session.accounts.is_empty() {
+            return self.settings_account_live(theme, &session, cx);
+        }
 
         let mut list = div().flex().flex_col();
         for (i, account) in settings_fixtures::ACCOUNTS.iter().enumerate() {
@@ -3216,6 +3337,60 @@ impl WalletPage {
             .child(
                 div()
                     .id("settings-sign-out")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .on_click(cx.listener(|_, _, _, cx| session::sign_out(cx)))
+                    .child(icon_img(
+                        &mut self.icons,
+                        Icon::LogOut,
+                        false,
+                        theme.fg_base,
+                        18.,
+                    ))
+                    .child(
+                        div()
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .child(sign_out),
+                    ),
+            )
+            .child(
+                div()
+                    .pt(px(8.))
+                    .pb(px(24.))
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_subtle)
+                    .child(sign_out_desc),
+            )
+            .child(danger_card(
+                theme,
+                erase_title,
+                erase_subtitle,
+                erase_confirm,
+            ))
+    }
+
+    /// Sign out and erase, shared by the live and mock account panels.
+    #[allow(clippy::too_many_arguments, reason = "one footer, two call sites")]
+    fn settings_account_footer(
+        &mut self,
+        theme: &Theme,
+        sign_out: gpui::SharedString,
+        sign_out_desc: gpui::SharedString,
+        erase_title: gpui::SharedString,
+        erase_subtitle: gpui::SharedString,
+        erase_confirm: gpui::SharedString,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .flex_col()
+            .child(div().h(px(1.)).bg(theme.divider).my(px(32.)))
+            .child(
+                div()
+                    .id("settings-sign-out-live")
                     .flex()
                     .items_center()
                     .gap(px(8.))
