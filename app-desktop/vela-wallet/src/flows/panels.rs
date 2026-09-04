@@ -37,7 +37,14 @@ pub type Click = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 #[derive(Default)]
 pub struct PanelActions {
     /// DR1L: a row's QR icon opens that network's code.
+    ///
+    /// The fixture panel binds ONE listener here and gives it to the first row,
+    /// because every mock row opens the same address anyway. A live panel binds
+    /// `open_qr_rows` instead — the rows are real networks and each one opens
+    /// its own code, so which row was clicked is now information.
     pub open_qr: Option<Click>,
+    /// DR1L, live: one listener per network row. Empty falls back to `open_qr`.
+    pub open_qr_rows: Vec<Click>,
     /// DA1L: a row opens its transaction.
     pub open_tx: Option<Click>,
     /// DSD1L: a row opens the send form for that token.
@@ -97,7 +104,9 @@ pub fn render(
     actions: PanelActions,
 ) -> Div {
     match body {
-        FlowBody::Receive(model) => receive(model, theme, icons, actions.open_qr),
+        FlowBody::Receive(model) => {
+            receive(model, theme, icons, actions.open_qr, actions.open_qr_rows)
+        }
         FlowBody::ReceiveQr(model) => receive_qr(model, theme, icons, identicons),
         FlowBody::History(groups) => history(groups, theme, icons, actions.open_tx),
         FlowBody::TxDetail(model) => tx_detail(model, theme, icons, identicons),
@@ -125,6 +134,7 @@ fn receive(
     theme: &Theme,
     icons: &mut IconCache,
     mut open_qr: Option<Click>,
+    per_row: Vec<Click>,
 ) -> Div {
     let mut col = column()
         .child(
@@ -134,13 +144,16 @@ fn receive(
                 .child(model.subtitle.clone()),
         )
         .child(flow_search(theme, icons, model.search_placeholder.clone()));
+    // A live panel binds one listener per row; the fixture binds one and gives
+    // it to the first, because every mock row opens the same address anyway.
+    let mut per_row = per_row.into_iter();
     for (i, row) in model.rows.iter().enumerate() {
         if i > 0 {
             col = col.child(divider(theme));
         }
-        // Only the first row carries the listener: the page has one bound
-        // action per render, and every row opens the same address anyway.
-        let action = if i == 0 { open_qr.take() } else { None };
+        let action = per_row
+            .next()
+            .or_else(|| if i == 0 { open_qr.take() } else { None });
         col = col.child(clickable(
             ElementId::from(("network", i)),
             action,

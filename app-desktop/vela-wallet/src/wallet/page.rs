@@ -69,7 +69,8 @@ use super::components::{
 };
 use super::fixtures::{self, ADDRESS_FULL, IDENTICON_BOARD_SEEDS, WALLET_NAME};
 use crate::flows::{
-    FlowEntry, FlowPanel, FlowStep, FlowStrings, fixtures as flow_fixtures, panels,
+    FlowEntry, FlowPanel, FlowStep, FlowStrings, fixtures as flow_fixtures, live as flows_live,
+    panels,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -286,6 +287,14 @@ pub struct WalletPage {
     /// lead somewhere.
     flows: Vec<FlowPanel>,
     flow_strings: FlowStrings,
+    /// DR2L, live: WHICH network's QR the receive flow stepped into.
+    ///
+    /// The mock never needed this — every fixture row opened the same picture.
+    /// A live receive names a real chain in its title and draws that chain's
+    /// mark in the middle of the code, so a person who stepped into "Gnosis"
+    /// must not be shown "Ethereum". Defaults to Gnosis, the chain this wallet
+    /// is cheapest to be paid on.
+    receive_chain: u32,
     /// `None` = 全部联系人; `Some(i)` = the group view for `GROUPS[i]` (DC4).
     group: Option<usize>,
     /// Which contact the third column shows (index into the canon roster).
@@ -451,6 +460,7 @@ impl WalletPage {
                 .map(FlowPanel::stack)
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
+            receive_chain: 100,
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -1606,6 +1616,72 @@ impl WalletPage {
         self.panel = PanelId::Flow;
     }
 
+    /// The panel's body: the cores' for a real session, the mocks' otherwise.
+    ///
+    /// Not every panel has a live source yet — Send is 032's, and the scanner
+    /// has no data at all. Those fall through to the fixture, which is the
+    /// design and is honest about being one. What must NOT happen is a live
+    /// panel silently borrowing a mock's numbers, so each live arm is written
+    /// out rather than defaulted.
+    fn flow_body(&mut self, panel: FlowPanel, cx: &mut Context<Self>) -> flow_fixtures::FlowBody {
+        let Some(identity) = self.identity.clone() else {
+            return flow_fixtures::body(panel, &self.flow_strings);
+        };
+        match panel {
+            FlowPanel::Dt1 | FlowPanel::Dt4 => {
+                let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+                flow_fixtures::FlowBody::Assets(flows_live::assets(
+                    &view,
+                    &self.flow_strings,
+                    &self.strings,
+                    &self.locale,
+                ))
+            }
+            FlowPanel::Da1 => {
+                // Privacy comes from the BALANCE view, not the feed's own flag:
+                // every money surface masks together.
+                let hidden = resident::resident::<BalanceDashboard>(cx)
+                    .read(cx)
+                    .view()
+                    .hidden;
+                let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+                flow_fixtures::FlowBody::History(flows_live::history(
+                    &feed,
+                    &self.flow_strings,
+                    &self.strings,
+                    hidden,
+                ))
+            }
+            FlowPanel::Dr1 => flow_fixtures::FlowBody::Receive(flows_live::receive_list(
+                &identity.address,
+                &self.flow_strings,
+            )),
+            FlowPanel::Dr2 => flow_fixtures::FlowBody::ReceiveQr(flows_live::receive_qr(
+                &identity.address,
+                &identity.name,
+                self.receive_chain,
+                &self.flow_strings,
+            )),
+            // Send (DSD*), the scanner, the asset QR and add-token still draw
+            // the mock. Each is named so the next person sees a list rather
+            // than a wildcard.
+            FlowPanel::Dr3
+            | FlowPanel::Ds1
+            | FlowPanel::Da2
+            | FlowPanel::Da3
+            | FlowPanel::Dt3
+            | FlowPanel::Dt3b
+            | FlowPanel::Dsd1
+            | FlowPanel::Dsd2
+            | FlowPanel::Dsd2b
+            | FlowPanel::Dsd2c
+            | FlowPanel::Dsd2e
+            | FlowPanel::Dsd2f
+            | FlowPanel::Dsd3
+            | FlowPanel::Dsd4 => flow_fixtures::body(panel, &self.flow_strings),
+        }
+    }
+
     /// Take one step deeper into the open flow.
     ///
     /// `FlowPanel::step` is the only place that knows where a step leads, so a
@@ -1632,12 +1708,13 @@ impl WalletPage {
     /// Bound from `FlowPanel::step`, so an affordance is live exactly when the
     /// mocks draw somewhere for it to go — the chevron and the destination
     /// cannot drift apart.
-    fn flow_actions(panel: FlowPanel, cx: &mut Context<Self>) -> panels::PanelActions {
+    fn flow_actions(panel: FlowPanel, live: bool, cx: &mut Context<Self>) -> panels::PanelActions {
         let bind = |step: FlowStep, cx: &mut Context<Self>| {
             panel.step(step).map(|_| Self::step_action(step, cx))
         };
         let mut actions = panels::PanelActions {
             open_qr: bind(FlowStep::ReceiveQr, cx),
+            open_qr_rows: Vec::new(),
             open_tx: bind(FlowStep::TxDetail, cx),
             open_send_form: bind(FlowStep::SendForm, cx),
             open_fee_token: bind(FlowStep::FeeToken, cx),
@@ -1648,6 +1725,23 @@ impl WalletPage {
             open_batch_import: bind(FlowStep::BatchImport, cx),
             advance: bind(FlowStep::SendConfirm, cx).or(bind(FlowStep::SendReceipt, cx)),
         };
+        // DR1L, live: one listener per network row, each remembering WHICH
+        // chain it opened. The fixture keeps its single first-row listener,
+        // because every mock row opens the same picture and binding twelve
+        // identical closures to say so would be noise.
+        if live && panel == FlowPanel::Dr1 && panel.step(FlowStep::ReceiveQr).is_some() {
+            actions.open_qr_rows = flows_live::receivable_chains()
+                .into_iter()
+                .map(|(chain_id, _)| -> panels::Click {
+                    Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                        this.receive_chain = chain_id;
+                        this.push_step(FlowStep::ReceiveQr);
+                        cx.notify();
+                    }))
+                })
+                .collect();
+        }
+
         // DSD4's CTA is "close · keep running": the transfer outlives the
         // panel, so the last step out of the flow is out of the column.
         if panel == FlowPanel::Dsd4 {
@@ -4061,9 +4155,9 @@ impl WalletPage {
                 // page root draws it; see `scan_overlay`.
                 None | Some(FlowPanel::Ds1) => columns,
                 Some(panel) => {
-                    let body = flow_fixtures::body(panel, &self.flow_strings);
+                    let body = self.flow_body(panel, cx);
                     let title = flow_fixtures::panel_title(panel, &self.flow_strings);
-                    let actions = Self::flow_actions(panel, cx);
+                    let actions = Self::flow_actions(panel, self.identity.is_some(), cx);
                     let rendered = panels::render(
                         &body,
                         theme,

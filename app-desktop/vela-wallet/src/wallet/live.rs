@@ -483,7 +483,7 @@ pub fn unreachable_chips(view: &BalanceView) -> Vec<(SharedString, u32, SharedSt
 /// Read out of `settings::model::chain_tint` — the same table the network rows
 /// use, which is the same table the mocks use. A second colour map for the same
 /// chains is how one screen's Polygon stops matching another's.
-fn badge(chain_id: u32) -> gpui::Hsla {
+pub(crate) fn badge(chain_id: u32) -> gpui::Hsla {
     gpui::rgb(crate::settings::model::chain_tint(u64::from(chain_id)).unwrap_or(0x8A_8F_98)).into()
 }
 
@@ -512,7 +512,7 @@ pub fn activity_rows(view: &FeedView, s: &WalletStrings, hidden: bool) -> Vec<Ac
 /// beside the rows. Looking it up there keeps the dApp distinction the mocks
 /// draw — a swap is not "sent", and labelling it so loses the one word that
 /// explains where the money went.
-fn kind_of(view: &FeedView, item: &FeedItem, incoming: bool) -> ActivityKind {
+pub(crate) fn kind_of(view: &FeedView, item: &FeedItem, incoming: bool) -> ActivityKind {
     let record_kind = view
         .transactions
         .iter()
@@ -528,7 +528,7 @@ fn kind_of(view: &FeedView, item: &FeedItem, incoming: bool) -> ActivityKind {
     }
 }
 
-fn activity_row(
+pub(crate) fn activity_row(
     view: &FeedView,
     item: &FeedItem,
     s: &WalletStrings,
@@ -578,7 +578,7 @@ fn activity_row(
 
 /// `+120` / `−2`. The minus is U+2212, not a hyphen — the mocks use it and it
 /// is what aligns under a digit.
-fn amount_text(item: &FeedItem, incoming: bool) -> SharedString {
+pub(crate) fn amount_text(item: &FeedItem, incoming: bool) -> SharedString {
     let Some(value) = item.value.as_deref() else {
         // A multi-select batch has mixed tokens and no sum; the core says so by
         // sending no value, and inventing one here would be arithmetic nobody
@@ -599,7 +599,7 @@ fn amount_text(item: &FeedItem, incoming: bool) -> SharedString {
     ))
 }
 
-fn shorten_address(address: &str) -> String {
+pub(crate) fn shorten_address(address: &str) -> String {
     if address.len() <= 14 {
         return address.to_owned();
     }

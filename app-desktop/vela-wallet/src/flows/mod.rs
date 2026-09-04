@@ -13,6 +13,7 @@
 
 pub mod components;
 pub mod fixtures;
+pub mod live;
 pub mod panels;
 
 use gpui::SharedString;
