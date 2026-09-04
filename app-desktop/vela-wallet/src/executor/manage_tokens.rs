@@ -76,7 +76,11 @@ impl From<&MtokCustomToken> for StoredToken {
     }
 }
 
-fn read_tokens() -> Vec<MtokCustomToken> {
+/// The custom-token ledger, as the core's own type.
+///
+/// `pub` because the balance fetch reads the same list: one ledger, one shape,
+/// one place that knows how `vela.customTokens` is spelled on disk.
+pub fn read_tokens() -> Vec<MtokCustomToken> {
     let Ok(Some(Value::Array(items))) = storage::read_value(TOKENS_KEY) else {
         return Vec::new();
     };

@@ -129,6 +129,34 @@ mod tests {
         }
     }
 
+    /// Drive the real machine to a settled view, performing every operation
+    /// it asks for on this thread.
+    ///
+    /// `Answer::After` is resolved immediately rather than slept: the only
+    /// timer this machine sets is the partial-fetch retry, and a test that
+    /// honoured its backoff would spend minutes proving nothing.
+    fn settle(address: &str) -> BalanceView {
+        use crate::resident::{Answer, Machine};
+
+        let mut host = CoreHost::<BalanceDashboard>::new();
+        let mut pending = host.dispatch(BalanceEvent::AccountChanged {
+            address: address.to_owned(),
+        });
+        // A cap, not a timeout: a machine that kept asking would otherwise hang
+        // the suite, and 64 operations is far past what one settle needs.
+        for _ in 0..64 {
+            let Some(next) = pending.pop() else {
+                break;
+            };
+            let result = match BalanceDashboard::perform(&next.operation) {
+                Answer::Now(result) | Answer::After(_, result) => result,
+                Answer::Blocking(work) => work(),
+            };
+            pending.extend(host.resolve(next.id, result));
+        }
+        host.view()
+    }
+
     fn strings() -> WalletStrings {
         WalletStrings::resolve(&crate::loc::Loc::from_env())
     }
@@ -328,6 +356,53 @@ mod tests {
             decimals.as_ref().is_none_or(|d| d.len() <= 2),
             "the split took too much: {decimals:?}"
         );
+    }
+
+    /// SC-001, end to end: the golden Safe's own money reaches the hero.
+    ///
+    /// Not a screenshot. This drives the real `balance_dashboard` machine over
+    /// the real network and renders the real hero model, so what it proves is
+    /// the whole chain — pool routing, the multicall, the price ladder, the
+    /// core's total, and the split into the figure the screen draws.
+    #[test]
+    #[ignore = "reads every chain for a real address"]
+    fn the_hero_shows_the_golden_safes_own_money() {
+        crate::executor::storage::tests::with_temp_state("hero-live", || {
+            crate::executor::chain_tokens::invalidate();
+            crate::executor::chainlink::invalidate();
+            const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            let view = settle(GOLDEN);
+            let model = balance(&view, &strings(), "en-US");
+            println!(
+                "  hero: {}{}  state={:?} notice={:?}",
+                model.integer,
+                model
+                    .decimals
+                    .as_ref()
+                    .map_or_else(String::new, |d| format!(".{d}")),
+                model.state,
+                view.notice
+            );
+
+            // The number is REAL, not the fixture and not a skeleton. The
+            // fixture total is $1,383.28, and it appearing here would mean the
+            // app is showing somebody a stranger's money under their own name.
+            assert_eq!(model.state, BalanceState::Normal, "still counting, or zero");
+            assert!(
+                model.integer.starts_with('$'),
+                "no figure at all: {:?}",
+                model.integer
+            );
+            assert_ne!(model.integer.as_ref(), "$1,383", "that is the fixture");
+            let usd = view
+                .display_total_usd
+                .unwrap_or_else(|| unreachable!("no total"));
+            // A band, not a figure: the Safe's balance moves on-chain, and a
+            // test that goes red when the world changes reports the wrong
+            // thing. What must hold is that the total is a plausible amount of
+            // money rather than base units or a phantom chain's constant.
+            assert!(usd > 0.01 && usd < 1_000.0, "implausible total ${usd}");
+        });
     }
 }
 

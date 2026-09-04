@@ -632,8 +632,15 @@ impl Machine for NetworkAdmin {
             // Live since 031. Editing an endpoint in Settings must drop what
             // the pool measured about the old one — otherwise the new URL
             // inherits the old one's latency, its failures and its ban.
+            //
+            // The read path's two caches go with it. Both are keyed by nothing
+            // but a chain id, so a document fetched from the OLD ethereum-data
+            // host and a price read through the OLD RPC would outlive the edit
+            // that replaced them and look like fresh answers from the new one.
             NetOperation::InvalidatePools { chain_id } => {
                 crate::executor::pool::refresh(*chain_id);
+                crate::executor::chain_tokens::invalidate();
+                crate::executor::chainlink::invalidate();
                 Answer::Now(NetShellResult::Invalidated)
             }
             // Still a no-op: there is no bundler client until 032, so there is

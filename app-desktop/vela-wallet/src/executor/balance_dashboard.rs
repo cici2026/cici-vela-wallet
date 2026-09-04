@@ -79,7 +79,7 @@ impl Machine for BalanceDashboard {
                 // already tells us when it wants one bypassed.
                 let _ = force;
                 Answer::Blocking(Box::new(move || {
-                    let (tokens, failed) = balances::fetch_native(&address);
+                    let (tokens, failed) = balances::fetch_all(&address);
                     BalanceShellResult::FetchSettled {
                         address,
                         pull,
@@ -98,7 +98,7 @@ impl Machine for BalanceDashboard {
             BalanceOperation::FetchAccountAssets { address } => {
                 let address = address.clone();
                 Answer::Blocking(Box::new(move || {
-                    let (tokens, failed) = balances::fetch_native(&address);
+                    let (tokens, failed) = balances::fetch_all(&address);
                     BalanceShellResult::AccountAssetsFetched {
                         address,
                         // Best effort: a row that could not be read keeps its

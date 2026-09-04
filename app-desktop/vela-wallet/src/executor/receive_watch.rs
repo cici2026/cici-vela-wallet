@@ -34,7 +34,7 @@ impl Machine for ReceiveWatch {
                 if address.is_empty() {
                     return ReceiveWatchShellResult::Inactive;
                 }
-                let (tokens, failed) = balances::fetch_native(&address);
+                let (tokens, failed) = balances::fetch_all(&address);
                 if tokens.is_empty() && !failed.is_empty() {
                     return ReceiveWatchShellResult::FetchFailed {
                         now_ms: crate::executor::now_ms(),

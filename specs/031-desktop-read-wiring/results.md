@@ -476,6 +476,182 @@ at the conversion, because the next person to read it will reasonably wonder.
 pay link is for somebody else to open, and a scheme most people cannot follow is a
 link that does not work.
 
+## Phase 8 — the tokens, the price, and a chain that lies
+
+`executor/abi.rs`, `executor/chain_tokens.rs`, `executor/chainlink.rs` and a
+rewritten `executor/balances.rs`.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **173 passed · 0 failed · 18 ignored** (031 opened at 125) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ · warnings 1, pre-existing |
+| `check-windows.sh` | ✅ |
+| live, per module | ✅ pool 1 · balances 2 · chain_tokens 1 · chainlink 1 · manage_tokens 1 · display_currency 2 · contacts 1 · network_admin 3 · wallet::live 1 |
+| `*fixtures.rs` deleted lines in 031 | ✅ **0** · no file under `rust/` changed |
+
+### SC-001, end to end
+
+```
+hero: $0.76  state=Normal notice=None
+```
+
+That is the golden Safe's real xDAI, priced, rendered by the real hero model
+after the real machine settled over the real network. It is a test, not a
+screenshot — `wallet::live::the_hero_shows_the_golden_safes_own_money` drives
+`CoreHost<BalanceDashboard>`, performs every operation it asks for, and asserts
+the figure is neither the `$1,383.28` fixture nor a skeleton.
+
+### The bug that was invisible until money was
+
+`BalanceToken.balance` is the **human decimal amount**, not base units. Phase 2
+wrote raw wei into it under a comment claiming the opposite ("the core takes the
+raw integer as a string and owns every decimal decision"). The core does not:
+`token_usd_value` is `token_balance_double(&balance) * price_usd`, and
+`token_balance_double` is `parseFloat` — it parses a fraction and scales nothing.
+
+Nothing showed, because every `price_usd` was `None` and anything times zero is
+zero. The moment this phase produced a price, the same code would have reported
+the golden Safe's 0.76 xDAI as **769,970,000,000,000,000 dollars**. The two
+changes that made money visible are the two that made this dangerous, which is
+the general shape worth remembering: a dormant unit bug is not a small bug, it
+is a bug with a fuse.
+
+`abi::format_raw_balance` is now the only path from base units to that field,
+and its test asserts the round trip through the core's own `token_balance_double`.
+
+### Tempo answers the same "balance" for every address on earth
+
+```
+chain 4217 : 4242424242424242424242424242424242424242424242424242424242.42… USD @ $1.0000
+```
+
+Measured, three addresses, one answer:
+
+```
+eth_getBalance 0x88cCA0…6894 → 0x9612084f0316e0ebd5182f398e5195a51b5ca47667d4c9b26c9b26c9b26c9b2
+eth_getBalance 0x0000…0001   → 0x9612084f…  (identical)
+eth_getBalance 0x1111…1111   → 0x9612084f…  (identical)
+```
+
+`rpc.mainnet.tempo.xyz` returns a **constant**, not a balance — 4.24 × 10^75 base
+units — because Tempo has no native coin at all: its gas is a TIP-20 stablecoin
+(`fee_policy::TEMPO_DEFAULT_FEE_TOKEN`). And because its coin is *called* `USD`,
+`chainlink::resolve`'s stable-gas peg prices it at exactly $1.00, so the junk
+arrives **fully valued** rather than unpriced. One chain would have put 4 × 10^57
+dollars into somebody's total.
+
+The fix is a fact, not a threshold: `has_native_coin` reads
+`fee_policy::TEMPO_CHAIN_IDS` — the core's own record of which chains settle in
+a stablecoin — and a chain with no native coin gets no native row. It is still
+**read**, so its reachability verdict is unchanged; it simply has nothing native
+to show. Inventing a "too large to be real" cutoff was the other option and is
+worse: it would be a number this file made up, and it would let the next such
+chain through at 10^30.
+
+### Two calls per chain, because two failures mean different things
+
+The web reads the native coin through Multicall3's own `getEthBalance`, inside
+the batch. This reads it with `eth_getBalance` and uses the batch only for
+ERC-20s and quotes:
+
+- `eth_getBalance` failing means **the chain could not be reached** — the verdict
+  `failed_chain_ids` carries to the home (SC-003).
+- the batch failing means Multicall3 is not deployed here, or a quoter reverted.
+  The chain is fine and the coin is still theirs.
+
+Folded together, a chain without Multicall3 reports as unreachable, which is a
+true-sounding lie about somebody's money. `enc_get_eth_balance` was written, then
+deleted, because a ported function with no caller is a claim that we use it.
+
+### The one rule this cut refused to write
+
+The web prices a **custom** ERC-20 by DEX quote through
+`firstGroupedQuotePrice`. That rule has no `vela-core` home, and FR-009 forbids
+this cut from adding one to a machine file. Writing it in the shell instead
+would put a money rule in the shell, which is FR-001.
+
+Both requirements point the same way: a custom token comes back with its real
+balance and `price_usd: None`, and the core's `Unpriced` notice says so out
+loud. The native coin's rules **are** in the core (`best_native_dex_price`,
+`choose_native_price`), which is exactly why its price is here and this one is
+not. `pick_quote_token` was ported, then deleted, because its only job is
+ordering the attempts of the rule that did not land.
+
+**Owed:** `first_grouped_quote_price` in `balance_dashboard.rs`, then eight lines
+of shell to call it.
+
+### Where each price comes from, and who decided
+
+| Slot | Price | Decided by |
+|---|---|---|
+| native, wrapped | DEX → local Chainlink → mainnet Chainlink | **core** (`choose_native_price`) |
+| stablecoin | $1.00 | **shell**, deliberately — see below |
+| custom ERC-20 | `None` | nobody, and the notice says so |
+
+The $1.00 is not a missing factor defaulting to one. `Stable` is a **membership
+verdict** — the token came from this chain's curated stablecoin list — and ≈$1 is
+the definition of that membership. The web owns it the same way and at length
+(`wallet-api.ts:498-527`), including why a de-peg gate was considered and
+rejected: the only independent measurement available is the same DEX quote whose
+near-empty pools the price ladder already has to defend against, and a wrong
+de-peg verdict silently drops a holding out of somebody's total.
+
+### A dead feed, measured and kept
+
+`0x14e613AC…5d25` is BNB/USD in the ported Chainlink table. `eth_getCode` at that
+address on Ethereum mainnet answers `0x` — **there is no contract there**, so BNB
+never appears in the mainnet price map on either client.
+
+It is kept verbatim (FR-006) with the measurement written beside it, because BNB
+is not left unpriced by it: chain 56's own feed answers (`$725.49`, measured) and
+that is the rung *above* this one. What is lost is the fallback, on the day BSC's
+local feed also fails. Deleting the line would hide that; a comment does not.
+
+### Two decodes that refuse rather than default
+
+- **A `decimals()` that did not answer drops the row.** The web defaults to 18.
+  On a 6-decimal stablecoin that prints a balance a trillion times too small,
+  and it reads as an answer rather than as a gap.
+- **A `balanceOf` that did not answer drops the row.** Reporting it as zero is a
+  holding quietly deleted.
+
+Both are the same rule the native path already had: absent and zero are different
+answers, and only one of them may be drawn as a number.
+
+### u256 is a decimal string
+
+Every quantity word decodes to decimal digits rather than an integer type. A
+token with 18 decimals and a large supply passes `u128::MAX`, and the two ways an
+integer type copes — saturating or refusing — are both a wrong balance. The core
+takes these as strings anyway (`NativeQuoteGroup::amounts_out`), so the string is
+the honest shape. A test pins 2^255 decoding exactly.
+
+### Why the encoders are not in `vela-core`
+
+031's spec points at `vela-core`, where `alloy-dyn-abi` already lives. They are
+in the desktop shell instead, for two measured reasons:
+
+1. `rust/pkg-web` is a **committed build product** and CI's `build-web.mjs
+   --check` rebuilds and compares it. A module in `vela-core` means regenerating
+   a cross-client artifact mid-031 for code only the desktop calls.
+2. Android and iOS cannot use a `vela-core` module unless it is exported through
+   uniffi — a bindings and binary-size change that 033 is already required to
+   probe **before** it signs its plan.
+
+So it lives where its only caller lives, and promoting it is 033's move, made
+with 033's size measurement in hand. The header says so, so the next person does
+not read it as an oversight.
+
+### One test of mine was wrong, and the code was right
+
+`a_hex_quantity_decodes_without_being_a_full_word` failed on
+`0xaaf7d19cc1a0000 → 769971611055554560` where I had written
+`770000000000000000`. I had typed the hex by hand from the decimal. The decoder
+was correct; the expectation was a guess. It is the same shape as phase 2's red
+— a test that asserts what I assumed rather than what is true — and the cheap
+defence is to derive the expectation with a tool rather than by eye.
+
+
 ---
 
 # 交接:下一个会话从这里开始
