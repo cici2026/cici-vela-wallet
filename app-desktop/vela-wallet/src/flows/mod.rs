@@ -251,6 +251,12 @@ pub struct FlowStrings {
     pub label_decimals: SharedString,
     pub token_address_label: SharedString,
     pub add_to_wallet: SharedString,
+    /// DT3L live states. "Not found" and "not searched yet" are different
+    /// answers, and a card that says neither is a card that says nothing.
+    pub not_found_title: SharedString,
+    pub not_found_message: SharedString,
+    pub searching_networks: SharedString,
+    pub search_token_btn: SharedString,
     pub net_search_label: SharedString,
     pub net_search_placeholder: SharedString,
     pub net_picker_search: SharedString,
@@ -396,6 +402,10 @@ impl FlowStrings {
             label_decimals: s("addToken.labelDecimals"),
             token_address_label: s("addToken.tokenAddressLabel"),
             add_to_wallet: s("addToken.addToWalletBtn"),
+            not_found_title: s("addToken.notFoundTitle"),
+            not_found_message: s("addToken.notFoundMessage"),
+            searching_networks: s("addToken.searchingNetworks"),
+            search_token_btn: s("addToken.searchTokenBtn"),
             net_search_label: s("addToken.netSearchLabel"),
             net_search_placeholder: s("addToken.netSearchPlaceholder"),
             net_picker_search: s("addToken.netPickerSearchPlaceholder"),

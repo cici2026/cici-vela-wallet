@@ -19,6 +19,7 @@ use gpui::{Hsla, SharedString};
 
 use vela_core::app::activity_feed::{FeedRow, FeedTxStatus, FeedView};
 use vela_core::app::balance_dashboard::{BalanceToken, BalanceView};
+use vela_core::app::manage_tokens::MtokView;
 use vela_core::app::network_admin::BUILTIN_CHAINS;
 use vela_core::app::payment_request::PaymentRequestView;
 use vela_core::app::receive_watch::ReceiveWatchView;
@@ -391,6 +392,72 @@ fn stamp(timestamp_sec: f64, s: &FlowStrings, locale: &str) -> String {
     let clock = format_time(&civil, TimePreset::H24, locale);
     let day = day_label(crate::executor::day_start_ms(epoch_ms), s);
     format!("{day} {clock}")
+}
+
+/// Adding a token by contract address — DT3L.
+///
+/// The core drives the whole panel: it validates the address, decides when a
+/// search may run, holds what was found and knows which of them are already
+/// added. This turns that into the drawing.
+#[must_use]
+pub fn add_token(view: &MtokView, s: &FlowStrings) -> crate::flows::fixtures::AddToken {
+    let found = view.found.first();
+    crate::flows::fixtures::AddToken {
+        tab_erc20: s.tab_erc20.clone(),
+        tab_native: s.tab_native.clone(),
+        // The native tab adds a NETWORK, which is the settings screen's job on
+        // this client. One tab, honestly labelled, beats a second that leads
+        // somewhere the desktop does not go.
+        native: false,
+        // No network row: the core searches EVERY network at once and reports
+        // the ones where the contract resolved, so there is nothing to pick.
+        network: None,
+        field_label: s.token_address_label.clone(),
+        field_value: SharedString::from(view.input_address.clone()),
+        result: match found {
+            Some(found) => crate::flows::fixtures::AddTokenResult::Token {
+                mark: TokenMark {
+                    ticker: SharedString::from(found.symbol.clone()),
+                    badge: tint(found.chain_id),
+                },
+                name: SharedString::from(found.name.clone()),
+                // The mock's own order and separators: symbol, scale, network.
+                // The SCALE is on the card because adding a token at the wrong
+                // one renders every amount at the wrong magnitude, and this is
+                // the last screen where somebody can notice.
+                detail: SharedString::from(format!(
+                    "{} · {} {} · {}",
+                    found.symbol, s.label_decimals, found.decimals, found.network_name
+                )),
+            },
+            // Nothing found yet — or nothing to find. The card states which,
+            // because "not found" and "not searched" are different answers and
+            // an empty card says neither.
+            None => crate::flows::fixtures::AddTokenResult::Token {
+                mark: TokenMark {
+                    ticker: SharedString::from(""),
+                    badge: gpui::rgb(0x8A_8F_98).into(),
+                },
+                name: if view.not_found {
+                    s.not_found_title.clone()
+                } else if view.detecting {
+                    s.searching_networks.clone()
+                } else {
+                    s.search_token_btn.clone()
+                },
+                detail: if view.not_found {
+                    s.not_found_message.clone()
+                } else {
+                    SharedString::from("")
+                },
+            },
+        },
+        cta: if view.saving {
+            s.searching_networks.clone()
+        } else {
+            s.add_to_wallet.clone()
+        },
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -771,6 +838,76 @@ mod tests {
             // A network code is not a token code: no contract line here.
             assert_eq!(qr.contract, None);
         });
+    }
+
+    /// The add-token card says which of three things is true, never nothing.
+    #[test]
+    fn the_add_token_card_distinguishes_searching_from_not_found() {
+        use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokFound};
+
+        let mut host = CoreHost::<ManageTokens>::new();
+        let _ = host.dispatch(MtokEvent::Start);
+        let base = host.view();
+        let s = strings();
+
+        // Nothing typed yet: the card invites a search.
+        let idle = add_token(&base, &s);
+        assert_eq!(idle.field_value, "");
+        match &idle.result {
+            crate::flows::fixtures::AddTokenResult::Token { name, .. } => {
+                assert_eq!(*name, s.search_token_btn);
+            }
+            crate::flows::fixtures::AddTokenResult::Network { .. } => {
+                unreachable!("the ERC-20 tab does not draw a network card")
+            }
+        }
+
+        // Searching.
+        let mut looking = base.clone();
+        looking.detecting = true;
+        looking.input_address = "0xaaa".to_owned();
+        match &add_token(&looking, &s).result {
+            crate::flows::fixtures::AddTokenResult::Token { name, .. } => {
+                assert_eq!(*name, s.searching_networks);
+            }
+            crate::flows::fixtures::AddTokenResult::Network { .. } => unreachable!(),
+        }
+
+        // Searched, and there is nothing there — which is a different answer
+        // from "not searched", and the card has to say which.
+        let mut missing = base.clone();
+        missing.not_found = true;
+        match &add_token(&missing, &s).result {
+            crate::flows::fixtures::AddTokenResult::Token { name, detail, .. } => {
+                assert_eq!(*name, s.not_found_title);
+                assert_eq!(*detail, s.not_found_message);
+            }
+            crate::flows::fixtures::AddTokenResult::Network { .. } => unreachable!(),
+        }
+
+        // Found: the token, its network and its scale.
+        let mut found = base;
+        found.found = vec![MtokFound {
+            chain_id: 100,
+            network_name: "Gnosis".to_owned(),
+            name: "USD Coin".to_owned(),
+            symbol: "USDC".to_owned(),
+            decimals: 6,
+            added: false,
+        }];
+        let card = add_token(&found, &s);
+        match &card.result {
+            crate::flows::fixtures::AddTokenResult::Token { mark, name, detail } => {
+                assert_eq!(*name, "USD Coin");
+                assert_eq!(mark.ticker, "USDC");
+                assert!(detail.contains("Gnosis"));
+                // The scale is on the card, because adding a token at the wrong
+                // one renders every amount at the wrong magnitude.
+                assert!(detail.contains('6'), "no decimals: {detail}");
+            }
+            crate::flows::fixtures::AddTokenResult::Network { .. } => unreachable!(),
+        }
+        assert_eq!(card.cta, s.add_to_wallet);
     }
 
     /// A transaction's detail, and the row order the listeners are bound in.

@@ -5,8 +5,8 @@
 //! and the close button; these own only what is under them.
 
 use gpui::{
-    App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
+    App, ClickEvent, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
 use crate::icons::{Icon, IconCache};
@@ -66,6 +66,22 @@ pub struct PanelActions {
     pub open_scan: Option<Click>,
     /// The panel's own CTA — continue, confirm, done.
     pub advance: Option<Click>,
+    /// DT3L, live: the contract-address field, editable.
+    ///
+    /// `None` draws the mock's read-only well — a gallery has nothing to look
+    /// a contract up on, and a field that accepts typing and then does nothing
+    /// is worse than one that plainly does not.
+    pub address_field: Option<AddressField>,
+    /// DT3L, live: "add to wallet" on the found card.
+    pub add_to_wallet: Option<Click>,
+}
+
+/// An editable field the page owns the state of.
+pub struct AddressField {
+    pub focus: FocusHandle,
+    pub value: String,
+    pub placeholder: SharedString,
+    pub on_change: Box<dyn Fn(String, &mut Window, &mut App) + 'static>,
 }
 
 /// Wrap an element so it answers to a click, when the page bound one.
@@ -106,6 +122,7 @@ pub fn render(
     theme: &Theme,
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
+    window: &Window,
     actions: PanelActions,
 ) -> Div {
     match body {
@@ -118,7 +135,15 @@ pub fn render(
         }
         FlowBody::TxDetail(model) => tx_detail(model, theme, icons, identicons),
         FlowBody::Assets(model) => assets(model, theme, icons, actions.open_add_token),
-        FlowBody::AddToken(model) => add_token(model, theme, icons, identicons),
+        FlowBody::AddToken(model) => add_token(
+            model,
+            theme,
+            icons,
+            identicons,
+            window,
+            actions.address_field,
+            actions.add_to_wallet,
+        ),
         FlowBody::SendPick(model) => send_pick(model, theme, icons, actions.open_send_form),
         FlowBody::SendForm(model) => send_form(model, theme, icons, identicons, actions),
         FlowBody::ContactPick(model) => {
@@ -490,6 +515,9 @@ fn add_token(
     theme: &Theme,
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
+    window: &Window,
+    address_field: Option<AddressField>,
+    add_to_wallet: Option<Click>,
 ) -> Div {
     let mut col = column().child(segmented_toggle(
         theme,
@@ -525,11 +553,32 @@ fn add_token(
         );
     }
 
-    col = col.child(mono_field(
-        theme,
-        Some(model.field_label.clone()),
-        model.field_value.clone(),
-    ));
+    col = col.child(match address_field {
+        Some(field) => {
+            let strings = crate::ui::NameFieldStrings {
+                label: model.field_label.clone(),
+                placeholder: field.placeholder.clone(),
+                helper: SharedString::from(""),
+                too_long_hint: SharedString::from(""),
+            };
+            crate::ui::text_field(
+                "add-token-address",
+                theme,
+                &strings,
+                &field.value,
+                false,
+                false,
+                &field.focus,
+                window,
+                field.on_change,
+            )
+        }
+        None => mono_field(
+            theme,
+            Some(model.field_label.clone()),
+            model.field_value.clone(),
+        ),
+    });
 
     col = match &model.result {
         AddTokenResult::Token { mark, name, detail } => col.child(
@@ -597,7 +646,11 @@ fn add_token(
         }
     };
 
-    col.child(accent_button(theme, model.cta.clone()))
+    col.child(clickable(
+        ElementId::from("add-token-cta"),
+        add_to_wallet,
+        accent_button(theme, model.cta.clone()),
+    ))
 }
 
 fn send_pick(

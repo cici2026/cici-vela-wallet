@@ -59,6 +59,7 @@ use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::contacts::{Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
+use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
 use vela_core::app::network_admin::NetworkAdmin;
 use vela_core::app::payment_request::PaymentRequest;
 use vela_core::app::receive_watch::ReceiveWatch;
@@ -289,6 +290,12 @@ pub struct WalletPage {
     /// lead somewhere.
     flows: Vec<FlowPanel>,
     flow_strings: FlowStrings,
+    /// DT3L, live: the contract-address field's focus handle.
+    ///
+    /// The value itself lives in the CORE (`MtokView::input_address`) — it
+    /// validates the address and clears the found cards on every keystroke, so
+    /// a second copy here would be a second opinion about what was typed.
+    add_token_focus: gpui::FocusHandle,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
     /// core's sorted `tokens`.
     ///
@@ -478,6 +485,7 @@ impl WalletPage {
             receive_chain: 100,
             tx_detail: None,
             asset_detail: None,
+            add_token_focus: cx.focus_handle(),
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -1780,9 +1788,12 @@ impl WalletPage {
                         flow_fixtures::FlowBody::TxDetail,
                     )
             }
+            FlowPanel::Dt3 => {
+                let view = resident::resident::<ManageTokens>(cx).read(cx).view();
+                flow_fixtures::FlowBody::AddToken(flows_live::add_token(&view, &self.flow_strings))
+            }
             FlowPanel::Dr3
             | FlowPanel::Ds1
-            | FlowPanel::Dt3
             | FlowPanel::Dt3b
             | FlowPanel::Dsd1
             | FlowPanel::Dsd2
@@ -1825,6 +1836,9 @@ impl WalletPage {
         panel: FlowPanel,
         live: bool,
         tx_ids: Vec<String>,
+        focus: &gpui::FocusHandle,
+        address: &str,
+        placeholder: &SharedString,
         cx: &mut Context<Self>,
     ) -> panels::PanelActions {
         let bind = |step: FlowStep, cx: &mut Context<Self>| {
@@ -1843,6 +1857,8 @@ impl WalletPage {
             add_recipient: bind(FlowStep::AddRecipient, cx),
             open_batch_import: bind(FlowStep::BatchImport, cx),
             advance: bind(FlowStep::SendConfirm, cx).or(bind(FlowStep::SendReceipt, cx)),
+            address_field: None,
+            add_to_wallet: None,
         };
         // DR1L, live: one listener per network row, each remembering WHICH
         // chain it opened. The fixture keeps its single first-row listener,
@@ -1877,6 +1893,59 @@ impl WalletPage {
                     }))
                 })
                 .collect();
+        }
+
+        // DT3L, live: a real field, and a CTA that saves what it found.
+        if live && panel == FlowPanel::Dt3 {
+            actions.address_field = Some(panels::AddressField {
+                focus: focus.clone(),
+                value: address.to_owned(),
+                placeholder: placeholder.clone(),
+                on_change: Box::new(
+                    move |text: String, _window: &mut Window, cx: &mut gpui::App| {
+                        // Straight into the core: it owns validation, it clears the
+                        // found cards, and it decides when a search may run. A
+                        // shell-side copy would be a second opinion about what the
+                        // person typed.
+                        let entity = resident::resident::<ManageTokens>(cx);
+                        entity.update(cx, |resident, cx| {
+                            resident.dispatch(MtokEvent::AddressInput { s: text }, cx);
+                        });
+                        // The desktop drawing has no search button — the found
+                        // card simply appears — so the search fires as soon as
+                        // the core says the address is one. WHEN to ask is the
+                        // shell's; whether the ask may RUN is still the core's,
+                        // which ignores a request while one is in flight.
+                        let view = entity.read(cx).view();
+                        if view.address_valid && !view.detecting && view.found.is_empty() {
+                            let networks = flows_live::receivable_chains()
+                                .into_iter()
+                                .map(|(chain_id, _)| MtokNetwork {
+                                    chain_id,
+                                    name: crate::executor::custom_tokens::network_name(chain_id),
+                                })
+                                .collect();
+                            entity.update(cx, |resident, cx| {
+                                resident.dispatch(MtokEvent::DetectRequested { networks }, cx);
+                            });
+                        }
+                    },
+                ),
+            });
+            actions.add_to_wallet = Some(Box::new(
+                move |_: &gpui::ClickEvent, _window: &mut Window, cx: &mut gpui::App| {
+                    let entity = resident::resident::<ManageTokens>(cx);
+                    let found = entity.read(cx).view().found.first().map(|f| f.chain_id);
+                    // Nothing found means nothing to save. The CTA is drawn
+                    // either way because the panel is one drawing; what it must
+                    // not do is save a token nobody looked up.
+                    if let Some(chain_id) = found {
+                        entity.update(cx, |resident, cx| {
+                            resident.dispatch(MtokEvent::SaveRequested { chain_id }, cx);
+                        });
+                    }
+                },
+            ));
         }
 
         // DSD4's CTA is "close · keep running": the transfer outlives the
@@ -4247,7 +4316,13 @@ impl WalletPage {
         column
     }
 
-    fn wallet_columns(&mut self, theme: &Theme, caption: bool, cx: &mut Context<Self>) -> Div {
+    fn wallet_columns(
+        &mut self,
+        theme: &Theme,
+        caption: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut columns = div()
             .flex_1()
             .min_h(px(0.))
@@ -4303,12 +4378,31 @@ impl WalletPage {
                         Vec::new()
                     };
                     let title = flow_fixtures::panel_title(panel, &self.flow_strings);
-                    let actions = Self::flow_actions(panel, self.identity.is_some(), tx_ids, cx);
+                    let address = if self.identity.is_some() && panel == FlowPanel::Dt3 {
+                        resident::resident::<ManageTokens>(cx)
+                            .read(cx)
+                            .view()
+                            .input_address
+                    } else {
+                        String::new()
+                    };
+                    let focus = self.add_token_focus.clone();
+                    let placeholder = self.flow_strings.token_address_label.clone();
+                    let actions = Self::flow_actions(
+                        panel,
+                        self.identity.is_some(),
+                        tx_ids,
+                        &focus,
+                        &address,
+                        &placeholder,
+                        cx,
+                    );
                     let rendered = panels::render(
                         &body,
                         theme,
                         &mut self.icons,
                         &mut self.identicons,
+                        window,
                         actions,
                     );
                     // The chevron appears only once the column is more than one
@@ -4410,7 +4504,9 @@ impl Render for WalletPage {
                 }
                 GalleryTab::Identicons => self.identicons_tab(&theme).into_any_element(),
                 // The bar already cleared the caption row for the page.
-                _ => self.wallet_columns(&theme, false, cx).into_any_element(),
+                _ => self
+                    .wallet_columns(&theme, false, window, cx)
+                    .into_any_element(),
             };
             div()
                 .size_full()
@@ -4423,7 +4519,7 @@ impl Render for WalletPage {
                 .size_full()
                 .flex()
                 .flex_col()
-                .child(self.wallet_columns(&theme, caption, cx))
+                .child(self.wallet_columns(&theme, caption, window, cx))
         };
 
         let scan = self.scan_overlay(&theme, cx);
