@@ -221,6 +221,11 @@ pub struct FlowStrings {
     pub from_name: String,
     pub view_on_explorer: SharedString,
     pub status_confirmed: SharedString,
+    /// A pending or failed transfer must not wear the confirmed chip. Same key
+    /// family the RN `TxStatusBadge` reads, so the three clients say the same
+    /// word about the same state.
+    pub status_pending: SharedString,
+    pub status_failed: SharedString,
     pub detail_from: SharedString,
     pub detail_to: SharedString,
     pub detail_chain: SharedString,
@@ -366,6 +371,8 @@ impl FlowStrings {
             from_name: raw("history.fromName"),
             view_on_explorer: s("history.viewOnExplorer"),
             status_confirmed: s("componentsTx.receipt.statusConfirmed"),
+            status_pending: s("componentsTx.detail.statusPending"),
+            status_failed: s("componentsTx.detail.statusFailed"),
             detail_from: s("componentsTx.detail.from"),
             detail_to: s("componentsTx.detail.to"),
             detail_chain: s("componentsTx.detail.labelChain"),

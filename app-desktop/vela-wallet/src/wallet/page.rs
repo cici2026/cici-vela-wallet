@@ -289,6 +289,12 @@ pub struct WalletPage {
     /// lead somewhere.
     flows: Vec<FlowPanel>,
     flow_strings: FlowStrings,
+    /// DA2L, live: WHICH transaction the history stepped into.
+    ///
+    /// `None` while the mocks draw, and after a record is deleted — the panel
+    /// then closes rather than showing a stale detail over a row that no
+    /// longer exists.
+    tx_detail: Option<String>,
     /// DR2L, live: WHICH network's QR the receive flow stepped into.
     ///
     /// The mock never needed this — every fixture row opened the same picture.
@@ -463,6 +469,7 @@ impl WalletPage {
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
             receive_chain: 100,
+            tx_detail: None,
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -1682,10 +1689,28 @@ impl WalletPage {
             // Send (DSD*), the scanner, the asset QR and add-token still draw
             // the mock. Each is named so the next person sees a list rather
             // than a wildcard.
+            FlowPanel::Da2 | FlowPanel::Da3 => {
+                let hidden = resident::resident::<BalanceDashboard>(cx)
+                    .read(cx)
+                    .view()
+                    .hidden;
+                let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+                self.tx_detail
+                    .as_ref()
+                    .and_then(|id| {
+                        flows_live::tx_detail(&feed, id, &self.flow_strings, hidden, &self.locale)
+                    })
+                    .map_or_else(
+                        // The record is gone. The mock is not a substitute for
+                        // it — that would show somebody a stranger's
+                        // transaction under their own history — so the panel
+                        // draws nothing and the chevron leads back.
+                        || flow_fixtures::FlowBody::History(Vec::new()),
+                        flow_fixtures::FlowBody::TxDetail,
+                    )
+            }
             FlowPanel::Dr3
             | FlowPanel::Ds1
-            | FlowPanel::Da2
-            | FlowPanel::Da3
             | FlowPanel::Dt3
             | FlowPanel::Dt3b
             | FlowPanel::Dsd1
@@ -1725,7 +1750,12 @@ impl WalletPage {
     /// Bound from `FlowPanel::step`, so an affordance is live exactly when the
     /// mocks draw somewhere for it to go — the chevron and the destination
     /// cannot drift apart.
-    fn flow_actions(panel: FlowPanel, live: bool, cx: &mut Context<Self>) -> panels::PanelActions {
+    fn flow_actions(
+        panel: FlowPanel,
+        live: bool,
+        tx_ids: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> panels::PanelActions {
         let bind = |step: FlowStep, cx: &mut Context<Self>| {
             panel.step(step).map(|_| Self::step_action(step, cx))
         };
@@ -1733,6 +1763,7 @@ impl WalletPage {
             open_qr: bind(FlowStep::ReceiveQr, cx),
             open_qr_rows: Vec::new(),
             open_tx: bind(FlowStep::TxDetail, cx),
+            open_tx_rows: Vec::new(),
             open_send_form: bind(FlowStep::SendForm, cx),
             open_fee_token: bind(FlowStep::FeeToken, cx),
             open_contact_pick: bind(FlowStep::ContactPick, cx),
@@ -1753,6 +1784,24 @@ impl WalletPage {
                     Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                         this.receive_chain = chain_id;
                         this.push_step(FlowStep::ReceiveQr);
+                        cx.notify();
+                    }))
+                })
+                .collect();
+        }
+
+        // DA1L, live: one listener per row, each carrying the id of the
+        // transaction it opens. `flows_live::history_ids` walks the feed the
+        // same way `panels::history` draws it, so row N opens record N — two
+        // walks that could disagree would open the wrong transaction, which on
+        // a money screen is worse than opening nothing.
+        if live && panel == FlowPanel::Da1 && panel.step(FlowStep::TxDetail).is_some() {
+            actions.open_tx_rows = tx_ids
+                .into_iter()
+                .map(|id| -> panels::Click {
+                    Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                        this.tx_detail = Some(id.clone());
+                        this.push_step(FlowStep::TxDetail);
                         cx.notify();
                     }))
                 })
@@ -4173,8 +4222,15 @@ impl WalletPage {
                 None | Some(FlowPanel::Ds1) => columns,
                 Some(panel) => {
                     let body = self.flow_body(panel, cx);
+                    let tx_ids = if self.identity.is_some() && panel == FlowPanel::Da1 {
+                        flows_live::history_ids(
+                            &resident::resident::<ActivityFeed>(cx).read(cx).view(),
+                        )
+                    } else {
+                        Vec::new()
+                    };
                     let title = flow_fixtures::panel_title(panel, &self.flow_strings);
-                    let actions = Self::flow_actions(panel, self.identity.is_some(), cx);
+                    let actions = Self::flow_actions(panel, self.identity.is_some(), tx_ids, cx);
                     let rendered = panels::render(
                         &body,
                         theme,

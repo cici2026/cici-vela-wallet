@@ -578,6 +578,18 @@ pub(crate) fn activity_row(
 
 /// `+120` / `−2`. The minus is U+2212, not a hyphen — the mocks use it and it
 /// is what aligns under a digit.
+/// The same signed amount the feed row shows, mask included.
+///
+/// Privacy masks the FIGURE and keeps the unit, on every surface together —
+/// the detail panel is one of them, and reading a second flag is how one ends
+/// up out of step.
+pub(crate) fn amount_text_of(item: &FeedItem, incoming: bool, hidden: bool) -> SharedString {
+    if hidden {
+        return SharedString::from(crate::wallet::fixtures::MASK);
+    }
+    SharedString::from(format!("{} {}", amount_text(item, incoming), item.symbol))
+}
+
 pub(crate) fn amount_text(item: &FeedItem, incoming: bool) -> SharedString {
     let Some(value) = item.value.as_deref() else {
         // A multi-select batch has mixed tokens and no sum; the core says so by

@@ -17,7 +17,7 @@
 
 use gpui::{Hsla, SharedString};
 
-use vela_core::app::activity_feed::{FeedRow, FeedView};
+use vela_core::app::activity_feed::{FeedRow, FeedTxStatus, FeedView};
 use vela_core::app::balance_dashboard::{BalanceToken, BalanceView};
 use vela_core::app::network_admin::BUILTIN_CHAINS;
 use vela_core::app::payment_request::PaymentRequestView;
@@ -28,8 +28,9 @@ use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::flows::FlowStrings;
 use crate::flows::fixtures::{
-    AddressCard, AssetsEmpty, AssetsPanel, DepositEntry as FlowDeposit, HistoryGroup, NetworkRow,
-    ReceiveList, ReceiveQr, TokenMark, address_lines,
+    AddressCard, AssetsEmpty, AssetsPanel, DepositEntry as FlowDeposit, FactLead, FactRow,
+    HistoryGroup, NetworkRow, ReceiveList, ReceiveQr, StatusChip, StatusTone, TokenMark,
+    address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -210,6 +211,38 @@ pub fn history(
     groups
 }
 
+/// The transaction ids the history panel draws, in render order.
+///
+/// The page binds one listener per id and `panels::history` hands them out in
+/// the same walk, so row N's listener opens row N's transaction. Two walks that
+/// could disagree would open the wrong record, which on a money screen is worse
+/// than opening nothing.
+#[must_use]
+pub fn history_ids(view: &FeedView) -> Vec<String> {
+    let mut seen_header = false;
+    let mut ids = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    for row in &view.rows {
+        match row {
+            FeedRow::Header { .. } => {
+                // The previous group's rows are kept only if it had any — the
+                // same retain `history` applies, walked the same way.
+                ids.append(&mut pending);
+                seen_header = true;
+            }
+            FeedRow::Item { item } => {
+                if seen_header {
+                    pending.push(item.id.clone());
+                } else {
+                    ids.push(item.id.clone());
+                }
+            }
+        }
+    }
+    ids.append(&mut pending);
+    ids
+}
+
 /// "Today" / "Yesterday" / the date.
 ///
 /// Compared against the shell's own local day boundary, which is the same
@@ -230,6 +263,134 @@ fn day_label(day_start_ms: f64, s: &FlowStrings) -> SharedString {
         &civil,
         vela_core::l10n::datetime::DatePreset::Iso,
     ))
+}
+
+/// One transaction, in detail — DA2L / DA3L.
+///
+/// `None` when the id names nothing: a row can be deleted while its panel is
+/// open, and drawing a stale detail over a record that no longer exists is
+/// worse than closing the column.
+#[must_use]
+pub fn tx_detail(
+    view: &FeedView,
+    id: &str,
+    s: &FlowStrings,
+    hidden: bool,
+    locale: &str,
+) -> Option<crate::flows::fixtures::TxDetail> {
+    let item = view.rows.iter().find_map(|row| match row {
+        FeedRow::Item { item } if item.id == id => Some(item),
+        _ => None,
+    })?;
+    let incoming = item.direction == vela_core::app::activity_feed::FeedDirection::In;
+    let record = view.transactions.iter().find(|record| record.id == item.id);
+
+    let mut facts = Vec::new();
+    // Who it was with. The identicon is seeded by the ADDRESS even when a name
+    // is known — the avatar is how somebody checks the name is on the address
+    // they meant, so seeding it from the name would defeat its purpose.
+    if let Some(counterparty) = item.counterparty.as_ref() {
+        let named = item.alias.clone();
+        facts.push(FactRow {
+            label: if incoming {
+                s.detail_from.clone()
+            } else {
+                s.detail_to.clone()
+            },
+            value: SharedString::from(
+                named
+                    .clone()
+                    .unwrap_or_else(|| crate::wallet::live::shorten_address(counterparty)),
+            ),
+            lead: FactLead::Identicon(SharedString::from(counterparty.clone())),
+            // A name is prose; an address is a string somebody compares
+            // character by character, and that needs the mono face.
+            mono: named.is_none(),
+            copyable: true,
+        });
+    }
+    facts.push(FactRow {
+        label: s.detail_chain.clone(),
+        value: SharedString::from(chain_name(item.chain_id)),
+        lead: FactLead::Token(TokenMark {
+            ticker: SharedString::from(item.symbol.clone()),
+            badge: tint(item.chain_id),
+        }),
+        mono: false,
+        copyable: false,
+    });
+    facts.push(FactRow {
+        label: s.detail_date.clone(),
+        value: SharedString::from(stamp(item.timestamp, s, locale)),
+        lead: FactLead::None,
+        mono: false,
+        copyable: false,
+    });
+    // Only if there IS one. An empty hash row on an off-chain signature invites
+    // "which transaction?" — the same reason the mock omits the contract row on
+    // a native transfer.
+    if let Some(hash) = item.tx_hash.as_ref().filter(|hash| !hash.is_empty()) {
+        facts.push(FactRow {
+            label: s.detail_hash.clone(),
+            value: SharedString::from(hash.clone()),
+            lead: FactLead::None,
+            mono: true,
+            copyable: true,
+        });
+    }
+
+    let status = record.map_or(FeedTxStatus::Confirmed, |record| record.status);
+    Some(crate::flows::fixtures::TxDetail {
+        title: SharedString::from(crate::wallet::fill(
+            if incoming {
+                &s.tx_label_received
+            } else {
+                &s.tx_label_sent
+            },
+            "symbol",
+            &item.symbol,
+        )),
+        status: StatusChip {
+            text: match status {
+                FeedTxStatus::Confirmed => s.status_confirmed.clone(),
+                // A pending or failed transfer must not wear the confirmed
+                // chip. The words are the feed's, which already has them.
+                FeedTxStatus::Pending => s.status_pending.clone(),
+                FeedTxStatus::Failed => s.status_failed.clone(),
+            },
+            tone: match status {
+                FeedTxStatus::Confirmed => StatusTone::Success,
+                FeedTxStatus::Pending => StatusTone::Info,
+                FeedTxStatus::Failed => StatusTone::Error,
+            },
+        },
+        amount: crate::wallet::live::amount_text_of(item, incoming, hidden),
+        // The core already valued it, stablecoin fallback and all. `0` means
+        // unknown rather than free, so it shows nothing instead of `$0.00`.
+        fiat: if hidden || item.usd_value <= 0.0 {
+            SharedString::from("")
+        } else {
+            SharedString::from(format_fiat(
+                item.usd_value,
+                "USD",
+                "$",
+                locale,
+                FiatOptions::default(),
+            ))
+        },
+        positive: incoming,
+        facts,
+        view_on_explorer: s.view_on_explorer.clone(),
+    })
+}
+
+/// A transaction's wall clock: "Today 11:20", "Yesterday 14:02", or the date.
+fn stamp(timestamp_sec: f64, s: &FlowStrings, locale: &str) -> String {
+    let epoch_ms = timestamp_sec * 1000.0;
+    let civil = crate::executor::local_civil(epoch_ms);
+    let clock = format_time(&civil, TimePreset::H24, locale);
+    let day = day_label(crate::executor::day_start_ms(epoch_ms), s);
+    format!("{day} {clock}")
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +770,116 @@ mod tests {
             assert_eq!(qr.centre.ticker, "xDAI");
             // A network code is not a token code: no contract line here.
             assert_eq!(qr.contract, None);
+        });
+    }
+
+    /// A transaction's detail, and the row order the listeners are bound in.
+    #[test]
+    fn a_transaction_opens_its_own_detail_and_the_row_order_matches() {
+        crate::executor::storage::tests::with_temp_state("flows-tx-detail", || {
+            use vela_core::app::activity_feed::{
+                ActivityFeed, Event as FeedEvent, FeedDirection, FeedItem, FeedTxRecord,
+            };
+
+            let mut host = CoreHost::<ActivityFeed>::new();
+            let _ = host.dispatch(FeedEvent::AccountSwitched {
+                address: "0xme".to_owned(),
+            });
+            let today = crate::executor::day_start_ms(crate::executor::now_ms());
+            let item = |id: &str, incoming: bool| FeedItem {
+                id: id.to_owned(),
+                direction: if incoming {
+                    FeedDirection::In
+                } else {
+                    FeedDirection::Out
+                },
+                counterparty: Some("0xAbCdEf0000000000000000000000000000000001".to_owned()),
+                alias: None,
+                value: Some("1.5".to_owned()),
+                symbol: "xDAI".to_owned(),
+                decimals: Some(18),
+                usd_value: 1.5,
+                chain_id: 100,
+                timestamp: today / 1000.0 + 3600.0,
+                day_start_ms: today,
+                tx_hash: Some("0xdead".to_owned()),
+                batch: None,
+            };
+            let view = FeedView {
+                rows: vec![
+                    FeedRow::Header {
+                        id: "day-0".to_owned(),
+                        day_start_ms: today,
+                        timestamp: today / 1000.0,
+                    },
+                    FeedRow::Item {
+                        item: item("a", true),
+                    },
+                    FeedRow::Item {
+                        item: item("b", false),
+                    },
+                ],
+                transactions: vec![FeedTxRecord {
+                    id: "b".to_owned(),
+                    user_op_hash: String::new(),
+                    tx_hash: "0xdead".to_owned(),
+                    from: "0xme".to_owned(),
+                    to: "0xAbCdEf0000000000000000000000000000000001".to_owned(),
+                    to_name: None,
+                    value: "1.5".to_owned(),
+                    symbol: "xDAI".to_owned(),
+                    decimals: 18,
+                    logo_urls: None,
+                    chain_id: 100,
+                    timestamp: today / 1000.0 + 3600.0,
+                    day_start_ms: today,
+                    status: FeedTxStatus::Pending,
+                    kind: None,
+                    usd: None,
+                }],
+                ..host.view()
+            };
+
+            // The listeners are bound in the order the rows draw.
+            assert_eq!(history_ids(&view), vec!["a".to_owned(), "b".to_owned()]);
+
+            let s = strings();
+            let received = tx_detail(&view, "a", &s, false, "en-US")
+                .unwrap_or_else(|| unreachable!("row a exists"));
+            assert!(received.positive);
+            assert_eq!(received.amount, "+1.5 xDAI");
+            assert_eq!(received.fiat, "$1.50");
+            // No stored record for "a", so the status is the confirmed default
+            // rather than a guess at something worse.
+            assert_eq!(received.status.text, s.status_confirmed);
+            // From (not To) for a receipt, plus chain, date and hash.
+            assert_eq!(received.facts[0].label, s.detail_from);
+            assert_eq!(received.facts[1].label, s.detail_chain);
+            assert_eq!(received.facts[2].label, s.detail_date);
+            assert_eq!(received.facts[3].label, s.detail_hash);
+            assert!(
+                received.facts[3].mono,
+                "a hash is compared character by character"
+            );
+
+            // The sent one, whose stored record says pending — it must NOT
+            // wear the confirmed chip.
+            let sent = tx_detail(&view, "b", &s, false, "en-US")
+                .unwrap_or_else(|| unreachable!("row b exists"));
+            assert!(!sent.positive);
+            assert_eq!(sent.facts[0].label, s.detail_to);
+            assert_eq!(sent.status.text, s.status_pending);
+            assert!(matches!(sent.status.tone, StatusTone::Info));
+
+            // Privacy masks the figure here as everywhere.
+            let hidden = tx_detail(&view, "a", &s, true, "en-US")
+                .unwrap_or_else(|| unreachable!("row a exists"));
+            assert_eq!(hidden.amount, crate::wallet::fixtures::MASK);
+            assert_eq!(hidden.fiat, "");
+
+            // A row that no longer exists has no detail — the panel closes
+            // rather than showing a stale one.
+            assert!(tx_detail(&view, "gone", &s, false, "en-US").is_none());
         });
     }
 

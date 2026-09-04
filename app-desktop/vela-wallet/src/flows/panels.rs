@@ -46,7 +46,12 @@ pub struct PanelActions {
     /// DR1L, live: one listener per network row. Empty falls back to `open_qr`.
     pub open_qr_rows: Vec<Click>,
     /// DA1L: a row opens its transaction.
+    ///
+    /// The fixture binds one and gives it to the first row — every mock row
+    /// opens the same drawing. See `open_qr` for why a live panel needs more.
     pub open_tx: Option<Click>,
+    /// DA1L, live: one listener per row, in the order the groups render.
+    pub open_tx_rows: Vec<Click>,
     /// DSD1L: a row opens the send form for that token.
     pub open_send_form: Option<Click>,
     /// DSD2L: the fee row and the recipient picker.
@@ -108,7 +113,9 @@ pub fn render(
             receive(model, theme, icons, actions.open_qr, actions.open_qr_rows)
         }
         FlowBody::ReceiveQr(model) => receive_qr(model, theme, icons, identicons),
-        FlowBody::History(groups) => history(groups, theme, icons, actions.open_tx),
+        FlowBody::History(groups) => {
+            history(groups, theme, icons, actions.open_tx, actions.open_tx_rows)
+        }
         FlowBody::TxDetail(model) => tx_detail(model, theme, icons, identicons),
         FlowBody::Assets(model) => assets(model, theme, icons, actions.open_add_token),
         FlowBody::AddToken(model) => add_token(model, theme, icons, identicons),
@@ -309,8 +316,13 @@ fn history(
     theme: &Theme,
     icons: &mut IconCache,
     mut open_tx: Option<Click>,
+    per_row: Vec<Click>,
 ) -> Div {
     let mut col = div().flex().flex_col();
+    // Row order here IS the order the page bound its listeners in, because both
+    // walk the same groups. A live panel binds one per row; the fixture binds
+    // one and gives it to the first.
+    let mut per_row = per_row.into_iter();
     let mut index = 0usize;
     for group in groups {
         col = col.child(
@@ -322,7 +334,9 @@ fn history(
                 .child(group.label.clone()),
         );
         for row in &group.rows {
-            let action = if index == 0 { open_tx.take() } else { None };
+            let action = per_row
+                .next()
+                .or_else(|| if index == 0 { open_tx.take() } else { None });
             col = col.child(clickable(
                 ElementId::from(("history", index)),
                 action,
