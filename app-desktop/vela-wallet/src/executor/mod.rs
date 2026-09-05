@@ -31,12 +31,14 @@ pub mod abi;
 pub mod activity_feed;
 pub mod balance_dashboard;
 pub mod balances;
+pub mod chain;
 pub mod chain_tokens;
 pub mod chainlink;
 pub mod contact_io;
 pub mod contacts;
 pub mod custom_tokens;
 pub mod display_currency;
+pub mod fee;
 pub mod identity;
 pub mod manage_tokens;
 pub mod network_admin;
@@ -48,8 +50,11 @@ pub mod pool;
 pub mod proxy;
 pub mod receive_watch;
 pub mod registry;
+pub mod relay;
 pub mod storage;
 pub mod token_trust;
+pub mod tracker;
+pub mod user_op;
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

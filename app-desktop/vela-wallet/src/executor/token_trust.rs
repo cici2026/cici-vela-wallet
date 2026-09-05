@@ -229,6 +229,21 @@ pub fn registry_tokens(chain_id: u32, stables: Vec<String>, wrapped_native: Opti
     });
 }
 
+/// A confirmed user operation's AUTHENTIC receipt logs — the single auto-add
+/// entry point (invariant ⑤). `from` is the sender the receipt names; the
+/// core nets the deltas for that address and admits what passes.
+pub fn receipt_confirmed(
+    from: &str,
+    chain_id: u32,
+    logs: Vec<vela_core::app::token_trust::TrustReceiptLog>,
+) {
+    tell(Event::ReceiptLogsConfirmed {
+        from: from.to_owned(),
+        chain_id,
+        logs,
+    });
+}
+
 /// Run one scan and return what it found. **Blocks** — call it from a worker.
 ///
 /// The core is single-flight: a poll requested while one is running is ignored

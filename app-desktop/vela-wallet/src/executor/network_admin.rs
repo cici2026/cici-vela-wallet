@@ -643,12 +643,10 @@ impl Machine for NetworkAdmin {
                 crate::executor::chainlink::invalidate();
                 Answer::Now(NetShellResult::Invalidated)
             }
-            // Still a no-op: there is no bundler client until 032, so there is
-            // nothing to drop — but an unanswered operation leaves the core
-            // waiting forever, which is the cardinal sin of this contract.
-            // live in 032
-            // live in 032
-            NetOperation::ClearBundlerCache { .. } => {
+            // Live since 032: the relay client's account-info and quote caches
+            // for this chain go with the endpoint edit that made them stale.
+            NetOperation::ClearBundlerCache { chain_id } => {
+                crate::executor::relay::clear_cache(*chain_id, None);
                 Answer::Now(NetShellResult::BundlerCacheCleared)
             }
         }

@@ -120,6 +120,17 @@ enum Request {
     },
     /// Drop every endpoint's state for a chain, or for all of them.
     Refresh { chain_id: Option<u32> },
+    /// Which bundler REST base the pool would submit to (invariant ③).
+    BundlerBase {
+        chain_id: u32,
+        reply: Sender<Option<String>>,
+    },
+    /// Which RPC URL the pool would reach for first — the `X-Rpc-Url` the
+    /// relay's REST endpoints carry (invariant ②).
+    BestRpcUrl {
+        chain_id: u32,
+        reply: Sender<Option<String>>,
+    },
 }
 
 /// Why a routed call produced no answer.
@@ -160,6 +171,43 @@ pub fn call(chain_id: u32, method: &str, params: Value) -> Result<Value, PoolErr
 #[allow(dead_code, reason = "the money path's entry point, wired by spec 032")]
 pub fn bundler_call(chain_id: u32, method: &str, params: Value) -> Result<Value, PoolError> {
     dispatch(chain_id, RpcKind::Bundler, method, params)
+}
+
+/// The REST base of the bundler the pool would submit to for this chain
+/// (`getActiveBundlerBaseUrl`, invariant ③): the `/v1/account`, `/v1/treasury`
+/// and `/v1/sponsor` calls must reach the SAME relay the user operation goes
+/// to, or a reimbursement recipient read from one relay is submitted to
+/// another and refused. `None` when every bundler endpoint is banned or the
+/// pool is empty — the caller falls back to the built-in base. **Blocks.**
+pub fn bundler_base(chain_id: u32) -> Option<String> {
+    query(chain_id, |chain_id, reply| Request::BundlerBase {
+        chain_id,
+        reply,
+    })
+}
+
+/// The RPC URL this chain's pool would reach for first (`getChainRpcUrl`) —
+/// rides `X-Rpc-Url` on the relay's REST endpoints so the relay reads the
+/// chain through the endpoint the wallet trusts. `None` = nothing eligible,
+/// and the caller sends no header (the fail-closed side of invariant ②).
+/// **Blocks.**
+pub fn best_rpc_url(chain_id: u32) -> Option<String> {
+    query(chain_id, |chain_id, reply| Request::BestRpcUrl {
+        chain_id,
+        reply,
+    })
+}
+
+fn query(
+    chain_id: u32,
+    make: impl FnOnce(u32, Sender<Option<String>>) -> Request,
+) -> Option<String> {
+    let (reply, answer) = channel();
+    {
+        let tx = sender().lock().ok()?;
+        tx.send(make(chain_id, reply)).ok()?;
+    }
+    answer.recv().ok().flatten()
 }
 
 /// Forget an endpoint's measured state — after the settings screen edits it.
@@ -208,13 +256,15 @@ struct InFlight {
 fn run(rx: &std::sync::mpsc::Receiver<Request>) {
     let mut host = CoreHost::<RpcPoolApp>::new();
     let mut inflight: HashMap<String, InFlight> = HashMap::new();
+    // The base-URL and best-RPC questions: no body, no params, one answer.
+    let mut queries: HashMap<String, Sender<Option<String>>> = HashMap::new();
     let mut next_id: u64 = 0;
 
     // Bans persist across launches; a pool that forgot them would re-try an
     // endpoint the last session already proved dead.
     let entries = read_bans();
     let pending = host.dispatch(Event::BansLoaded { entries });
-    drain(&mut host, pending, &mut inflight);
+    drain(&mut host, pending, &mut inflight, &mut queries);
 
     while let Ok(request) = rx.recv() {
         match request {
@@ -242,7 +292,7 @@ fn run(rx: &std::sync::mpsc::Receiver<Request>) {
                     method,
                     now_ms: now_ms(),
                 });
-                drain(&mut host, pending, &mut inflight);
+                drain(&mut host, pending, &mut inflight, &mut queries);
             }
             Request::Refresh { chain_id } => {
                 let event = match chain_id {
@@ -250,7 +300,29 @@ fn run(rx: &std::sync::mpsc::Receiver<Request>) {
                     None => Event::InvalidateAll,
                 };
                 let pending = host.dispatch(event);
-                drain(&mut host, pending, &mut inflight);
+                drain(&mut host, pending, &mut inflight, &mut queries);
+            }
+            Request::BundlerBase { chain_id, reply } => {
+                next_id += 1;
+                let call_id = format!("b{next_id}");
+                queries.insert(call_id.clone(), reply);
+                let pending = host.dispatch(Event::BundlerBaseRequested {
+                    call_id,
+                    chain_id,
+                    now_ms: now_ms(),
+                });
+                drain(&mut host, pending, &mut inflight, &mut queries);
+            }
+            Request::BestRpcUrl { chain_id, reply } => {
+                next_id += 1;
+                let call_id = format!("r{next_id}");
+                queries.insert(call_id.clone(), reply);
+                let pending = host.dispatch(Event::BestRpcUrlRequested {
+                    call_id,
+                    chain_id,
+                    now_ms: now_ms(),
+                });
+                drain(&mut host, pending, &mut inflight, &mut queries);
             }
         }
     }
@@ -262,14 +334,19 @@ fn drain(
     host: &mut CoreHost<RpcPoolApp>,
     mut pending: Vec<crate::core_host::Pending<RpcOperation>>,
     inflight: &mut HashMap<String, InFlight>,
+    queries: &mut HashMap<String, Sender<Option<String>>>,
 ) {
     while let Some(next) = pending.pop() {
-        let result = perform(&next.operation, inflight);
+        let result = perform(&next.operation, inflight, queries);
         pending.extend(host.resolve(next.id, result));
     }
 }
 
-fn perform(operation: &RpcOperation, inflight: &mut HashMap<String, InFlight>) -> RpcShellResult {
+fn perform(
+    operation: &RpcOperation,
+    inflight: &mut HashMap<String, InFlight>,
+    queries: &mut HashMap<String, Sender<Option<String>>>,
+) -> RpcShellResult {
     match operation {
         RpcOperation::LoadPoolConfig { chain_id } => {
             let (rpc_endpoints, bundler_endpoints) = collect_endpoints(*chain_id);
@@ -350,6 +427,16 @@ fn perform(operation: &RpcOperation, inflight: &mut HashMap<String, InFlight>) -
         }
 
         RpcOperation::Conclude { call_id, verdict } => {
+            // The two questions that are not routed calls: answered from the
+            // query table, never from a body.
+            if let RpcCallVerdict::BundlerBase { base_url: answer }
+            | RpcCallVerdict::BestRpcUrl { url: answer } = verdict
+            {
+                if let Some(reply) = queries.remove(call_id) {
+                    let _ = reply.send(answer.clone());
+                }
+                return RpcShellResult::Concluded;
+            }
             if let Some(call) = inflight.remove(call_id) {
                 let answer = match verdict {
                     RpcCallVerdict::Respond { url } => {

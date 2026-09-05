@@ -186,3 +186,74 @@ next machine change should make `fee_policy` call this one.
 **Gates**: vela-core **1,243 → 1,264** · fmt clean · `cargo clippy
 --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings`
 clean · `rust/pkg-web` rebuilt (see the commit for the byte count).
+
+## Phase 3 — the relay, the reads, and the submit spine
+
+**What shipped**: the desktop side of the money path below the screens —
+five new executor modules, one pool extension, one marker flipped.
+
+- **`executor/relay.rs`** (the bundler over HTTP): the REST base asked of the
+  pool (`bundler_base`, invariant ③ — the same relay the op goes to) with the
+  configured/built-in host as fallback; `/v1/account` (30 s cache, Tempo's
+  pathUSD branch, a corrupted `settlementRecipient` degrading to the deposit
+  address) and `/v1/treasury` (404 = uncovered, anything else transient =
+  `Unknown`, never `Uncovered`); `vela_getInBandGasQuote` rows parsed with
+  the web's admission rules (8 s cache, the no-native-price stablecoin
+  filter); the raw `pimlico_getUserOperationGasPrice` tier, UNJUDGED;
+  `eth_estimateUserOperationGas`; `eth_sendUserOperation` with the 3×/3 s
+  busy retry; the receipt and status polls collapsed to the tracker's typed
+  axis; and the two wording parsers the machines leave to the shell.
+- **`executor/chain.rs`**: `is_deployed` (only `true` is cached; an
+  indeterminate read is an error, never a guess), the EntryPoint nonce (10 s,
+  bumped after a submit), the raw gas signals, `chain_gas_price` with the
+  5-gwei default, `verify_chain_ready`.
+- **`executor/user_op.rs`**: `simulate_gas` (the quote's estimate, byte-
+  identical to the submit's MultiSend) and `submit` — `sendUserOpInBand` and
+  `sendUserOpTempo` in their order: chain ready → deployment + nonce (the two
+  refusals) → placeholder-leg estimate → the DISPLAYED fee baked in (or the
+  web's send-time fallback quote through `fee_policy`'s amount rule) → SafeOp
+  hash → the passkey seam → the contract-signature envelope → the AA20 guard
+  → submit with `[existingHash]` recovery → nonce bump. The failure
+  vocabulary maps 1:1 onto `SendSubmitFailure`.
+- **`executor/fee.rs`**: `impl Machine for FeePolicy` — six operations, six
+  reads, the keys of an undeployed account read from the stored record.
+- **`executor/tracker.rs`**: `impl Machine for TxTracker` as the app-resident
+  it must be — the pending-record sweep over `vela.transactionHistory`, the
+  in-place patch, the receipt's authentic logs held per hash and handed to
+  `token_trust::receipt_confirmed` (the single auto-add entry point) — plus
+  `start` (boot + a 3 s tick loop that re-fetches the resident so a sign-out
+  cannot strand it) and `submitted`.
+- **`executor/pool.rs`** learned the two questions that are not routed calls:
+  `bundler_base` and `best_rpc_url`, answered from the core's own
+  `BundlerBase` / `BestRpcUrl` verdicts through a query table beside the
+  in-flight map.
+- **`network_admin::ClearBundlerCache` is live** — the last two `// live in
+  032` markers are gone.
+
+**Live, against Gnosis** (per module, `--test-threads=1`, proxy unset):
+
+| Read | Answer |
+|---|---|
+| relay base | `https://vela-relay.getvela.app` — no chain suffix; treasury **Covered** |
+| golden Safe quotes | XDAI native, recipient `0xee2c…f0dd`, balance 0.75897; USDC and USDT rows at 0 |
+| fast bundler quote | `maxFeePerGas 17`, no network/relayer fields (the core's fallback applies) |
+| account info | `settlementRecipient 0xee2c…f0dd`, status ACTIVE, **`activeDepositAddress` absent** |
+| golden nonce / signals | `0x…04`; `eth_gasPrice 11 · baseFee 10 · tip 2 → 12` |
+| a dust transfer's estimate | `100000 / 112472 / 101600` |
+| an unknown hash | receipt: reached, nothing; status: `None` (the relay has no status method, or answers nothing) |
+
+Two of those are worth a line. The relay publishes no `activeDepositAddress`
+for the golden Safe on Gnosis — so `fee_recipient()` is the settlement
+recipient alone, and a funding sheet that showed the deposit address would
+show nothing; the in-band path does not need it. And `eth_getUserOperationStatus`
+answered nothing for an unknown hash, which the tracker reads as
+`StatusUnavailable` — an honest unknown, exactly the case the core's window
+logic exists for.
+
+**Not exercised**: a real submit. `submit` is compiled and its envelope is
+proven on the fixture keyset (the second key's own proxy in `r`, a foreign
+credential refused), but no dust has moved — that is SC-303 and it needs the
+send host of the next phase to carry a quote the core displayed.
+
+**Gates**: desktop **225 → 244** with the feature (240 without) · fmt clean
+· warnings 1 (pre-existing) · `rust/` untouched this phase.
