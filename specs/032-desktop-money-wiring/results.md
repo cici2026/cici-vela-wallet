@@ -443,6 +443,28 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
    在 AsyncApp 上返回 `()`;`cargo test` 只吃一个过滤词,第二个会被静默丢弃(我以为跑了
    两组测试,其实一组都没跑)。
 
+## 028 合并后要立刻做的(web 会话 2026-09-05 预警,commit `6cec4ddf`,尚未在 origin/main)
+
+028 把联系人导入/导出的规则从桌面的 `executor/contact_io.rs` **提进了核心**
+(`app/contacts_io.rs`),并改了 `contacts.rs` 的事件与视图字段。rebase 到含 028 的 main 后:
+
+1. **编译断点(自报)**:`src/contacts/live.rs` 测试辅助函数手写的 `ContactsView` 字面量
+   要补 `import_failure: None, export: None`。
+2. **编译器看不见的语义偏差**:坏文件(非法 JSON、空表/无地址列的 CSV)在 web 上会被
+   **拒绝**(`ContactsView.import_failure: malformed_json | no_address_column | empty |
+   unknown_group`),在桌面上现在仍是"成功导入 0 条"。修法 = 把 `page.rs` 的
+   `import_contacts` / `export_contacts` 改成派发核心事件
+   `ImportFile { content, filename, into_group, now_ms }` / `ImportAcknowledged` /
+   `ExportRequested { scope, format, exported_at_iso }` / `ExportTaken`(导出文件在
+   `ContactsView.export` 里一次性出现,壳只负责存盘对话框),然后**删掉**
+   `executor/contact_io.rs` 及其测试。028 的 results.md Phase 6b 记了这条偏差,以这个切换为终点。
+3. 新事件 `add_group_members` / `remove_group_member` / `set_contact_groups`——桌面分组
+   的"添加成员"现在走哪条事件,切换时顺手核对。
+4. `send.rs`:`picked_address` 自己关选择器(本刀的 Dsd2e 监听已经"选中 + 关闭"双发,
+   新核心下第二个事件是空操作);`open()` 立刻把 `prefilled_recipient` 放进 `recipient`。
+5. **`rust/pkg-web` 会冲突**:028 重建了 wasm(`08aa37e9ddf9`),032 也重建过(`df236de771e0`)。
+   后合并的一方 `node rust/scripts/build-web.mjs` 重建入库即可,别手动合。
+
 ## 每次接手仍要跑的一条 grep
 
 ```bash

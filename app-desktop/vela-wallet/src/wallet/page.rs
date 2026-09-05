@@ -3059,10 +3059,30 @@ impl WalletPage {
                 }
                 FlowPanel::Dsd2e => {
                     actions.open_scan = None;
+                    // A pick lands in the field AND closes the sheet. The core
+                    // at this branch point leaves the sheet up after
+                    // `PickedAddress`; spec 028's core closes it itself, after
+                    // which the second event is a no-op — the pair is kept so
+                    // either core makes the same screen.
                     actions.pick_contact_rows = send
                         .contact_addresses
                         .into_iter()
-                        .map(|address| to_host(SendEvent::PickedAddress { address }))
+                        .map(|address| -> panels::Click {
+                            let host = host.clone();
+                            Box::new(
+                                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch(
+                                            SendEvent::PickedAddress {
+                                                address: address.clone(),
+                                            },
+                                            cx,
+                                        );
+                                        host.dispatch(SendEvent::CloseContactPicker, cx);
+                                    });
+                                },
+                            )
+                        })
                         .collect();
                 }
                 FlowPanel::Dsd2f => {
