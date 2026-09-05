@@ -5414,6 +5414,97 @@ impl WalletPage {
         )
     }
 
+    /// Read an address-book backup and hand it to the core.
+    ///
+    /// The shell reads and PARSES; the core applies existing-wins and counts
+    /// what happened. Which of those two halves is which is the reason
+    /// `ImportParsed` takes already-parsed rows rather than a file.
+    fn import_contacts(cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |page, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                // Cancelled, or the platform declined. Nothing to report: the
+                // person closed a dialog.
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                return;
+            };
+            // A file we cannot read must say so rather than succeed with zero
+            // of everything — but the desktop has no toast yet, so it stays a
+            // no-op with the reason on the log rather than a silent success
+            // dressed as a result.
+            let parsed = match crate::executor::contact_io::parse(&content, name.as_deref()) {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    eprintln!("[vela-wallet] contacts import: no address column in {name:?}");
+                    return;
+                }
+            };
+            let now_ms = crate::executor::now_ms();
+            page.update(cx, |_, cx| {
+                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(
+                        ContactEvent::ImportParsed {
+                            contacts: parsed.contacts,
+                            groups: parsed.groups,
+                            now_ms,
+                        },
+                        cx,
+                    );
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write the whole address book where the person points.
+    ///
+    /// The extension decides the format, because that is the choice the save
+    /// dialog already asked them to make — a `.csv` that contains JSON is a
+    /// file nothing opens.
+    fn export_contacts(cx: &mut Context<Self>) {
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        let contacts = view.contacts.clone();
+        let groups = view.groups.clone();
+        let now_iso = crate::executor::now_iso();
+        // The save dialog opens where a person keeps their files, not where
+        // this app keeps its state. `.` would open wherever the binary was
+        // launched from, which on a double-click is nowhere useful.
+        let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target = cx.prompt_for_new_path(&directory, Some("vela-contacts.json"));
+        cx.spawn(async move |_, _| {
+            let Ok(Ok(Some(path))) = target.await else {
+                return;
+            };
+            let csv = path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"));
+            let content = if csv {
+                crate::executor::contact_io::to_csv(&contacts, &groups)
+            } else {
+                crate::executor::contact_io::to_json(&contacts, &groups, &now_iso)
+            };
+            if let Err(error) = std::fs::write(&path, content) {
+                eprintln!("[vela-wallet] contacts export: {}: {error}", path.display());
+            }
+        })
+        .detach();
+    }
+
     /// What each row of an open menu does, positionally.
     ///
     /// 030 called this component blocked because its items "carry no action".
@@ -5460,9 +5551,24 @@ impl WalletPage {
                     ),
                 ]
             }
-            // Import / export are a file dialog away, and the site and tile
-            // menus belong to a browser this client does not have.
-            ContactsMenu::Header | ContactsMenu::Site | ContactsMenu::Tile => Vec::new(),
+            // 导入通讯录 / 导出全部通讯录.
+            ContactsMenu::Header => vec![
+                Some(Box::new(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx: &mut Context<Self>| {
+                        this.menu = None;
+                        Self::import_contacts(cx);
+                    },
+                )) as contacts_components::MenuAction),
+                Some(Box::new(cx.listener(
+                    |this, _: &gpui::ClickEvent, _, cx: &mut Context<Self>| {
+                        this.menu = None;
+                        Self::export_contacts(cx);
+                    },
+                )) as contacts_components::MenuAction),
+            ],
+            // The site and tile menus belong to a browser this client does not
+            // have.
+            ContactsMenu::Site | ContactsMenu::Tile => Vec::new(),
         }
     }
 

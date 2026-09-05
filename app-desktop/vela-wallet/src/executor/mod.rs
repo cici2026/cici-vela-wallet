@@ -33,6 +33,7 @@ pub mod balance_dashboard;
 pub mod balances;
 pub mod chain_tokens;
 pub mod chainlink;
+pub mod contact_io;
 pub mod contacts;
 pub mod custom_tokens;
 pub mod display_currency;
