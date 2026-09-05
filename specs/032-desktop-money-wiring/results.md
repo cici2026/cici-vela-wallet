@@ -326,3 +326,82 @@ NOT pulled: it spends dust, and that is the founder's call (SC-303).
 **Gates**: desktop **244 → 251** with the feature (247 without) · fmt clean
 · 1 pre-existing warning · gallery sweep every state rendered ·
 `check-windows.sh` green · `rust/` untouched.
+
+# 交接:下一个会话从这里开始
+
+**范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
+工作区 `/Volumes/data/production/vela-wallet-native`,四个 phase,四个提交。
+
+## 一句话状态
+
+**桌面能发钱,只差最后一推**:金标 Safe 真网走到确认页(真持仓、真报价 0.010 xDAI、
+滑块已武装),`SlideConfirm` 藏在 `VELA_LIVE_SEND=1` 后面没拉——花真钱是创始人的决定
+(SC-303)。固定密钥集签名者在 vela-core(`dev-fixtures`),4337 UserOp 装配在 vela-core
+(`user_op.rs`,与 EIP-712 哈希器和 alloy ABI 编码器交叉验证),中继/链读/提交主干、
+fee_policy 与 tx_tracker 常驻、send 宿主与六块屏全接。
+
+## 立刻可跑的闸门
+
+```bash
+cd /Volumes/data/production/vela-wallet-native/app-desktop/vela-wallet
+cargo fmt --all --check && cargo test --features dev-fixtures && cargo test \
+  && scripts/sweep-gallery.sh && scripts/check-windows.sh
+# 真网(按模块,不并发;proxy 变量要清掉):
+env -u all_proxy -u http_proxy -u https_proxy \
+  cargo test --features dev-fixtures executor::relay -- --ignored --test-threads=1
+# …同样跑 executor::chain / executor::user_op / wallet::money(到确认页为止)
+cd ../../rust && cargo fmt --all --check \
+  && cargo clippy --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings \
+  && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
+```
+
+基线:desktop **251 passed(feature on)/ 247(off)· 31 ignored**,vela-core **1,264**,
+fmt clean,gallery 36 态全渲染,1 个既有 warning(`BLE_CHANNEL_SUPPORTED`)。
+
+**动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
+要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。本刀两次都是
+wasm 3,630,664 字节不变、只有指纹改名。
+
+## SC-303:那一推怎么拉
+
+```bash
+env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPACE=1 \
+  cargo test --features dev-fixtures live_the_golden_safe_reaches_confirm -- --ignored --nocapture
+```
+它会用 fixture #1 签 SafeOp、真提交到 vela-relay、打印 userOpHash;花 0.001 + 0.010 xDAI。
+收据核对:余额差 = 0.011,与屏幕数字逐位对上(026 的 web 巡检就是这个数)。跑完把
+结果写进 SC-303 的判决。**注意** `VELA_PARALLEL_SPACE=1` 是进程级 env,测试里
+`passkey::assert` 靠它路由到固定密钥集;不设它,签名会去找 USB 钥匙。
+
+## 还欠的
+
+| # | 事 | 状态 |
+|---|---|---|
+| 1 | **Phase 5 批量导入**(`batch_import`,1,648 行,3 个操作) | 未开工。要文件对话框(`cx.prompt_for_paths` 现成)、CSV/TSV 文本路径(核心解析)、xlsx(要 `calamine` 之类,核心只收 `Matrix`)、`FetchUsdFiatRate`(`executor/display_currency.rs` 的汇率源可复用)、`SaveTemplateFile`(存文件对话框)。DSD2cL 画着,现在仍是 fixture |
+| 2 | **B 组签名面板**(`clear_signing` `approval_guard` `sign_request`,9,362 行) | 图 DCS1–8 画好、33 个手写场景;`user_op::compute_safe_message_hash` 与 `build_eip1271_signature` 已备好。请求来源仍缺(C 组要 web 引擎) |
+| 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
+| 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
+| 5 | `SimulateCalls` | 桌面没有模拟引擎,答 `None` |
+| 6 | 031 留的五件:收藏控件、设置页新建/登录账户、扫码、余额流式、Windows 日界线 | 原样 |
+| 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
+
+## 本刀最值得记的四件事
+
+1. **`#[allow(dead_code)]` 会把被调用者也标成活的。** 给 `user_op::submit` 加一个
+   allow,`chain.rs` 里十个"never used"一起消失。接线前用它压警告,接线后记得删。
+2. **fee 会话必须只有一个。** `EstimateFee` 由确认卡渲染的同一个 `fee_policy` 会话回答,
+   宿主在它 `busy=false` 时用**它渲染的那个视图**结算——web 记录了四次因为拆成两个对象
+   而失败的集成。`SyncMoney` 测试就是这条规则的无 gpui 版本。
+3. **收据读 `receipt.status`,不读 `tx_status`。** 核心签完名就把 `tx_status` 翻成
+   confirmed;真正追链的是 receipt 自己的状态。读错一个字段就是"钱到了"的谎话。
+4. **gpui 细节两条**:`AsyncApp::update` 直接返回值(不是 Result),`Entity::update`
+   在 AsyncApp 上返回 `()`;`cargo test` 只吃一个过滤词,第二个会被静默丢弃(我以为跑了
+   两组测试,其实一组都没跑)。
+
+## 每次接手仍要跑的一条 grep
+
+```bash
+grep -n 'fixtures::' src/wallet/page.rs
+```
+本刀新增的 Dsd 臂全部走 `send_views(cx)` 门:有宿主读核心,没宿主画 mock;
+`FlowPanel::Dsd2c`(批量导入)是唯一**故意**还画 fixture 的已登录界面。
