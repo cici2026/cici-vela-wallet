@@ -69,7 +69,9 @@ use crate::window_frame::{
 };
 use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
-use vela_core::app::contacts::{ContactSaveInput, Contacts, Event as ContactEvent};
+use vela_core::app::contacts::{
+    ContactGroupInput, ContactSaveInput, Contacts, Event as ContactEvent,
+};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
 use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
@@ -325,6 +327,10 @@ pub struct WalletPage {
     /// changed it would be a delete and an add wearing one button. So editing
     /// an existing contact keeps it fixed and only the name is a draft.
     contact_form: Option<ContactForm>,
+    /// The group name sheet: `Some((id, name))`, with `None` for a new group.
+    /// One dialog for 新建分组 and 重命名分组, because they are one question.
+    group_form: Option<(Option<String>, String)>,
+    group_form_focus: gpui::FocusHandle,
     contact_form_name_focus: gpui::FocusHandle,
     contact_form_address_focus: gpui::FocusHandle,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
@@ -522,6 +528,8 @@ impl WalletPage {
             settings_fix_chain: None,
             import_result: None,
             contact_form: None,
+            group_form: None,
+            group_form_focus: cx.focus_handle(),
             contact_form_name_focus: cx.focus_handle(),
             contact_form_address_focus: cx.focus_handle(),
             locale: gpui::SharedString::from(loc.language().to_owned()),
@@ -587,6 +595,162 @@ impl WalletPage {
     /// be able to sign in with from anywhere else yet, which is the one fact
     /// that should give someone pause — so the dialog does not open until the
     /// core has the answer.
+    /// The group name sheet — 新建分组 and 重命名分组.
+    ///
+    /// One dialog for both, because they ask the same question and the core
+    /// takes the same event: `ContactGroupInput` with `id: None` creates and an
+    /// existing id renames in place.
+    fn group_form_dialog(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (id, name) = self.group_form.clone()?;
+        let s = &self.contacts;
+        let title = if id.is_some() {
+            s.group_rename.clone()
+        } else {
+            s.group_new.clone()
+        };
+        // A group with no name is a row nobody can tell from another.
+        let can_save = !name.trim().is_empty();
+        let hover_accent = theme.accent_hover;
+        let focus = self.group_form_focus.clone();
+        let strings = crate::ui::NameFieldStrings {
+            label: s.group_name_label.clone(),
+            placeholder: s.group_name_placeholder.clone(),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+        let cancel = s.cancel.clone();
+        let save_label = s.save.clone();
+
+        let card = div()
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(28.))
+            .rounded(px(20.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border_card)
+            .child(
+                div()
+                    .text_size(theme::text_panel_title())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_base)
+                    .child(title),
+            )
+            .child(crate::ui::text_field(
+                "group-form-name",
+                theme,
+                &strings,
+                &name,
+                false,
+                false,
+                &focus,
+                window,
+                {
+                    let page = cx.entity();
+                    move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                        page.update(cx, |this: &mut Self, cx| {
+                            if let Some((_, name)) = this.group_form.as_mut() {
+                                *name = text.clone();
+                            }
+                            cx.notify();
+                        });
+                    }
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .id("group-form-cancel")
+                            .flex_1()
+                            .h(px(CONTACTS_BUTTON_H))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(theme.outline_strong)
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .child(cancel)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.group_form = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child({
+                        let save = div()
+                            .id("group-form-save")
+                            .flex_1()
+                            .h(px(CONTACTS_BUTTON_H))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(theme::text_row_title())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(save_label);
+                        if can_save {
+                            save.cursor_pointer()
+                                .bg(theme.accent)
+                                .hover(move |el| el.bg(hover_accent))
+                                .text_color(theme.fg_inverse)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let Some((id, name)) = this.group_form.take() else {
+                                        return;
+                                    };
+                                    resident::resident::<Contacts>(cx).update(
+                                        cx,
+                                        |resident, cx| {
+                                            resident.dispatch(
+                                                ContactEvent::GroupSave {
+                                                    input: ContactGroupInput {
+                                                        id,
+                                                        name: name.trim().to_owned(),
+                                                        color: None,
+                                                        // `None` leaves membership
+                                                        // alone — a rename must not
+                                                        // empty the group.
+                                                        members: None,
+                                                    },
+                                                },
+                                                cx,
+                                            );
+                                        },
+                                    );
+                                    cx.notify();
+                                }))
+                        } else {
+                            save.bg(theme.bg_sunken).text_color(theme.fg_subtle)
+                        }
+                    }),
+            );
+
+        Some(
+            div()
+                .id("group-form-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.bg_base.opacity(0.55))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     /// The add/edit contact sheet.
     ///
     /// 030 recorded "there is no add/edit form sheet on desktop" as a design
@@ -1441,15 +1605,25 @@ impl WalletPage {
             }
         }
 
-        rail.child(rail_row(
-            "rail-new-group",
-            theme,
-            &mut self.icons,
-            Some(Icon::FolderPlus),
-            new_group,
-            None,
-            RailState::Default,
-        ))
+        rail.child(
+            rail_row(
+                "rail-new-group",
+                theme,
+                &mut self.icons,
+                Some(Icon::FolderPlus),
+                new_group,
+                None,
+                RailState::Default,
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.identity.is_none() {
+                    return;
+                }
+                this.group_form = Some((None, String::new()));
+                window.focus(&this.group_form_focus, cx);
+                cx.notify();
+            })),
+        )
     }
 
     /// The address of the row the detail panel is about, for a real session.
@@ -5887,11 +6061,24 @@ impl WalletPage {
                 let Some(index) = self.group else {
                     return Vec::new();
                 };
-                let Some((id, _, _)) = self.group_models(cx).get(index).cloned() else {
+                let Some((id, name, _)) = self.group_models(cx).get(index).cloned() else {
                     return Vec::new();
                 };
+                let rename = (id.clone(), name);
                 vec![
-                    None,
+                    // 重命名分组 — the same dialog 新建分组 opens, with the id
+                    // filled in, because they ask one question.
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                            this.group_form =
+                                Some((Some(rename.0.to_string()), rename.1.to_string()));
+                            this.menu = None;
+                            window.focus(&this.group_form_focus, cx);
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                    // 导入到本组 / 导出本组 still need a per-group file path the
+                    // core has no event for; the whole-book pair is wired.
                     None,
                     None,
                     Some(
@@ -6007,6 +6194,7 @@ impl Render for WalletPage {
         let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
         let import_result = self.import_result_dialog(&theme, cx);
         let contact_form = self.contact_form_dialog(&theme, window, cx);
+        let group_form = self.group_form_dialog(&theme, window, cx);
         let mut root = div()
             .size_full()
             .relative()
@@ -6030,6 +6218,9 @@ impl Render for WalletPage {
         }
         if let Some(contact_form) = contact_form {
             root = root.child(contact_form);
+        }
+        if let Some(group_form) = group_form {
+            root = root.child(group_form);
         }
         if let Some(sign_out) = sign_out {
             root = root.child(sign_out);

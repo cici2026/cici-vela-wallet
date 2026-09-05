@@ -50,6 +50,8 @@ pub struct ContactsStrings {
     pub address_placeholder: SharedString,
     pub save: SharedString,
     pub cancel: SharedString,
+    pub group_name_label: SharedString,
+    pub group_name_placeholder: SharedString,
     pub export_all: SharedString,
     pub import_group: SharedString,
     pub export_group: SharedString,
@@ -105,6 +107,8 @@ impl ContactsStrings {
             address_placeholder: s("contacts.addressPlaceholder"),
             save: s("contacts.save"),
             cancel: s("contacts.cancel"),
+            group_name_label: s("contacts.groupNameLabel"),
+            group_name_placeholder: s("contacts.groupNamePlaceholder"),
             export_all: s("contacts.exportAll"),
             import_group: s("contacts.importGroup"),
             export_group: s("contacts.exportGroup"),
@@ -161,6 +165,7 @@ mod tests {
             (s.name_label.as_ref(), "contacts.nameLabel"),
             (s.save.as_ref(), "contacts.save"),
             (s.cancel.as_ref(), "contacts.cancel"),
+            (s.group_name_label.as_ref(), "contacts.groupNameLabel"),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");
             assert!(!value.is_empty(), "`{key}` resolved empty");
