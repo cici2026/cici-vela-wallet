@@ -3,6 +3,16 @@ name = "vela-wallet"
 version = "0.1.1"
 edition = "2024"
 
+[features]
+# The parallel space (spec 032 US0): the real app with ONE substitution — where
+# a passkey would sign, vela-core's fixed keyset signs. Compile-time here, and
+# ALSO gated at runtime (`VELA_PARALLEL_SPACE=1`, see `src/parallel_space.rs`)
+# with a badge that renders whenever the space is active. Default OFF: a
+# release build carries neither the test scalars nor any path to a software
+# signer, and `cargo test` alone does not turn it on — the seam's own tests
+# run under `cargo test --features dev-fixtures`.
+dev-fixtures = ["vela-core/dev-fixtures"]
+
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed" }
 # `wayland` and `x11` are NOT optional extras. gpui_linux defaults to both, but

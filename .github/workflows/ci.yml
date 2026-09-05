@@ -226,15 +226,20 @@ jobs:
           workspaces: rust
       - name: Format
         run: cargo fmt --all --check
+      # `vela-core/dev-fixtures` is on for the LINT and the TEST steps only:
+      # the parallel space's software signer (spec 032) is compiled by no
+      # shipping crate, so this is the one place its golden addresses are
+      # locked and its bytes are checked against the real authenticator
+      # parsers. The wasm canary below deliberately does not enable it.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings
       # `--features vela-core/i18n-all` is REQUIRED, not a nicety. vela-core's
       # default feature set is empty, so the compiled-in catalogs are absent and
       # 1,516 of the 3,554 conformance cases fail with `I18nCatalogUnavailable`.
       # A bare `cargo test --workspace` is red — spec 004 was verified locally
       # with the features on and this step was not updated to match.
       - name: Tests (conformance corpus + proptests)
-        run: cargo test --workspace --features vela-core/i18n-all
+        run: cargo test --workspace --features vela-core/i18n-all,vela-core/dev-fixtures
       - name: Wasm build (getrandom canary)
         run: cargo build --target wasm32-unknown-unknown -p vela-core-wasm
       # The Windows passkey path. It cannot be built by any job that builds the

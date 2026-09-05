@@ -20,6 +20,7 @@ mod loc;
 mod onboarding;
 mod onboarding_flow;
 mod outcome;
+mod parallel_space;
 mod passkey_directory;
 mod raster;
 mod resident;
@@ -74,7 +75,7 @@ impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = session::view(cx);
         let root: Div = div().size_full();
-        match view.allowed_route {
+        let root = match view.allowed_route {
             // Storage unread. Paint the surface and nothing else — a splash
             // that lasts one frame is invisible, and a wrong screen is not.
             SessionRoute::Loading => {
@@ -110,7 +111,11 @@ impl Render for Root {
                     .clone();
                 root.child(page)
             }
-        }
+        };
+        // The parallel space's marker, over whichever screen is up. It renders
+        // whenever the space is active and never behind a build flag alone —
+        // a test wallet must never wear the real one's face.
+        parallel_space::overlay(root, window)
     }
 }
 

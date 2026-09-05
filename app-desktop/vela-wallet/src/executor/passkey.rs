@@ -430,6 +430,13 @@ fn assert_windows(
 /// Somebody who enrols a fingerprint while the wallet is open sees the row
 /// unlock on the next launch, which is the right trade for a per-frame call.
 pub fn platform_supported() -> bool {
+    // The parallel space's fixture reports `platform` attachment, so the row
+    // it answers as must be offered. Not cached: the space is a process-wide
+    // switch, and reading one env var per frame is cheaper than a stale row.
+    #[cfg(feature = "dev-fixtures")]
+    if crate::parallel_space::active() {
+        return true;
+    }
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AVAILABLE.get_or_init(|| {
         #[cfg(windows)]
@@ -459,6 +466,11 @@ pub fn platform_supported() -> bool {
 /// reported later, by the ceremony, as `not_supported` with a message naming
 /// it — and plugging one in and pressing 重试 then works.
 pub fn supported() -> bool {
+    // In the parallel space a ceremony needs no subsystem at all.
+    #[cfg(feature = "dev-fixtures")]
+    if crate::parallel_space::active() {
+        return true;
+    }
     #[cfg(windows)]
     {
         // Not the HID subsystem: on Windows that answer is always "no" for a
@@ -526,6 +538,14 @@ pub fn register(
     method: KeyMethod,
     ceremony: &Ceremony,
 ) -> Result<Registration, PasskeyFailure> {
+    // The parallel space (spec 032 US0): the fixed keyset mints the key, no
+    // cable, whatever method the person picked — the method still labels the
+    // key row, so a fixture wallet reads like a real one. Both gates are
+    // `parallel_space::active`'s; without the feature this line is dead.
+    #[cfg(feature = "dev-fixtures")]
+    if crate::parallel_space::active() {
+        return crate::parallel_space::signer::register(exclude_credential_ids);
+    }
     // The scan method mints the key on a phone over caBLE. The choice labels the
     // key row either way; here it only decides which transport carries the
     // make-credential.
@@ -580,6 +600,11 @@ pub fn assert(
     method: KeyMethod,
     ceremony: &Ceremony,
 ) -> Result<Assertion, PasskeyFailure> {
+    // The parallel space signs with the fixed keyset — see `register`.
+    #[cfg(feature = "dev-fixtures")]
+    if crate::parallel_space::active() {
+        return crate::parallel_space::signer::assert(challenge, credential_id);
+    }
     // The scan method signs over caBLE, whether the phone offers what it holds
     // (sign-in, no credential id) or is pinned to one credential (recovery's
     // second signature, credential id known — the allow list keeps a multi-key
