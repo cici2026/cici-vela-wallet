@@ -34,6 +34,12 @@ pub struct ContactsStrings {
     pub empty_hint: SharedString,
     pub import_file: SharedString,
     pub import_all: SharedString,
+    /// What an import actually did. Same four keys the RN screen alerts with —
+    /// an import that reports nothing is a feature that looks broken.
+    pub import_done_title: SharedString,
+    pub import_done_body: String,
+    pub import_fail_title: SharedString,
+    pub import_fail_body: SharedString,
     pub export_all: SharedString,
     pub import_group: SharedString,
     pub export_group: SharedString,
@@ -78,6 +84,10 @@ impl ContactsStrings {
             empty_hint: s("contacts.emptyHint"),
             import_file: s("contacts.importFile"),
             import_all: s("contacts.importAll"),
+            import_done_title: s("contacts.importDoneTitle"),
+            import_done_body: raw("contacts.importDoneBody"),
+            import_fail_title: s("contacts.importFailTitle"),
+            import_fail_body: s("contacts.importFailBody"),
             export_all: s("contacts.exportAll"),
             import_group: s("contacts.importGroup"),
             export_group: s("contacts.exportGroup"),
@@ -125,6 +135,10 @@ mod tests {
             (s.view_all_activity.as_ref(), "contacts.viewAllActivity"),
             (s.delete_contact.as_ref(), "contacts.deleteContact"),
             (s.action_qr.as_ref(), "contacts.actionQr"),
+            (s.import_done_title.as_ref(), "contacts.importDoneTitle"),
+            (s.import_done_body.as_str(), "contacts.importDoneBody"),
+            (s.import_fail_title.as_ref(), "contacts.importFailTitle"),
+            (s.import_fail_body.as_ref(), "contacts.importFailBody"),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");
             assert!(!value.is_empty(), "`{key}` resolved empty");

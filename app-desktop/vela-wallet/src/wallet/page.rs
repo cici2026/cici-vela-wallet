@@ -315,6 +315,9 @@ pub struct WalletPage {
     settings_probed_network: Option<u32>,
     /// DSR1, live: WHICH unreachable chain the rescue dialog is about.
     settings_fix_chain: Option<u32>,
+    /// What the last address-book import did, as a title and a line. Cleared
+    /// by acknowledging it.
+    import_result: Option<(SharedString, SharedString)>,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
     /// core's sorted `tokens`.
     ///
@@ -508,6 +511,7 @@ impl WalletPage {
             endpoint_focuses: Vec::new(),
             settings_probed_network: None,
             settings_fix_chain: None,
+            import_result: None,
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -571,6 +575,78 @@ impl WalletPage {
     /// be able to sign in with from anywhere else yet, which is the one fact
     /// that should give someone pause — so the dialog does not open until the
     /// core has the answer.
+    /// What the last address-book import did.
+    ///
+    /// The RN screen alerts; the desktop has a centred-dialog idiom already, so
+    /// this reuses the sign-out dialog's shape with one button. The counts are
+    /// the CORE's — it applied existing-wins and is the only thing that knows
+    /// how many rows were new.
+    fn import_result_dialog(
+        &self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (title, body) = self.import_result.clone()?;
+        let hover_accent = theme.accent_hover;
+        let card = div()
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(28.))
+            .rounded(px(20.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border_card)
+            .child(
+                div()
+                    .text_size(theme::text_panel_title())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_base)
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .line_height(px(20.))
+                    .text_color(theme.fg_muted)
+                    .child(body),
+            )
+            .child(
+                div()
+                    .id("import-result-ok")
+                    .h(px(CONTACTS_BUTTON_H))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .bg(theme.accent)
+                    .hover(move |el| el.bg(hover_accent))
+                    .text_size(theme::text_row_title())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.fg_inverse)
+                    .child(self.flow_strings.done.clone())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.import_result = None;
+                        cx.notify();
+                    })),
+            );
+        Some(
+            div()
+                .id("import-result-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.bg_base.opacity(0.55))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     fn sign_out_dialog(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let view = session::view(cx);
         let dialog = view.sign_out?;
@@ -5445,15 +5521,25 @@ impl WalletPage {
             // of everything — but the desktop has no toast yet, so it stays a
             // no-op with the reason on the log rather than a silent success
             // dressed as a result.
+            // A file we cannot read must SAY so rather than succeed with zero
+            // of everything, which from the outside is indistinguishable from
+            // an empty address book.
             let parsed = match crate::executor::contact_io::parse(&content, name.as_deref()) {
                 Ok(parsed) => parsed,
                 Err(_) => {
-                    eprintln!("[vela-wallet] contacts import: no address column in {name:?}");
+                    page.update(cx, |this, cx| {
+                        this.import_result = Some((
+                            this.contacts.import_fail_title.clone(),
+                            this.contacts.import_fail_body.clone(),
+                        ));
+                        cx.notify();
+                    })
+                    .ok();
                     return;
                 }
             };
             let now_ms = crate::executor::now_ms();
-            page.update(cx, |_, cx| {
+            page.update(cx, |this, cx| {
                 resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
                     resident.dispatch(
                         ContactEvent::ImportParsed {
@@ -5464,6 +5550,27 @@ impl WalletPage {
                         cx,
                     );
                 });
+                // The COUNTS are the core's — it applied existing-wins and
+                // knows what actually happened. An import that reports nothing
+                // is a feature that looks broken.
+                let report = resident::resident::<Contacts>(cx)
+                    .read(cx)
+                    .view()
+                    .last_import;
+                if let Some(report) = report {
+                    this.import_result = Some((
+                        this.contacts.import_done_title.clone(),
+                        SharedString::from(crate::wallet::fill(
+                            &crate::wallet::fill(
+                                &this.contacts.import_done_body,
+                                "added",
+                                &report.added.to_string(),
+                            ),
+                            "skipped",
+                            &report.skipped.to_string(),
+                        )),
+                    ));
+                }
                 cx.notify();
             })
             .ok();
@@ -5646,6 +5753,7 @@ impl Render for WalletPage {
         let menu = self.menu_overlay(&theme, cx);
         let sign_out = self.sign_out_dialog(&theme, cx);
         let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
+        let import_result = self.import_result_dialog(&theme, cx);
         let mut root = div()
             .size_full()
             .relative()
@@ -5662,6 +5770,10 @@ impl Render for WalletPage {
         // whose answer changes which screen the app is on.
         if let Some(settings_dialog) = settings_dialog {
             root = root.child(settings_dialog);
+        }
+        // The import's answer, over the menu it was started from.
+        if let Some(import_result) = import_result {
+            root = root.child(import_result);
         }
         if let Some(sign_out) = sign_out {
             root = root.child(sign_out);
