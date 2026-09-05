@@ -1214,26 +1214,111 @@ it.** When the reason is "X does not exist yet", the marker outlives the reason,
 and nothing in the type system will tell you.
 
 
+## Phases 30–33 — the contacts section closes
+
+030 listed three contacts surfaces as **blocked on drawn UI that does not
+exist**: the context-menu actions, an add/edit form sheet, and a favourite
+control. Two of those were still true when 031 re-checked them in phase 23. By
+phase 33 only one is.
+
+What changed was not the drawings. It was that by then the app had **four
+dialogs, an editable text field and a file picker**, and every word these
+surfaces need was already in the corpus. What 030 correctly called a design
+decision in 2026-08 had become composition.
+
+| Gate | Result |
+|---|---|
+| `cargo test` | ✅ **222 passed · 0 failed · 26 ignored** (031 opened at **125**) |
+| `cargo fmt --all --check` | ✅ clean · gallery ✅ 36 states · `check-windows.sh` ✅ |
+| warnings (forced rebuild) | ✅ 1, pre-existing |
+| unguarded `fixtures::` in `page.rs` | ✅ **0** outside the gallery, the mock paths and `explore` |
+
+### An address book can leave this machine and come back
+
+`prompt_for_paths` / `prompt_for_new_path` have been in gpui all along, so the
+"needs a file picker" half of the blocked list was one call away.
+
+`executor/contact_io.rs` ports `contact-io.ts`'s serialize and parse halves. The
+**format is the point**: a backup written on the phone has to open here, so
+`version` / `exportedAt` / `contacts` / `groups` keep their spelling and the CSV
+keeps its column order. Inventing a desktop format would make export a feature
+that only talks to itself.
+
+The CSV heuristics came with their reason attached, and it is worth repeating
+because it is the shape of every good comment in this codebase: a foreign file
+rarely spells the column `address`, and when an unrecognised header fell back to
+column 0 holding the NAME, every row failed the address test, every row was
+dropped silently, and the import reported *"0 added, 0 already existed"*.
+Nothing imported, nothing explained, nothing to try differently. **So when the
+header does not say where the address is, the data does.**
+
+Two rules that look like sloppiness and are the opposite:
+
+- a malformed row is **carried** to the core, not dropped in the parser. "Is
+  this an address" is the core's question and it counts the answer; swallowing
+  bad rows here made `invalid` structurally zero on the CSV path.
+- a CSV that plainly held contact rows and yielded no address at all is an
+  **error**, not an empty parse. A file we cannot read must say so instead of
+  succeeding with zero of everything — which from the outside is exactly what an
+  empty address book looks like.
+
+### An import that reports nothing is a feature that looks broken
+
+The counts are the core's: it applied existing-wins and is the only thing that
+knows how many rows were new. The shell states them in the same four keys the RN
+screen alerts with, so three clients say one sentence about one outcome — and an
+unreadable file gets the failure dialog rather than "0 added", which is the
+distinction `Unreadable` exists to carry, finally visible at the end of the path
+that raises it.
+
+### The form, and the one field it will not let you change
+
+The **address is the identity** the core keys on, so an edit keeps it fixed and
+shows it read-only. Letting it change would be a delete and an add wearing one
+button, with the old contact quietly surviving.
+
+The save button is available exactly when the address is one — the core refuses
+a malformed address anyway, and saying so before the press is what keeps the
+button from looking available for something it will not do. The field turns red
+only once something has been typed: an empty field is a person who has not
+started, not one who is wrong.
+
+An empty **name** clears the name, because the core reads `Some("")` that way
+and a person who deleted the text meant to.
+
+### One dialog for two questions
+
+新建分组 and 重命名分组 are the same question, and the core takes the same event:
+`ContactGroupInput` with `id: None` creates, an existing id renames.
+`members: None` on the rename, because the core reads that as "leave membership
+alone" and a rename that emptied the group would be a rename in name only.
+
+导入到本组 / 导出本组 stay inert: the whole-book pair is wired, but a per-group
+import has no core event behind it, and an item that highlights and does nothing
+is worse than one that plainly does not.
+
+### What is still blocked, after re-checking all three
+
+Of 030's three, **one** survives: there is no favourite control anywhere in the
+desktop drawings. `ToggleFavorite` is the same dead code `SwitchAccount` was
+before phase 26 — an event with no control — and unlike the account row, this
+one has no control drawn to wire.
+
 ---
 
 # 交接:下一个会话从这里开始
 
+**范围:只做 desktop。** Android / iOS / web 已交给其他同事(创始人 2026-09-05 确认)。
+
 工作区 `/Volumes/data/production/vela-wallet-native`,分支 `031-desktop-read-wiring`
 (叠在 `030-desktop-live-shell` 上,后者叠在 `029-native-repair` 上,均未合并)。
+工作区干净,本轮共 33 个 phase。
 
-**031 全部完工**:七台机器全接、七条 SC 全达标、**签了名的人能点到的每一个读界面都
-读自己的钱包**,设置里四个只能看不能填的框也都能填了。剩下的是花钱(032)和相机
-(扫码)。
+## 一句话状态
 
-## 先读这三样
-
-1. **本文件** —— 尤其是「第二半」开头那条**更正**(我凭记忆断言"桌面没画过收款
-   流",实际上 `src/flows/` 有 19 块画好的板;这个错误让九个 phase 的活变成了一条
-   "推迟"。`ls src/flows/` 只要十一秒)。
-2. `app-desktop/vela-wallet/src/flows/live.rs` 与 `src/wallet/live.rs` 的模块注释
-   —— fixtures/live 分工,以及"还在数的时候画什么"。
-3. `src/executor/{pool,token_trust}.rs` 的模块注释 —— 两台机器为什么是**独立线程**
-   而不是 gpui resident,以及"一个会话"为什么是要紧事而不是洁癖。
+**已登录的人能点到的每一个界面都读自己的钱包**,只有 explore(浏览器)例外。
+读路径七台机器全接、七条 SC 全达标、设置四个只读框全能填、联系人区全通。
+`cargo test` **125 → 222**,`// live in 032` 只剩 2 个(都是 `ClearBundlerCache`)。
 
 ## 立刻可跑的闸门
 
@@ -1245,54 +1330,87 @@ env -u all_proxy -u http_proxy -u https_proxy \
   cargo test executor::pool -- --ignored --test-threads=1
 ```
 
-基线:**214 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
-warning。
-
-改了 `rust/` 之后还要跑(都在仓库根):
-```bash
-node rust/scripts/build-web.mjs --check      # pkg-web 是入库产物,CI 会重建比对
-node rust/scripts/verify-web.mjs             # 46,408 条一致性用例
-node rust/scripts/gen-onboarding-types.mjs --check
-```
+基线:**222 passed · 0 failed · 26 ignored**,fmt clean,36 个画廊状态,1 个既有
+warning(`BLE_CHANNEL_SUPPORTED`)。
 
 有真网测试的模块:`pool` `balances` `chain_tokens` `chainlink` `identity`
 `manage_tokens` `token_trust` `display_currency` `contacts` `network_admin`,
-以及 `wallet::live`(端到端英雄区)、`flows::live`(端到端资产屏)。
+以及端到端的 `wallet::live`(英雄区)和 `flows::live`(资产屏)。
 
-## 031 之后还缺的(全部不是"读")
+**动过 `rust/` 就还要跑(仓库根)**:
+```bash
+node rust/scripts/build-web.mjs --check   # pkg-web 是入库产物,CI 会重建比对
+node rust/scripts/verify-web.mjs          # 46,408 条一致性用例
+node rust/scripts/gen-onboarding-types.mjs --check
+```
 
-| # | 事 | 归属 |
+## 先读这四样
+
+1. **本文件**——尤其是 Phase 24–29 的「fixture 扫描」和它记的那条程序。
+2. `src/flows/live.rs` 与 `src/wallet/live.rs` 的模块注释——fixtures/live 分工,
+   以及"核心还在数的时候画什么"。
+3. `src/executor/{pool,token_trust}.rs` 的模块注释——这两台为什么是**独立线程**
+   而不是 gpui resident,以及"一个会话"为什么是要紧事。
+4. `src/executor/balances.rs` 的模块注释——每条链为什么发两个请求。
+
+## desktop 还欠的:3 组 + 5 件
+
+### 三组机器(24 台里 desktop 该接的还剩 6 台)
+
+| 组 | 机器 | 核心行数 | 前置 |
+|---|---|---|---|
+| **A. 花钱** | `send` `tx_tracker` `batch_import`,加 `fee_policy` 真接线 | 9,152 | ⚠️ 见下方"开工前必做" |
+| **B. 签名面板** | `clear_signing` `approval_guard` `sign_request` | 9,362 | 要有签名请求来源(A 或 C) |
+| **C. dApp 浏览器** | `dapp_session` `dapp_permissions` `browser_history` | 3,771 | ⛔ **桌面没有 web 引擎**(Cargo.toml 里没有 wry/webview/cef)。这是平台决策,不是接线 |
+
+**`ext_cache`(692 行)不算 desktop 的**——它是 Safari 扩展的 App Group 快照 +
+Universal Link,桌面没有这个概念。
+
+B 组的图(DCS1–8)画好了,但现在是 `src/signing/fixtures.rs` 里 **33 个手写场景的
+画廊**,背后没有请求管线;要驱动它得先有 A 或 C。
+
+### 五件零碎的
+
+| # | 事 | 状态 |
 |---|---|---|
-| 1 | 发送(DSD1–4) | **032**,花钱那一刀 |
-| 2 | 扫码(DS1) | 桌面**根本没有相机管线**;不是接线,是一个新功能 |
-| 3 | 联系人 **增/改 表单** 和 **收藏控件** | 真的卡在没画的图(030 的边界,已复核) |
-| 4 | 联系人菜单的 **重命名/导入/导出** | 需要一个文本对话框和一个文件选择器;**删除分组已接** |
-| 4b | 设置账户页的 **新建/登录** 按钮 | 需要从已登录窗口回到 onboarding 的路由(导航决策,不是接线) |
-| 5 | `ScanIncomingTransfers` 的**发送**记录 | 032 写同一个 store |
-| 6 | 余额**流式**到达(`ChainAssetsArrived`) | 需要 worker→resident 的事件推送 |
-| 7 | Windows 的日界线 | `GetTimeZoneInformation` 没接,按 UTC 分组 |
+| 1 | 收藏控件(`ToggleFavorite`) | 核心有事件,**桌面图里没有星标**。和 phase 26 之前的 `SwitchAccount` 同病,但那个的控件画着,这个没有 |
+| 2 | 设置页 新建/登录账户 | 要一条从已登录窗口回 onboarding 的路由(导航决策)。现在**故意不画**,而不是画成死按钮 |
+| 3 | 扫码 (DS1) | 桌面没有相机管线。新功能,不是接线 |
+| 4 | 余额流式到达(`ChainAssetsArrived`) | 要 worker→resident 的事件推送 |
+| 5 | Windows 日界线 | `GetTimeZoneInformation` 没接,现在按 UTC 分组。`check-windows.sh` 只保证那条路能编译 |
+
+外加两个 `// live in 032`,都是 `network_admin::ClearBundlerCache`,真在等 bundler。
+
+## A 组开工前必须先做的一件事
+
+**把固定密钥集签名者用 Rust 写进 `vela-core`(`dev-fixtures` feature),而且要在
+A 组的第一个 phase。** 那三把是裸 P-256 私钥,而 desktop 的每条签名路径都通向
+**导不进密钥的真实认证器**(USB HID / 平台 passkey),所以金标密钥集在桌面**一条路都
+走不通**。放到中段才发现,验收标准就没法满足。`vela-core` 已有全部零件
+(`webauthn.rs` / `registry_proof.rs` / p256),约 150 行。
+
+## 每次接手都要跑的一条 grep(十秒)
+
+```bash
+grep -n 'fixtures::' src/wallet/page.rs
+```
+
+逐条看它上面有没有 `identity.is_none()` 之类的门。本刀里它一次找出**六个**已登录还在
+画 mock 的界面,其中最狠的是**联系人详情画着 A 的名字和地址,而删除/复制作用在 B 身上**
+——从 030 接上删除那天起就是这样,熬过了 030 收口、031 收口,和我自己"能点到的都接了"
+的断言。
+
+> **"为什么还没接"的注释,是一条带时间戳的断言。** 当理由是"X 还不存在",理由会先于
+> 注释过期,而类型系统一个字都不会说。
+
+本刀应验四次:「桌面从没画过收款流」(`src/flows/` 有 19 块画好的板)、「还没有本地
+交易库」(phase 14 我自己建的)、「核心还不暴露账户列表」(019 就暴露了)、
+「没有增改表单是设计缺口」(到 phase 32 已经只是组装)。
 
 ## 四条容易踩的坑(我踩过)
 
 1. **`str.replace` 静默不匹配** —— `cargo fmt` 会把目标重排。改完必须**读回并断言**。
 2. **真网测试不能同进程一起跑** —— pool 是进程级单例线程,`with_temp_state` 会换掉
-   进程级的 `VELA_STATE_DIR`。
-3. **别把链上数字钉进断言**,也**别手算十六进制** —— 两样我都栽过。
-4. **别凭记忆断言仓库里有什么**。见本文件的更正。
-
-## 032 开工前必须先做的一件事
-
-**固定密钥集签名者要用 Rust 写进 vela-core(`dev-fixtures` feature),而且要在 032
-的**第一个** phase。** 那三把是裸 P-256 私钥,而 desktop/Android/iOS 每条签名路径都
-通向**导不进密钥的真实认证器**,所以金标密钥集目前在三端一条路都走不通。这是三刀花
-钱 spec 共同的前置条件。vela-core 已有全部零件,约 150 行。
-
-## 033 开工前必须先测的一件事
-
-给 `vela-core-uniffi` 加 17 台机器的 `bridge_object!` 之前,**先测体积**。spec 019
-记录的闸门是 arm64-v8a **+785,864 剥离字节**;估算再加 **+3~5 MB**,必须在 plan 签字
-前用探针量出来(三刀分别量),而不是事后。
-
-**033 还要带走一样东西**:`app-desktop/vela-wallet/src/executor/abi.rs` 是 ABI 编解码
-的桌面私有副本,理由写在文件头。033 量完体积后**升格它**,别让 Kotlin 和 Swift 各写
-一份。
+   进程级的 `VELA_STATE_DIR`。两者各自都对,不能共处一个进程。
+3. **别把链上数字钉进断言**,也**别手算十六进制** —— 两样都栽过。
+4. **别凭记忆断言仓库里有什么。** 见上面那条 grep。
