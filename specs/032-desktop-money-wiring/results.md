@@ -449,7 +449,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 (`app/contacts_io.rs`),并改了 `contacts.rs` 的事件与视图字段。rebase 到含 028 的 main 后:
 
 1. **编译断点(自报)**:`src/contacts/live.rs` 测试辅助函数手写的 `ContactsView` 字面量
-   要补 `import_failure: None, export: None`。
+   要补 `import_failure: None, export: None, sections: Vec::new()`。
 2. **编译器看不见的语义偏差**:坏文件(非法 JSON、空表/无地址列的 CSV)在 web 上会被
    **拒绝**(`ContactsView.import_failure: malformed_json | no_address_column | empty |
    unknown_group`),在桌面上现在仍是"成功导入 0 条"。修法 = 把 `page.rs` 的
@@ -463,7 +463,11 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 4. `send.rs`:`picked_address` 自己关选择器(本刀的 Dsd2e 监听已经"选中 + 关闭"双发,
    新核心下第二个事件是空操作);`open()` 立刻把 `prefilled_recipient` 放进 `recipient`。
 5. **`rust/pkg-web` 会冲突**:028 重建了 wasm(`08aa37e9ddf9`),032 也重建过(`df236de771e0`)。
-   后合并的一方 `node rust/scripts/build-web.mjs` 重建入库即可,别手动合。
+   后合并的一方 `node rust/scripts/build-web.mjs` 重建入库即可,别手动合。028 不动 `ci.yml`。
+6. **分组字母归核心了**:`ContactsView.sections: Vec<ContactSection { letter, addresses }>`
+   (新 `app/contacts_initials.rs`,逐码点拼音首字母表:阿豪→A、妈妈→M、地址→#;A–Z 再 #)。
+   桌面 `contacts/live.rs` 自己的 `section_of` / `sections()` 归档规则应改读 `view.sections`
+   并删掉本地规则——同一个人不能在两端归到不同字母下。
 
 ## 每次接手仍要跑的一条 grep
 
