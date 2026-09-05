@@ -40,6 +40,16 @@ pub struct ContactsStrings {
     pub import_done_body: String,
     pub import_fail_title: SharedString,
     pub import_fail_body: SharedString,
+    /// The add/edit sheet. 030 called this "blocked on drawn UI that does not
+    /// exist" — the WORDS existed all along, and by 031 the app had a dialog
+    /// idiom and a text field to put them in.
+    pub add_title: SharedString,
+    pub edit_title: SharedString,
+    pub name_label: SharedString,
+    pub name_placeholder: SharedString,
+    pub address_placeholder: SharedString,
+    pub save: SharedString,
+    pub cancel: SharedString,
     pub export_all: SharedString,
     pub import_group: SharedString,
     pub export_group: SharedString,
@@ -88,6 +98,13 @@ impl ContactsStrings {
             import_done_body: raw("contacts.importDoneBody"),
             import_fail_title: s("contacts.importFailTitle"),
             import_fail_body: s("contacts.importFailBody"),
+            add_title: s("contacts.addTitle"),
+            edit_title: s("contacts.editTitle"),
+            name_label: s("contacts.nameLabel"),
+            name_placeholder: s("contacts.namePlaceholder"),
+            address_placeholder: s("contacts.addressPlaceholder"),
+            save: s("contacts.save"),
+            cancel: s("contacts.cancel"),
             export_all: s("contacts.exportAll"),
             import_group: s("contacts.importGroup"),
             export_group: s("contacts.exportGroup"),
@@ -139,6 +156,11 @@ mod tests {
             (s.import_done_body.as_str(), "contacts.importDoneBody"),
             (s.import_fail_title.as_ref(), "contacts.importFailTitle"),
             (s.import_fail_body.as_ref(), "contacts.importFailBody"),
+            (s.add_title.as_ref(), "contacts.addTitle"),
+            (s.edit_title.as_ref(), "contacts.editTitle"),
+            (s.name_label.as_ref(), "contacts.nameLabel"),
+            (s.save.as_ref(), "contacts.save"),
+            (s.cancel.as_ref(), "contacts.cancel"),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");
             assert!(!value.is_empty(), "`{key}` resolved empty");

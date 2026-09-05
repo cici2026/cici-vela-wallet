@@ -69,7 +69,7 @@ use crate::window_frame::{
 };
 use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
-use vela_core::app::contacts::{Contacts, Event as ContactEvent};
+use vela_core::app::contacts::{ContactSaveInput, Contacts, Event as ContactEvent};
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
 use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
@@ -83,6 +83,7 @@ use super::components::{
     section_header_row, sidebar_search, skeleton_row, token_icon, wallet_header,
 };
 use super::fixtures::{self, ADDRESS_FULL, IDENTICON_BOARD_SEEDS, WALLET_NAME};
+use crate::flows::components::mono_field;
 use crate::flows::{
     FlowEntry, FlowPanel, FlowStep, FlowStrings, fixtures as flow_fixtures, live as flows_live,
     panels,
@@ -318,6 +319,14 @@ pub struct WalletPage {
     /// What the last address-book import did, as a title and a line. Cleared
     /// by acknowledging it.
     import_result: Option<(SharedString, SharedString)>,
+    /// The add/edit contact sheet: `Some((address, name))` while it is open.
+    ///
+    /// The ADDRESS is the identity — the core keys on it and an edit that
+    /// changed it would be a delete and an add wearing one button. So editing
+    /// an existing contact keeps it fixed and only the name is a draft.
+    contact_form: Option<ContactForm>,
+    contact_form_name_focus: gpui::FocusHandle,
+    contact_form_address_focus: gpui::FocusHandle,
     /// D3, live: WHICH holding the asset strip opened, as an index into the
     /// core's sorted `tokens`.
     ///
@@ -512,6 +521,9 @@ impl WalletPage {
             settings_probed_network: None,
             settings_fix_chain: None,
             import_result: None,
+            contact_form: None,
+            contact_form_name_focus: cx.focus_handle(),
+            contact_form_address_focus: cx.focus_handle(),
             locale: gpui::SharedString::from(loc.language().to_owned()),
             explore,
             signing,
@@ -575,6 +587,213 @@ impl WalletPage {
     /// be able to sign in with from anywhere else yet, which is the one fact
     /// that should give someone pause — so the dialog does not open until the
     /// core has the answer.
+    /// The add/edit contact sheet.
+    ///
+    /// 030 recorded "there is no add/edit form sheet on desktop" as a design
+    /// gap. By 031 the app had a dialog idiom (four of them), an editable text
+    /// field and every word this form needs already in the corpus — so what was
+    /// left was composition, not design.
+    ///
+    /// The ADDRESS is the identity the core keys on, so an edit keeps it fixed:
+    /// changing it would be a delete and an add wearing one button, and the old
+    /// contact would quietly survive.
+    fn contact_form_dialog(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let form = self.contact_form.clone()?;
+        let s = &self.contacts;
+        let title = if form.editing {
+            s.edit_title.clone()
+        } else {
+            s.add_title.clone()
+        };
+        // The core refuses a malformed address anyway; this is the same rule
+        // said before the press rather than after it, so the button does not
+        // look available for something it will not do.
+        let can_save = is_evm_address(&form.address);
+        let hover_accent = theme.accent_hover;
+        let name_focus = self.contact_form_name_focus.clone();
+        let address_focus = self.contact_form_address_focus.clone();
+
+        let name_strings = crate::ui::NameFieldStrings {
+            label: s.name_label.clone(),
+            placeholder: s.name_placeholder.clone(),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+        let address_strings = crate::ui::NameFieldStrings {
+            label: s.address_label.clone(),
+            placeholder: s.address_placeholder.clone(),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+
+        let mut card = div()
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(28.))
+            .rounded(px(20.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border_card)
+            .child(
+                div()
+                    .text_size(theme::text_panel_title())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_base)
+                    .child(title),
+            )
+            .child(crate::ui::text_field(
+                "contact-form-name",
+                theme,
+                &name_strings,
+                &form.name,
+                false,
+                false,
+                &name_focus,
+                window,
+                {
+                    let page = cx.entity();
+                    move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                        page.update(cx, |this: &mut Self, cx| {
+                            if let Some(form) = this.contact_form.as_mut() {
+                                form.name = text.clone();
+                            }
+                            cx.notify();
+                        });
+                    }
+                },
+            ));
+
+        if form.editing {
+            // Fixed, and shown as such: this is what the panel is about.
+            card = card.child(mono_field(
+                theme,
+                Some(s.address_label.clone()),
+                SharedString::from(form.address.clone()),
+            ));
+        } else {
+            card = card.child(crate::ui::text_field(
+                "contact-form-address",
+                theme,
+                &address_strings,
+                &form.address,
+                // Red once there is something typed that is not an address —
+                // not while the field is still empty, which is a person who has
+                // not started rather than one who is wrong.
+                !form.address.is_empty() && !can_save,
+                false,
+                &address_focus,
+                window,
+                {
+                    let page = cx.entity();
+                    move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                        page.update(cx, |this: &mut Self, cx| {
+                            if let Some(form) = this.contact_form.as_mut() {
+                                form.address = text.trim().to_owned();
+                            }
+                            cx.notify();
+                        });
+                    }
+                },
+            ));
+        }
+
+        let buttons = div()
+            .flex()
+            .gap(px(12.))
+            .child(
+                div()
+                    .id("contact-form-cancel")
+                    .flex_1()
+                    .h(px(CONTACTS_BUTTON_H))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .border_1()
+                    .border_color(theme.outline_strong)
+                    .text_size(theme::text_row_title())
+                    .text_color(theme.fg_base)
+                    .child(s.cancel.clone())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.contact_form = None;
+                        cx.notify();
+                    })),
+            )
+            .child({
+                let save = div()
+                    .id("contact-form-save")
+                    .flex_1()
+                    .h(px(CONTACTS_BUTTON_H))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(theme::text_row_title())
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(s.save.clone());
+                if can_save {
+                    save.cursor_pointer()
+                        .bg(theme.accent)
+                        .hover(move |el| el.bg(hover_accent))
+                        .text_color(theme.fg_inverse)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(form) = this.contact_form.take() else {
+                                return;
+                            };
+                            let now_ms = crate::executor::now_ms();
+                            resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                                resident.dispatch(
+                                    ContactEvent::Save {
+                                        input: ContactSaveInput {
+                                            address: form.address,
+                                            // An empty name CLEARS the name —
+                                            // the core reads `Some("")` that
+                                            // way, and a person who deleted the
+                                            // text meant to.
+                                            name: Some(form.name.trim().to_owned()),
+                                            note: None,
+                                            favorite: None,
+                                            kind: None,
+                                            resolved_name: None,
+                                            resolved_source: None,
+                                        },
+                                        now_ms,
+                                    },
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                        }))
+                } else {
+                    // Dimmed, not hidden: the button is where it will be, and
+                    // the address field beside it says what is missing.
+                    save.bg(theme.bg_sunken).text_color(theme.fg_subtle)
+                }
+            });
+
+        Some(
+            div()
+                .id("contact-form-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.bg_base.opacity(0.55))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(card.child(buttons))
+                .into_any_element(),
+        )
+    }
+
     /// What the last address-book import did.
     ///
     /// The RN screen alerts; the desktop has a centred-dialog idiom already, so
@@ -1087,13 +1306,27 @@ impl WalletPage {
             )
             .child(div().flex_1().min_w(px(0.)))
             .child(search_field(theme, &mut self.icons, placeholder))
-            .child(outline_button(
-                "contacts-add",
-                theme,
-                &mut self.icons,
-                Some(Icon::UserRoundPlus),
-                add,
-            ))
+            .child(
+                outline_button(
+                    "contacts-add",
+                    theme,
+                    &mut self.icons,
+                    Some(Icon::UserRoundPlus),
+                    add,
+                )
+                .on_click(cx.listener(|this, _, window, cx| {
+                    // Only a real session saves anything: the fixture roster is
+                    // a picture, and a picture must not grow a row.
+                    if this.identity.is_none() {
+                        return;
+                    }
+                    this.contact_form = Some(ContactForm::default());
+                    // The address is the first thing to type, so it is the
+                    // first thing focused.
+                    window.focus(&this.contact_form_address_focus, cx);
+                    cx.notify();
+                })),
+            )
             .child(
                 icon_button("contacts-more", theme, &mut self.icons, Icon::Ellipsis).on_click(
                     cx.listener(|this, _, window, cx| {
@@ -1711,13 +1944,32 @@ impl WalletPage {
             .pt(px(14.))
             .border_t_1()
             .border_color(theme.divider)
-            .child(text_action(
-                "contact-edit",
-                theme,
-                &mut self.icons,
-                Some(Icon::Pencil),
-                edit,
-            ))
+            .child({
+                // Edit opens the same sheet with the address FIXED — it is the
+                // key the core stores under, so changing it would be a delete
+                // and an add wearing one button, and the old contact would
+                // quietly survive.
+                let editing = live_address.clone().map(|address| ContactForm {
+                    editing: true,
+                    address: address.to_string(),
+                    name: model.name.to_string(),
+                });
+                text_action(
+                    "contact-edit",
+                    theme,
+                    &mut self.icons,
+                    Some(Icon::Pencil),
+                    edit,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    let Some(form) = editing.clone() else {
+                        return;
+                    };
+                    this.contact_form = Some(form);
+                    window.focus(&this.contact_form_name_focus, cx);
+                    cx.notify();
+                }))
+            })
             .child(
                 destructive_text_button("contact-delete", theme, delete).on_click(cx.listener(
                     move |this, _, _, cx| {
@@ -5754,6 +6006,7 @@ impl Render for WalletPage {
         let sign_out = self.sign_out_dialog(&theme, cx);
         let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
         let import_result = self.import_result_dialog(&theme, cx);
+        let contact_form = self.contact_form_dialog(&theme, window, cx);
         let mut root = div()
             .size_full()
             .relative()
@@ -5774,6 +6027,9 @@ impl Render for WalletPage {
         // The import's answer, over the menu it was started from.
         if let Some(import_result) = import_result {
             root = root.child(import_result);
+        }
+        if let Some(contact_form) = contact_form {
+            root = root.child(contact_form);
         }
         if let Some(sign_out) = sign_out {
             root = root.child(sign_out);
@@ -5828,6 +6084,51 @@ impl Render for WalletPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The save button is available exactly when the address is one.
+    ///
+    /// The core refuses a malformed address anyway; saying so before the press
+    /// is what keeps the button from looking available for something it will
+    /// not do.
+    #[test]
+    fn only_a_real_address_can_be_saved() {
+        assert!(super::is_evm_address(
+            "0x88cCA0EeDbF2C4426110bbFc998F048689266894"
+        ));
+        assert!(super::is_evm_address(
+            "0X88cca0eedbf2c4426110bbfc998f048689266894"
+        ));
+        // One character short, one over, non-hex, no prefix, empty.
+        assert!(!super::is_evm_address(
+            "0x88cCA0EeDbF2C4426110bbFc998F04868926689"
+        ));
+        assert!(!super::is_evm_address(
+            "0x88cCA0EeDbF2C4426110bbFc998F0486892668944"
+        ));
+        assert!(!super::is_evm_address(
+            "0xZZcCA0EeDbF2C4426110bbFc998F048689266894"
+        ));
+        assert!(!super::is_evm_address(
+            "88cCA0EeDbF2C4426110bbFc998F048689266894"
+        ));
+        assert!(!super::is_evm_address(""));
+    }
+
+    /// Bytes read the way a file manager on this machine reads them.
+    #[test]
+    fn a_file_size_is_stated_in_the_unit_a_person_can_compare() {
+        let (amount, unit) = super::human_bytes(512);
+        assert_eq!((amount.as_ref(), unit.as_ref()), ("512", "B"));
+        // 1024 base, because that is what the OS says beside it.
+        let (amount, unit) = super::human_bytes(1536);
+        assert_eq!((amount.as_ref(), unit.as_ref()), ("1.5", "KB"));
+        let (amount, unit) = super::human_bytes(3 * 1024 * 1024 / 2);
+        assert_eq!((amount.as_ref(), unit.as_ref()), ("1.5", "MB"));
+        // No decimal below KB: "1.5 KB" of 1536 bytes is a real number, but
+        // "0.5 KB" of 512 is noise where "512 B" is exact.
+        let (amount, unit) = super::human_bytes(0);
+        assert_eq!((amount.as_ref(), unit.as_ref()), ("0", "B"));
+    }
 
     /// FR-004 / data-model.md §Screen states: the gallery chip strip exposes
     /// exactly the desktop state inventory, in canon order, each reachable in
@@ -5931,6 +6232,26 @@ mod tests {
             assert_eq!(crate::settings::fixtures::network(id).id, id);
         }
     }
+}
+
+/// Is this a well-formed EVM address?
+///
+/// The core refuses a malformed one anyway; saying so before the press is what
+/// keeps the save button from looking available for something it will not do.
+fn is_evm_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .is_some_and(|body| body.len() == 40 && body.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The add/edit contact sheet's draft.
+#[derive(Clone, Default)]
+struct ContactForm {
+    /// `true` when the address is fixed — an edit, not an add.
+    editing: bool,
+    address: String,
+    name: String,
 }
 
 /// Bytes as the figure and the unit the hero draws them as.
