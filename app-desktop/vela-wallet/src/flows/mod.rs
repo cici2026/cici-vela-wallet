@@ -348,6 +348,19 @@ pub struct FlowStrings {
     pub tx_error_bundler_fund: SharedString,
     pub first_time_tag: SharedString,
     pub fee_pending: SharedString,
+
+    // Send · batch import, live (spec 032 phase 5).
+    pub batch_paste_placeholder: SharedString,
+    pub batch_template_saved: SharedString,
+    pub batch_rate_loading: SharedString,
+    pub batch_rate_failed: SharedString,
+    pub batch_rate_reset: SharedString,
+    pub batch_over_cap: SharedString,
+    pub batch_over_balance: SharedString,
+    pub batch_reading: SharedString,
+    pub batch_rejected_other: String,
+    pub batch_apply_empty: SharedString,
+    pub batch_no_price: SharedString,
 }
 
 impl FlowStrings {
@@ -497,6 +510,18 @@ impl FlowStrings {
             tx_error_bundler_fund: s("send.txErrorBundlerFund"),
             first_time_tag: s("componentsUi.signing.firstTimeTag"),
             fee_pending: SharedString::from("…"),
+
+            batch_paste_placeholder: s("send.batchPastePlaceholder"),
+            batch_template_saved: s("send.batchTemplateSaved"),
+            batch_rate_loading: s("send.batchRateLoading"),
+            batch_rate_failed: s("send.batchRateFailed"),
+            batch_rate_reset: s("send.batchRateReset"),
+            batch_over_cap: s("send.batchOverCap"),
+            batch_over_balance: s("send.batchOverBalance"),
+            batch_reading: s("send.batchReading"),
+            batch_rejected_other: raw("send.batchRejected_other"),
+            batch_apply_empty: s("send.batchApplyEmpty"),
+            batch_no_price: s("send.batchNoPrice"),
         }
     }
 }

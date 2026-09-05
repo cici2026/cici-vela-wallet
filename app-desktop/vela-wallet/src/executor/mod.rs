@@ -31,6 +31,7 @@ pub mod abi;
 pub mod activity_feed;
 pub mod balance_dashboard;
 pub mod balances;
+pub mod batch;
 pub mod chain;
 pub mod chain_tokens;
 pub mod chainlink;

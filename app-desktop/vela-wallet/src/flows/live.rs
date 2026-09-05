@@ -29,15 +29,16 @@ use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::flows::FlowStrings;
 use crate::wallet::fill;
+use vela_core::app::batch_import::{BatchRateStatus, BatchUnit, BatchView};
 use vela_core::app::contacts::ContactsView;
 use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView, FeeView};
 use vela_core::app::send::{SendReceiptStatus, SendStage, SendToken, SendTxStatus, SendView};
 
 use crate::flows::fixtures::{
-    AddressCard, AssetsEmpty, AssetsPanel, ContactPick, DepositEntry as FlowDeposit, FactLead,
-    FactRow, FeeRow, FeeTokenPick, FeeTokenRow, FilterChip, HistoryGroup, NetworkRow, ReceiveList,
-    ReceiveQr, RecipientCard, SendConfirm, SendForm, SendPick, SendReceipt, StatusChip, StatusTone,
-    TokenMark, address_lines,
+    AddressCard, AssetsEmpty, AssetsPanel, BatchImport, BatchRow, ContactPick,
+    DepositEntry as FlowDeposit, FactLead, FactRow, FeeRow, FeeTokenPick, FeeTokenRow, FilterChip,
+    HistoryGroup, NetworkRow, ReceiveList, ReceiveQr, RecipientCard, SendConfirm, SendForm,
+    SendPick, SendReceipt, StatusChip, StatusTone, TokenMark, address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -1210,6 +1211,96 @@ pub fn contact_addresses(view: &ContactsView) -> Vec<String> {
         .iter()
         .map(|contact| contact.address.clone())
         .collect()
+}
+
+/// DSD2cL — the batch importer. The parse, the duplicate check, the
+/// fiat→token conversion, the cap and the apply gate are the core's; this
+/// only words them. The rule that matters: when no source can price the
+/// chosen currency the rate is UNKNOWN and the core refuses to convert — the
+/// sheet shows that refusal instead of a number.
+#[must_use]
+pub fn batch_import(view: &BatchView, symbol: &str, s: &FlowStrings) -> BatchImport {
+    let code = view.fiat_code.as_str();
+    let rate_label = fill(&s.batch_rate_label, "sym", symbol);
+    let rate_value = match (view.rate_status, view.rate_input.is_empty()) {
+        (_, false) => format!("{rate_label} {} {code}", view.rate_input),
+        (BatchRateStatus::Loading, true) => s.batch_rate_loading.to_string(),
+        (BatchRateStatus::Ok, true) => rate_label.clone(),
+        (BatchRateStatus::Failed, true) => s.batch_rate_failed.to_string(),
+    };
+    let rate_hint = if view.rate_status == BatchRateStatus::Failed && view.rate_input.is_empty() {
+        fill(&fill(&s.batch_rate_hint, "code", code), "sym", symbol)
+    } else if !view.priced && view.unit == BatchUnit::Fiat {
+        s.batch_no_price.to_string()
+    } else {
+        String::new()
+    };
+    let paste = if let Some(name) = &view.file_name {
+        name.clone()
+    } else if view.raw_text.is_empty() {
+        s.batch_paste_placeholder.to_string()
+    } else {
+        view.raw_text.clone()
+    };
+    let rejected = match view.rejected {
+        0 => String::new(),
+        1 => fill(&s.batch_rejected_one, "count", "1"),
+        n => fill(&s.batch_rejected_other, "count", &n.to_string()),
+    };
+    BatchImport {
+        unit_fiat: fill(&s.batch_unit_fiat, "code", code).into(),
+        unit_token: fill(&s.batch_unit_token, "sym", symbol).into(),
+        fiat_on: view.unit == BatchUnit::Fiat,
+        paste: paste.into(),
+        import_file: if view.busy {
+            s.batch_reading.clone()
+        } else {
+            format!("{} (xlsx / csv / txt)", s.batch_import_file).into()
+        },
+        template: if view.template_saved {
+            s.batch_template_saved.clone()
+        } else {
+            s.batch_template.clone()
+        },
+        rate_section: s.batch_rate_section.clone(),
+        rate_value: rate_value.into(),
+        rate_hint: rate_hint.into(),
+        parsed: fill(&s.batch_parsed, "n", &view.recipient_count.to_string()).into(),
+        rows: view
+            .preview
+            .iter()
+            .map(|row| BatchRow {
+                ok: row.ok,
+                address: row
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| row.address.clone())
+                    .into(),
+                // The core converted it; an unconvertible row carries no token
+                // amount, and showing the raw fiat there would read as if it had.
+                conversion: if row.token_amount.is_empty() {
+                    row.raw_amount.clone().into()
+                } else {
+                    format!("{} {symbol}", row.token_amount).into()
+                },
+            })
+            .collect(),
+        rejected: rejected.into(),
+        notice: if view.over_balance {
+            Some(s.batch_over_balance.clone())
+        } else if view.over_cap {
+            Some(s.batch_over_cap.clone())
+        } else {
+            None
+        },
+        rate_reset: view.rate_edited.then(|| s.batch_rate_reset.clone()),
+        cta_enabled: view.can_apply,
+        cta: if view.recipient_count == 0 {
+            s.batch_apply_empty.clone()
+        } else {
+            fill(&s.batch_apply, "count", &view.recipient_count.to_string()).into()
+        },
+    }
 }
 
 /// Which panel the send journey is on. The core's `stage` decides the step;

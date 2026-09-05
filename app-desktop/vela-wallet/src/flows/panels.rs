@@ -87,6 +87,16 @@ pub struct PanelActions {
     pub pick_contact_rows: Vec<Click>,
     /// DSD2fL, live: one listener per fee-coin row, in the relay's order.
     pub fee_rows: Vec<Click>,
+    /// DSD2cL, live: the unit toggle's two halves (fiat, token).
+    pub batch_unit: Option<(Click, Click)>,
+    /// DSD2cL, live: the paste box reads the clipboard when clicked — the
+    /// desktop's paste, since the drawn box is not a text editor.
+    pub batch_paste: Option<Click>,
+    pub batch_pick_file: Option<Click>,
+    pub batch_template: Option<Click>,
+    /// DSD2cL, live: the rate, editable — the shown string IS the applied rate.
+    pub batch_rate_field: Option<AddressField>,
+    pub batch_rate_reset: Option<Click>,
 }
 
 /// An editable field the page owns the state of.
@@ -174,7 +184,7 @@ pub fn render(
             actions.pick_contact_rows,
         ),
         FlowBody::FeeToken(model) => fee_token(model, theme, icons, actions.fee_rows),
-        FlowBody::BatchImport(model) => batch_import(model, theme, icons),
+        FlowBody::BatchImport(model) => batch_import(model, theme, icons, window, actions),
         FlowBody::SendConfirm(model) => {
             send_confirm(model, theme, icons, identicons, actions.advance)
         }
@@ -1197,35 +1207,122 @@ fn fee_token(
     col
 }
 
-fn batch_import(model: &BatchImport, theme: &Theme, icons: &mut IconCache) -> Div {
-    let mut col = column()
-        .child(segmented_toggle(
+fn batch_import(
+    model: &BatchImport,
+    theme: &Theme,
+    icons: &mut IconCache,
+    window: &Window,
+    mut actions: PanelActions,
+) -> Div {
+    // Live: two clickable halves drawn exactly like the one segmented control;
+    // the mock keeps the component itself.
+    let toggle = match actions.batch_unit.take() {
+        Some((fiat, token)) => {
+            let seg = |label: SharedString, on: bool| {
+                let base = div()
+                    .py(px(8.))
+                    .rounded(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_center();
+                let base = if on { base.bg(theme.bg_raised) } else { base };
+                base.text_size(theme::text_row_sub())
+                    .text_color(if on { theme.fg_base } else { theme.fg_muted })
+                    .child(label)
+            };
+            div()
+                .flex()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded(px(12.))
+                .bg(theme.bg_sunken)
+                .child(
+                    clickable(
+                        "batch-unit-fiat",
+                        Some(fiat),
+                        seg(model.unit_fiat.clone(), model.fiat_on),
+                    )
+                    .flex_1(),
+                )
+                .child(
+                    clickable(
+                        "batch-unit-token",
+                        Some(token),
+                        seg(model.unit_token.clone(), !model.fiat_on),
+                    )
+                    .flex_1(),
+                )
+        }
+        None => segmented_toggle(
             theme,
             model.unit_fiat.clone(),
             model.unit_token.clone(),
-            true,
+            model.fiat_on,
+        ),
+    };
+    let mut col = column()
+        .child(toggle)
+        .child(clickable(
+            "batch-paste",
+            actions.batch_paste.take(),
+            mono_field(theme, None, model.paste.clone()),
         ))
-        .child(mono_field(theme, None, model.paste.clone()))
         .child(
             div()
                 .flex()
                 .justify_center()
                 .gap(px(8.))
-                .child(
+                .child(clickable(
+                    "batch-pick-file",
+                    actions.batch_pick_file.take(),
                     div()
                         .text_size(theme::text_row_sub())
                         .text_color(theme.fg_muted)
                         .child(model.import_file.clone()),
-                )
-                .child(
+                ))
+                .child(clickable(
+                    "batch-template",
+                    actions.batch_template.take(),
                     div()
                         .text_size(theme::text_row_sub())
                         .text_color(theme.fg_muted)
                         .child(model.template.clone()),
-                ),
+                )),
         )
-        .child(divider(theme))
-        .child(
+        .child(divider(theme));
+    col = match actions.batch_rate_field.take() {
+        Some(field) => {
+            let strings = crate::ui::NameFieldStrings {
+                label: model.rate_section.clone(),
+                placeholder: field.placeholder.clone(),
+                helper: SharedString::from(""),
+                too_long_hint: SharedString::from(""),
+            };
+            let mut row = div()
+                .flex()
+                .items_end()
+                .gap(px(8.))
+                .child(div().flex_1().child(crate::ui::text_field(
+                    "batch-rate",
+                    theme,
+                    &strings,
+                    &field.value,
+                    false,
+                    false,
+                    &field.focus,
+                    window,
+                    field.on_change,
+                )));
+            if let Some(reset) = &model.rate_reset {
+                row = row.child(clickable(
+                    "batch-rate-reset",
+                    actions.batch_rate_reset.take(),
+                    pill(theme, reset.clone()),
+                ));
+            }
+            col.child(row)
+        }
+        None => col.child(
             div()
                 .flex()
                 .items_center()
@@ -1242,7 +1339,9 @@ fn batch_import(model: &BatchImport, theme: &Theme, icons: &mut IconCache) -> Di
                         .text_color(theme.fg_base)
                         .child(model.rate_value.clone()),
                 ),
-        )
+        ),
+    };
+    col = col
         .child(
             div()
                 .text_size(theme::text_row_sub())
@@ -1292,16 +1391,30 @@ fn batch_import(model: &BatchImport, theme: &Theme, icons: &mut IconCache) -> Di
         );
     }
 
-    col.child(
+    col = col.child(
         div()
             .text_size(theme::text_row_sub())
             .text_color(theme.error_base)
             .child(model.rejected.clone()),
-    )
+    );
+    if let Some(notice) = &model.notice {
+        col = col.child(
+            div()
+                .text_size(theme::text_row_sub())
+                .text_color(theme.warning_base)
+                .child(notice.clone()),
+        );
+    }
     // Bad rows are marked and skipped, never silently dropped, and the CTA
     // counts only the good ones — a button that says "Import 3" and imports 2
-    // is how someone underpays a contractor.
-    .child(accent_button(theme, model.cta.clone()))
+    // is how someone underpays a contractor. A gate the core shut is drawn
+    // shut: dimmed, and it answers to nothing.
+    let cta = accent_button(theme, model.cta.clone());
+    if model.cta_enabled {
+        col.child(clickable("batch-apply", actions.advance.take(), cta))
+    } else {
+        col.child(cta.opacity(0.4))
+    }
 }
 
 fn send_confirm(

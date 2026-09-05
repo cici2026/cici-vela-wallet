@@ -386,6 +386,8 @@ pub struct BatchRow {
 pub struct BatchImport {
     pub unit_fiat: SharedString,
     pub unit_token: SharedString,
+    /// Which half of the unit toggle is on. The mock shows fiat.
+    pub fiat_on: bool,
     pub paste: SharedString,
     pub import_file: SharedString,
     pub template: SharedString,
@@ -395,6 +397,13 @@ pub struct BatchImport {
     pub parsed: SharedString,
     pub rows: Vec<BatchRow>,
     pub rejected: SharedString,
+    /// Live only: the over-cap / over-balance notice, beside `rejected`
+    /// (the two never hide each other).
+    pub notice: Option<SharedString>,
+    /// Live only: the "Auto" affordance once the rate was edited by hand.
+    pub rate_reset: Option<SharedString>,
+    /// The apply gate is the core's; the mock's button is always armed.
+    pub cta_enabled: bool,
     pub cta: SharedString,
 }
 
@@ -976,6 +985,7 @@ fn batch_import(s: &FlowStrings) -> BatchImport {
     BatchImport {
         unit_fiat: fill(&s.batch_unit_fiat, "code", "CNY").into(),
         unit_token: fill(&s.batch_unit_token, "sym", "USDT").into(),
+        fiat_on: true,
         paste: "0xabc… , 5000\n0xdef… , 8000".into(),
         import_file: format!("{} (xlsx / csv / txt)", s.batch_import_file).into(),
         template: s.batch_template.clone(),
@@ -1002,6 +1012,9 @@ fn batch_import(s: &FlowStrings) -> BatchImport {
         ],
         rejected: fill(&s.batch_rejected_one, "count", "1").into(),
         // Two of three rows parsed, so the button offers two — never three.
+        notice: None,
+        rate_reset: None,
+        cta_enabled: true,
         cta: fill(&s.batch_apply, "count", "2").into(),
     }
 }

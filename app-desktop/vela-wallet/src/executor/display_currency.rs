@@ -77,7 +77,7 @@ fn region_currency(language: &str) -> Option<String> {
 ///
 /// A non-positive rate is treated as no rate. A "rate" of zero prices every
 /// balance at nothing, which is a wrong answer wearing the shape of a right one.
-fn resolve_rate(code: &str) -> Option<f64> {
+pub(crate) fn resolve_rate(code: &str) -> Option<f64> {
     if code == "USD" {
         return Some(1.0);
     }

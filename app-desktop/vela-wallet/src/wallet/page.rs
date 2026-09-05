@@ -73,6 +73,7 @@ use crate::window_frame::{
 };
 use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
+use vela_core::app::batch_import::{BatchUnit, Event as BatchEvent};
 use vela_core::app::contacts::{
     ContactGroupInput, ContactSaveInput, Contacts, Event as ContactEvent,
 };
@@ -323,6 +324,8 @@ pub struct WalletPage {
     send_host: Option<gpui::Entity<SendHost>>,
     send_amount_focus: gpui::FocusHandle,
     send_recipient_focus: gpui::FocusHandle,
+    /// DSD2cL, live: the rate field's focus.
+    send_rate_focus: gpui::FocusHandle,
     /// DSD2fL is the page's own overlay: the core has no flag for it.
     send_fee_picker: bool,
     /// The native window, for the one platform whose passkey dialog is the
@@ -418,6 +421,9 @@ struct SendBindings {
     recipient: String,
     amount_focus: gpui::FocusHandle,
     recipient_focus: gpui::FocusHandle,
+    /// DSD2cL: the rate string the core holds, and the field's focus.
+    batch_rate: Option<String>,
+    rate_focus: gpui::FocusHandle,
 }
 
 impl Identity {
@@ -563,6 +569,7 @@ impl WalletPage {
             send_host: None,
             send_amount_focus: cx.focus_handle(),
             send_recipient_focus: cx.focus_handle(),
+            send_rate_focus: cx.focus_handle(),
             send_fee_picker: false,
             window_handle: crate::onboarding::native_window_handle(window),
             endpoint_focuses: Vec::new(),
@@ -2477,6 +2484,12 @@ impl WalletPage {
         } else {
             Vec::new()
         };
+        let batch_rate = self.send_host.as_ref().and_then(|host| {
+            host.read(cx)
+                .batch_view
+                .as_ref()
+                .map(|batch| batch.rate_input.clone())
+        });
         Some(SendBindings {
             host,
             token_ids: flows_live::send_token_ids(&view),
@@ -2486,6 +2499,8 @@ impl WalletPage {
             recipient: view.recipient.clone(),
             amount_focus: self.send_amount_focus.clone(),
             recipient_focus: self.send_recipient_focus.clone(),
+            batch_rate,
+            rate_focus: self.send_rate_focus.clone(),
         })
     }
 
@@ -2790,7 +2805,23 @@ impl WalletPage {
                 }
                 None => flow_fixtures::body(panel, &self.flow_strings),
             },
-            FlowPanel::Dr3 | FlowPanel::Ds1 | FlowPanel::Dt3b | FlowPanel::Dsd2c => {
+            // Spec 032 phase 5: the importer reads its own machine, which the
+            // host opens when the send machine shows the sheet.
+            FlowPanel::Dsd2c => {
+                let live = self.send_host.as_ref().and_then(|host| {
+                    let host = host.read(cx);
+                    let symbol = host.view.selected_token.as_ref()?.symbol.clone();
+                    let batch = host.batch_view.clone()?;
+                    Some((batch, symbol))
+                });
+                match live {
+                    Some((batch, symbol)) => flow_fixtures::FlowBody::BatchImport(
+                        flows_live::batch_import(&batch, &symbol, &self.flow_strings),
+                    ),
+                    None => flow_fixtures::body(panel, &self.flow_strings),
+                }
+            }
+            FlowPanel::Dr3 | FlowPanel::Ds1 | FlowPanel::Dt3b => {
                 flow_fixtures::body(panel, &self.flow_strings)
             }
         }
@@ -2856,6 +2887,12 @@ impl WalletPage {
             tap_max: None,
             pick_contact_rows: Vec::new(),
             fee_rows: Vec::new(),
+            batch_unit: None,
+            batch_paste: None,
+            batch_pick_file: None,
+            batch_template: None,
+            batch_rate_field: None,
+            batch_rate_reset: None,
         };
         // DR1L, live: one listener per network row, each remembering WHICH
         // chain it opened. The fixture keeps its single first-row listener,
@@ -3051,6 +3088,47 @@ impl WalletPage {
                             }))
                         })
                         .collect();
+                }
+                FlowPanel::Dsd2c => {
+                    let to_batch = |event: BatchEvent| -> panels::Click {
+                        let host = host.clone();
+                        Box::new(
+                            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                host.update(cx, |host, cx| host.batch_dispatch(event.clone(), cx));
+                            },
+                        )
+                    };
+                    actions.batch_unit = Some((
+                        to_batch(BatchEvent::SetUnit {
+                            unit: BatchUnit::Fiat,
+                        }),
+                        to_batch(BatchEvent::SetUnit {
+                            unit: BatchUnit::Token,
+                        }),
+                    ));
+                    actions.batch_paste = Some(Box::new({
+                        let host = host.clone();
+                        move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                            host.update(cx, |host, cx| host.paste_into_batch(cx));
+                        }
+                    }));
+                    actions.batch_pick_file = Some(to_batch(BatchEvent::PickFileRequested));
+                    actions.batch_template = Some(to_batch(BatchEvent::SaveTemplateRequested));
+                    actions.batch_rate_reset = Some(to_batch(BatchEvent::ResetRateToAuto));
+                    actions.batch_rate_field = Some(panels::AddressField {
+                        focus: send.rate_focus,
+                        value: send.batch_rate.unwrap_or_default(),
+                        placeholder: SharedString::from("0"),
+                        on_change: Box::new({
+                            let host = host.clone();
+                            move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                                host.update(cx, |host, cx| {
+                                    host.batch_dispatch(BatchEvent::EditRate { text }, cx);
+                                });
+                            }
+                        }),
+                    });
+                    actions.advance = Some(to_batch(BatchEvent::Apply));
                 }
                 FlowPanel::Dsd3 => actions.advance = Some(to_host(SendEvent::SlideConfirm)),
                 FlowPanel::Dsd4 => actions.advance = Some(to_host(SendEvent::Done)),

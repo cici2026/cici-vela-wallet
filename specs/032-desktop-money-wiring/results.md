@@ -327,10 +327,55 @@ NOT pulled: it spends dust, and that is the founder's call (SC-303).
 · 1 pre-existing warning · gallery sweep every state rendered ·
 `check-windows.sh` green · `rust/` untouched.
 
+## Phase 5 — paying many at once
+
+**What shipped**: the batch importer runs on its machine, and DSD2cL is
+the last send panel to stop being a picture.
+
+- **`executor/batch.rs`** — the three capabilities the core cannot have:
+  the USD→fiat rate through `display_currency::resolve_rate` (never a
+  display helper that ends in `?? 1` — a CNY payroll split at 1:1 is ~7× the
+  intended payout behind a green button); a picked table as text for
+  CSV/TSV/TXT (the core parses it) or as a cell matrix for a workbook
+  (`calamine` reads the first sheet, integral floats print as the person
+  typed them, short rows are padded so column positions hold); the file's
+  name for the sheet.
+- **`wallet/money.rs`** — the `batch_import` core is born when the send
+  machine raises `show_batch_import` and dropped when it falls, so a stale
+  paste or rate can never survive a re-open (the core is new). The two
+  dialogs are gpui's and awaited in the host with the file work off-thread;
+  `applied` seeds the send machine's split editor with exactly the core's
+  drafts and closes the sheet. The desktop's paste: the drawn box is not a
+  text editor and the custom field ignores ⌘V, so clicking the box reads the
+  clipboard.
+- **`flows/live.rs::batch_import`** — the rate line in its three states
+  (loading / a number / "enter one manually"), the no-price hint, the
+  preview rows (a converted row says the token amount, an unconverted one
+  its raw fiat), the rejected count (one / other plural keys), the over-cap
+  and over-balance notices side by side, the Apply CTA counting only the
+  rows that will be sent and drawn shut when the core shut it.
+- **`flows/panels.rs`** — the unit toggle's halves, the paste box, the
+  file and template affordances, the rate as a field with its Auto pill:
+  bindable props, fixtures untouched, the gallery pixel-unchanged.
+- **One new dependency**: `calamine` (pure Rust, no system library), read
+  only. The template the sheet saves is CSV text the core composes.
+
+**Headless, hermetic**: a pasted two-row USD table previews two rows, counts
+the address-less line as rejected, converts at the self-priced rate, and
+applies to exactly two drafts (`wallet::money::a_pasted_table_applies_to_its_rows`).
+
+**Recorded**: no workbook fixture is committed, so the xlsx path is covered
+by the cell codec and the not-a-zip refusal rather than a real sheet; the
+sweep mode (N tokens → one address) stays fixture, as on web.
+
+**Gates**: desktop **251 → 256** with the feature (252 without) · fmt clean
+· 1 pre-existing warning · gallery sweep every state rendered · `rust/`
+untouched.
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
-工作区 `/Volumes/data/production/vela-wallet-native`,四个 phase,四个提交。
+工作区 `/Volumes/data/production/vela-wallet-native`,五个 phase,六个提交。
 
 ## 一句话状态
 
@@ -338,7 +383,7 @@ NOT pulled: it spends dust, and that is the founder's call (SC-303).
 滑块已武装),`SlideConfirm` 藏在 `VELA_LIVE_SEND=1` 后面没拉——花真钱是创始人的决定
 (SC-303)。固定密钥集签名者在 vela-core(`dev-fixtures`),4337 UserOp 装配在 vela-core
 (`user_op.rs`,与 EIP-712 哈希器和 alloy ABI 编码器交叉验证),中继/链读/提交主干、
-fee_policy 与 tx_tracker 常驻、send 宿主与六块屏全接。
+fee_policy 与 tx_tracker 常驻、send 宿主与七块屏(含批量导入)全接。**A 组五个 phase 全完。**
 
 ## 立刻可跑的闸门
 
@@ -355,7 +400,7 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线:desktop **251 passed(feature on)/ 247(off)· 31 ignored**,vela-core **1,264**,
+基线:desktop **256 passed(feature on)/ 252(off)· 32 ignored**,vela-core **1,264**,
 fmt clean,gallery 36 态全渲染,1 个既有 warning(`BLE_CHANNEL_SUPPORTED`)。
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -377,7 +422,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 
 | # | 事 | 状态 |
 |---|---|---|
-| 1 | **Phase 5 批量导入**(`batch_import`,1,648 行,3 个操作) | 未开工。要文件对话框(`cx.prompt_for_paths` 现成)、CSV/TSV 文本路径(核心解析)、xlsx(要 `calamine` 之类,核心只收 `Matrix`)、`FetchUsdFiatRate`(`executor/display_currency.rs` 的汇率源可复用)、`SaveTemplateFile`(存文件对话框)。DSD2cL 画着,现在仍是 fixture |
+| 1 | ~~Phase 5 批量导入~~ | **已交付**(phase 5):`executor/batch.rs` + SendHost 里的 `CoreHost<BatchImport>`,DSD2cL 活了。没提交 xlsx 样张,真表格实机点一次 |
 | 2 | **B 组签名面板**(`clear_signing` `approval_guard` `sign_request`,9,362 行) | 图 DCS1–8 画好、33 个手写场景;`user_op::compute_safe_message_hash` 与 `build_eip1271_signature` 已备好。请求来源仍缺(C 组要 web 引擎) |
 | 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
 | 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
@@ -403,5 +448,6 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 ```bash
 grep -n 'fixtures::' src/wallet/page.rs
 ```
-本刀新增的 Dsd 臂全部走 `send_views(cx)` 门:有宿主读核心,没宿主画 mock;
-`FlowPanel::Dsd2c`(批量导入)是唯一**故意**还画 fixture 的已登录界面。
+本刀新增的 Dsd 臂全部走 `send_views(cx)` 门:有宿主读核心,没宿主画 mock;phase 5 后
+`FlowPanel::Dsd2c` 也读 `batch_view`。已登录能点到的界面里只剩 explore(等 web 引擎)
+和 DS1 扫码(等相机)在画 mock。

@@ -36,13 +36,16 @@ use std::sync::atomic::Ordering;
 use gpui::{Context, Entity, FocusHandle};
 
 use vela_core::app::Account;
+use vela_core::app::batch_import::{
+    BatchImport, BatchOperation, BatchShellResult, BatchToken, BatchView, Event as BatchEvent,
+};
 use vela_core::app::fee_policy::{
     Event as FeeEvent, FeeFailure, FeeOperation, FeePolicy, FeeShellResult, FeeTier, FeeView,
 };
 use vela_core::app::send::{
-    Event as SendEvent, Send, SendAccountRef, SendAlertKind, SendDisplayContext,
-    SendEstimateFailure, SendFeeOutcome, SendOpenParams, SendOperation, SendReceiptOutcome,
-    SendShellResult, SendView,
+    BATCH_MAX_RECIPIENTS, Event as SendEvent, Send, SendAccountRef, SendAlertKind,
+    SendDisplayContext, SendEstimateFailure, SendFeeOutcome, SendOpenParams, SendOperation,
+    SendReceiptOutcome, SendRecipientDraft, SendShellResult, SendView,
 };
 use vela_core::app::tx_tracker::{TrackStatus, TxTracker};
 
@@ -51,7 +54,7 @@ use crate::core_host::{CoreHost, Pending};
 use crate::ctap::usb::TouchRequest;
 use crate::executor::passkey::{CredentialChoice, PinRequest, WindowHandle};
 use crate::executor::send::{self as send_executor, SendAnswer, SendContext};
-use crate::executor::{chain, storage, tracker};
+use crate::executor::{batch, chain, storage, tracker};
 use crate::resident::{self, Answer, Machine, ResidentCore};
 
 /// How often the ceremony channel and the signing flag are polled while a
@@ -70,6 +73,14 @@ pub struct SendHost {
     pub view: SendView,
     fee: CoreHost<FeePolicy>,
     pub fee_view: FeeView,
+    /// The batch importer, born when the send machine shows its sheet and
+    /// gone when it hides it (spec 032 phase 5). Its own machine: the parse,
+    /// the conversion and the apply gate are its, and a stale paste or rate
+    /// from a previous open is never reused because the core is new.
+    batch: Option<CoreHost<BatchImport>>,
+    pub batch_view: Option<BatchView>,
+    /// The display currency the sheet reads fiat figures in by default.
+    display_code: String,
     ctx: SendContext,
     channel: Arc<CeremonyChannel>,
     window_handle: WindowHandle,
@@ -112,11 +123,15 @@ impl SendHost {
         let fee = CoreHost::<FeePolicy>::new();
         let view = send.view();
         let fee_view = fee.view();
+        let display_code = display.code.clone();
         let mut host = Self {
             send,
             view,
             fee,
             fee_view,
+            batch: None,
+            batch_view: None,
+            display_code,
             ctx,
             channel,
             window_handle,
@@ -183,8 +198,182 @@ impl SendHost {
             self.perform_send(effect, cx);
         }
         self.view = self.send.view();
+        self.sync_batch(cx);
         self.ensure_watcher(cx);
         cx.notify();
+    }
+
+    // -- the batch importer ----------------------------------------------------
+
+    /// The sheet follows the send machine's flag: open it with a fresh
+    /// machine when the flag rises, drop the machine when it falls.
+    fn sync_batch(&mut self, cx: &mut Context<Self>) {
+        if !self.view.show_batch_import {
+            if self.batch.is_some() {
+                self.batch = None;
+                self.batch_view = None;
+                cx.notify();
+            }
+            return;
+        }
+        if self.batch.is_some() {
+            return;
+        }
+        let Some(token) = self.view.selected_token.clone() else {
+            return;
+        };
+        self.batch = Some(CoreHost::<BatchImport>::new());
+        self.batch_dispatch(
+            BatchEvent::Open {
+                token: BatchToken {
+                    symbol: token.symbol,
+                    decimals: token.decimals,
+                    balance: token.balance,
+                    price_usd: token.price_usd,
+                },
+                currency_code: self.display_code.clone(),
+                max_recipients: u32::try_from(BATCH_MAX_RECIPIENTS).unwrap_or(u32::MAX),
+            },
+            cx,
+        );
+    }
+
+    pub fn batch_dispatch(&mut self, event: BatchEvent, cx: &mut Context<Self>) {
+        let Some(batch) = self.batch.as_mut() else {
+            return;
+        };
+        let pending = batch.dispatch(event);
+        self.pump_batch(pending, cx);
+    }
+
+    fn resolve_batch(&mut self, id: u64, result: BatchShellResult, cx: &mut Context<Self>) {
+        let Some(batch) = self.batch.as_mut() else {
+            return;
+        };
+        let pending = batch.resolve(id, result);
+        self.pump_batch(pending, cx);
+    }
+
+    /// The desktop's paste: the drawn box is not a text editor, so clicking
+    /// it reads the clipboard and hands the text to the core.
+    pub fn paste_into_batch(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        self.batch_dispatch(BatchEvent::SetRawText { text }, cx);
+    }
+
+    fn pump_batch(&mut self, pending: Vec<Pending<BatchOperation>>, cx: &mut Context<Self>) {
+        for effect in pending {
+            self.perform_batch(effect, cx);
+        }
+        let Some(batch) = self.batch.as_ref() else {
+            return;
+        };
+        let view = batch.view();
+        self.batch_view = Some(view.clone());
+        cx.notify();
+        if view.applied {
+            // The core parsed and priced them; the send machine seeds its
+            // split editor from exactly those rows, and nothing is recomputed
+            // here. Ids are the core's to assign (`rcpt_{n}`).
+            let recipients: Vec<SendRecipientDraft> = view
+                .recipients
+                .iter()
+                .map(|recipient| SendRecipientDraft {
+                    id: String::new(),
+                    address: recipient.address.clone(),
+                    amount: recipient.amount.clone(),
+                    name: recipient.name.clone(),
+                })
+                .collect();
+            self.batch = None;
+            self.batch_view = None;
+            if !recipients.is_empty() {
+                self.dispatch(SendEvent::SeedSplitRecipients { recipients }, cx);
+            }
+            self.dispatch(SendEvent::CloseBatchImport, cx);
+        }
+    }
+
+    /// The three operations. The rate is a blocking read; the two dialogs
+    /// belong to gpui and are awaited here, with the file work off-thread.
+    fn perform_batch(&mut self, effect: Pending<BatchOperation>, cx: &mut Context<Self>) {
+        let id = effect.id;
+        match effect.operation {
+            BatchOperation::FetchUsdFiatRate { code } => {
+                cx.spawn(async move |host, cx| {
+                    let rate = {
+                        let code = code.clone();
+                        cx.background_executor()
+                            .spawn(async move { batch::usd_fiat_rate(&code) })
+                            .await
+                    };
+                    host.update(cx, |host, cx| {
+                        host.resolve_batch(id, BatchShellResult::RateResolved { code, rate }, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            BatchOperation::PickFile => {
+                let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: None,
+                });
+                cx.spawn(async move |host, cx| {
+                    let picked = match paths.await {
+                        Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                        // Cancelled, or the platform declined: nothing happened.
+                        _ => None,
+                    };
+                    let result = match picked {
+                        None => BatchShellResult::FilePickCancelled,
+                        Some(path) => {
+                            let name = batch::file_name(&path);
+                            let content = cx
+                                .background_executor()
+                                .spawn(async move { batch::read_table(&path) })
+                                .await;
+                            match content {
+                                Some(content) => BatchShellResult::FilePicked { name, content },
+                                None => BatchShellResult::FilePickFailed,
+                            }
+                        }
+                    };
+                    host.update(cx, |host, cx| host.resolve_batch(id, result, cx))
+                        .ok();
+                })
+                .detach();
+            }
+            BatchOperation::SaveTemplateFile { name, contents, .. } => {
+                // The save dialog opens where a person keeps their files, not
+                // where this app keeps its state.
+                let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+                let target = cx.prompt_for_new_path(&directory, Some(&name));
+                cx.spawn(async move |host, cx| {
+                    let result = match target.await {
+                        Ok(Ok(Some(path))) => match std::fs::write(&path, contents) {
+                            Ok(()) => BatchShellResult::TemplateSaved,
+                            Err(error) => {
+                                eprintln!(
+                                    "[vela-wallet] batch template: {}: {error}",
+                                    path.display()
+                                );
+                                BatchShellResult::TemplateSaveFailed
+                            }
+                        },
+                        // A dismissed dialog keeps the plain label, silently.
+                        _ => BatchShellResult::TemplateSaveFailed,
+                    };
+                    host.update(cx, |host, cx| host.resolve_batch(id, result, cx))
+                        .ok();
+                })
+                .detach();
+            }
+        }
     }
 
     fn pump_fee(&mut self, pending: Vec<Pending<FeeOperation>>, cx: &mut Context<Self>) {
@@ -821,6 +1010,82 @@ mod tests {
                 "the relay accepted the operation"
             );
         });
+    }
+
+    /// The importer's machine through its executor, no dialogs: a pasted
+    /// two-row table in USD (which prices itself) previews, converts at the
+    /// mirrored rate, and applies to exactly those two drafts — the rows the
+    /// host seeds the split editor with.
+    #[test]
+    fn a_pasted_table_applies_to_its_rows() {
+        use vela_core::app::batch_import::{
+            BatchImport, BatchToken, BatchUnit, Event as BatchEvent,
+        };
+        let mut batch = CoreHost::<BatchImport>::new();
+        let mut pump = |batch: &mut CoreHost<BatchImport>, event: BatchEvent| {
+            let mut pending = batch.dispatch(event);
+            while let Some(effect) = pending.pop() {
+                let result = match effect.operation {
+                    BatchOperation::FetchUsdFiatRate { code } => BatchShellResult::RateResolved {
+                        rate: batch::usd_fiat_rate(&code),
+                        code,
+                    },
+                    // The dialogs are the host's; a test has no picker to open.
+                    BatchOperation::PickFile => BatchShellResult::FilePickCancelled,
+                    BatchOperation::SaveTemplateFile { .. } => BatchShellResult::TemplateSaved,
+                };
+                pending.extend(batch.resolve(effect.id, result));
+            }
+        };
+        pump(
+            &mut batch,
+            BatchEvent::Open {
+                token: BatchToken {
+                    symbol: "USDT".to_owned(),
+                    decimals: 6,
+                    balance: "20000".to_owned(),
+                    price_usd: Some(1.0),
+                },
+                currency_code: "USD".to_owned(),
+                max_recipients: 60,
+            },
+        );
+        let view = batch.view();
+        assert!(view.opened);
+        assert_eq!(view.unit, BatchUnit::Fiat);
+        assert_eq!(
+            view.rate_status,
+            vela_core::app::batch_import::BatchRateStatus::Ok
+        );
+        assert!(!view.rate_input.is_empty(), "USD prices itself: {view:?}");
+
+        pump(
+            &mut batch,
+            BatchEvent::SetRawText {
+                text: "0x031d7D57c99CAF891e1C250554691Fd12D84772b, 5000\n\
+                       0x58cd0ce6A27099220543b31710d7860d75Ba1d3d, 8000\n\
+                       not-an-address, 1\n"
+                    .to_owned(),
+            },
+        );
+        let view = batch.view();
+        // The line with no address is the PARSER's error, not a preview row;
+        // it is counted among the rejected so the person sees it was skipped.
+        assert_eq!(view.preview.len(), 2);
+        assert_eq!(view.recipient_count, 2);
+        assert_eq!(view.rejected, 1);
+        assert!(view.can_apply, "{view:?}");
+        assert_eq!(view.total_token, "13000");
+
+        pump(&mut batch, BatchEvent::Apply);
+        let view = batch.view();
+        assert!(view.applied);
+        assert_eq!(view.recipients.len(), 2);
+        assert_eq!(view.recipients[0].amount, "5000");
+        assert_eq!(
+            view.recipients[1].address.to_lowercase(),
+            "0x58cd0ce6a27099220543b31710d7860d75ba1d3d"
+        );
     }
 
     #[test]
