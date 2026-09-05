@@ -130,3 +130,59 @@ the feature adds, never changes) · desktop **222 → 225** with the feature,
 222 without · fmt clean both crates · `cargo clippy --workspace --all-targets
 --features vela-core/dev-fixtures -- -D warnings` clean · desktop clippy adds
 no warning in the touched files.
+
+## Phase 2 — the user operation, in Rust, cross-checked
+
+**What shipped**: `vela-core::user_op` (~640 lines, 21 tests), the pure half
+of `safe-transaction.ts` — the part every native tier would otherwise write by
+hand. Unconditional (no feature): it is money code the uniffi tiers will need.
+
+- **Calldata**: `executeUserOp` (CALL), the MultiSend batch (DELEGATECALL
+  into `MULTI_SEND`, packed `op ‖ to ‖ value ‖ len ‖ data`), the
+  lone-call-stays-single rule, `transfer(address,uint256)`, the in-band fee
+  leg in both shapes, `is_plain_transfer_call` by shape not size.
+- **InitCode**: `factory ‖ createProxyWithNonce(singleton, setupData, saltNonce)`
+  for one key (byte-identical to the historical single-owner setup, because
+  it takes `compute_safe_address`'s own `setup_data`/`salt_nonce`) and for a
+  founding set (`compute_safe_address_multi`'s).
+- **The signer rule**: `signer_address_for` — shared `WEBAUTHN_SIGNER` for
+  keys[0] or a one-key wallet, the key's own counterfactual proxy for a later
+  key, an error for a foreign credential (never mis-encoded).
+- **Hashes**: the SafeOp EIP-712 digest under the Safe4337Module domain; the
+  SafeMessage digest under the Safe's own domain (EIP-1271, group B's).
+- **The signature envelope**: `validity(12) ‖ r=verifier ‖ s=65 ‖ v=0 ‖
+  len ‖ abi.encode(bytes authData, string clientDataFields, uint r, uint s)`;
+  the EIP-1271 form without the window; the estimation dummy built by the
+  same encoder (37-byte authData, `r = s = 1`).
+- **Wire**: the v0.7 dictionary (`factory`/`factoryData` split, paymaster
+  quartet, Vela extension fields such as Tempo's `feeToken`).
+- **Padding and parsers**: `pad_gas_estimate` (×1.5, floors, +10,000);
+  `parse_existing_user_op_hash`; `parse_hex_quantity`.
+
+**Cross-checked, not just ported.** Three of the tests hold the hand-laid
+bytes against an INDEPENDENT implementation already in this crate:
+- `calculate_safe_op_hash` == `eip712::hash_typed_data` over the SafeOp
+  typed data (13 fields, two of them `uint48`), and moves with the chain id;
+- `compute_safe_message_hash` == the same hasher over `SafeMessage(bytes)`;
+- the WebAuthn payload == `alloy_dyn_abi`'s `abi_encode_params` of
+  `(bytes, string, uint256, uint256)` with a 37-byte and a 51-byte tail.
+All three agreed on the first run. The web vector suite's assertions
+(selectors, word layout, DELEGATECALL bit, factory prefix, signer rule,
+parsers) are ported alongside.
+
+**Two divergences, both stricter**, recorded in the module note: `r`/`s`
+must be exactly 32 bytes; a non-hex quantity is a typed error rather than a
+thrown `SyntaxError`.
+
+**Not ported here, on purpose**: everything that reads the chain or the
+relay — `isDeployed`, the nonce and its 10 s cache, the gas signals, the
+quote, the estimate, the submit and its 3× retry, the receipt wait. Those are
+the desktop executor's (phase 3), in `sendUserOpInBand`'s order. Tempo's
+variant (`feeToken` extension + splitter) is a later phase. `encode_erc20_transfer`
+now exists twice — `fee_policy`'s hex-string form behind `crux`, this
+byte form without — because FR-308 forbids touching the machine file; the
+next machine change should make `fee_policy` call this one.
+
+**Gates**: vela-core **1,243 → 1,264** · fmt clean · `cargo clippy
+--workspace --all-targets --features vela-core/dev-fixtures -- -D warnings`
+clean · `rust/pkg-web` rebuilt (see the commit for the byte count).

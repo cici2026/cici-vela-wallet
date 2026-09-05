@@ -48,6 +48,10 @@ pub mod registry_metadata;
 pub mod registry_proof;
 pub mod safe;
 pub mod types;
+/// The Safe ERC-4337 user operation — calldata, initCode, the SafeOp hash,
+/// the WebAuthn signature envelope, the v0.7 wire shape. Pure assembly; the
+/// reads and the submit belong to a shell. See `specs/032-desktop-money-wiring/`.
+pub mod user_op;
 pub mod webauthn;
 
 pub use abi::AbiValue;
