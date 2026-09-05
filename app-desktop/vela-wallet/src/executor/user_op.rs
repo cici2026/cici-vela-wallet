@@ -216,10 +216,6 @@ pub fn simulate_gas(
 /// The whole sign→submit orchestration (`sendBatchCalls`): Tempo pays gas
 /// in its stablecoin, every other chain settles in band. Answers the
 /// accepted operation's hash, or why there is none.
-#[allow(
-    dead_code,
-    reason = "the send host's entry point, wired by the next phase"
-)]
 pub fn submit(
     chain_id: u32,
     safe: &str,

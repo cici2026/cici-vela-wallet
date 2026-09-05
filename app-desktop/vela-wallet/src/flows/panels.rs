@@ -74,6 +74,19 @@ pub struct PanelActions {
     pub address_field: Option<AddressField>,
     /// DT3L, live: "add to wallet" on the found card.
     pub add_to_wallet: Option<Click>,
+    /// DSD1L, live: one listener per token row. Empty falls back to
+    /// `open_send_form`, which the fixture gives to its first row.
+    pub open_send_rows: Vec<Click>,
+    /// DSD2L, live: the amount and the recipient, editable. `None` draws the
+    /// mock's static figures.
+    pub amount_field: Option<AddressField>,
+    pub recipient_field: Option<AddressField>,
+    /// DSD2L, live: the Max chip.
+    pub tap_max: Option<Click>,
+    /// DSD2eL, live: one listener per contact row, in the book's order.
+    pub pick_contact_rows: Vec<Click>,
+    /// DSD2fL, live: one listener per fee-coin row, in the relay's order.
+    pub fee_rows: Vec<Click>,
 }
 
 /// An editable field the page owns the state of.
@@ -144,12 +157,23 @@ pub fn render(
             actions.address_field,
             actions.add_to_wallet,
         ),
-        FlowBody::SendPick(model) => send_pick(model, theme, icons, actions.open_send_form),
-        FlowBody::SendForm(model) => send_form(model, theme, icons, identicons, actions),
-        FlowBody::ContactPick(model) => {
-            contact_pick(model, theme, icons, identicons, actions.open_scan)
-        }
-        FlowBody::FeeToken(model) => fee_token(model, theme, icons),
+        FlowBody::SendPick(model) => send_pick(
+            model,
+            theme,
+            icons,
+            actions.open_send_form,
+            actions.open_send_rows,
+        ),
+        FlowBody::SendForm(model) => send_form(model, theme, icons, identicons, window, actions),
+        FlowBody::ContactPick(model) => contact_pick(
+            model,
+            theme,
+            icons,
+            identicons,
+            actions.open_scan,
+            actions.pick_contact_rows,
+        ),
+        FlowBody::FeeToken(model) => fee_token(model, theme, icons, actions.fee_rows),
         FlowBody::BatchImport(model) => batch_import(model, theme, icons),
         FlowBody::SendConfirm(model) => {
             send_confirm(model, theme, icons, identicons, actions.advance)
@@ -662,11 +686,29 @@ fn add_token(
     ))
 }
 
+/// A bordered pill for a secondary action — the recipient-row actions and,
+/// live, the Max chip and the address-book affordance beside a typed field.
+fn pill(theme: &Theme, label: SharedString) -> Div {
+    div()
+        .px(px(12.))
+        .py(px(6.))
+        .rounded(px(999.))
+        .border_1()
+        .border_color(theme.border_card)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(theme::text_row_sub())
+        .text_color(theme.fg_base)
+        .child(label)
+}
+
 fn send_pick(
     model: &SendPick,
     theme: &Theme,
     icons: &mut IconCache,
     mut open_form: Option<Click>,
+    per_row: Vec<Click>,
 ) -> Div {
     let (dots, pill_label) = &model.pill;
     let mut col = column()
@@ -680,8 +722,13 @@ fn send_pick(
                 .child(filter_chips(theme, &model.filters))
                 .child(network_pill(theme, icons, dots, pill_label.clone()).flex_none()),
         );
+    // A live panel binds one listener per row; the fixture binds one and
+    // gives it to the first, because every mock row opens the same drawing.
+    let mut per_row = per_row.into_iter();
     for (i, row) in model.rows.iter().enumerate() {
-        let action = if i == 0 { open_form.take() } else { None };
+        let action = per_row
+            .next()
+            .or_else(|| if i == 0 { open_form.take() } else { None });
         col = col.child(clickable(
             ElementId::from(("flow-send-row", i)),
             action,
@@ -706,6 +753,7 @@ fn send_form(
     theme: &Theme,
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
+    window: &Window,
     mut actions: PanelActions,
 ) -> Div {
     let (mark, symbol, detail, max) = &model.token;
@@ -717,7 +765,45 @@ fn send_form(
         max.clone(),
     ));
 
-    if let Some((value, fiat)) = &model.amount {
+    if let Some(field) = actions.amount_field.take() {
+        // Live: a real field, labelled with the coin it counts in, the fiat
+        // line under it and the Max chip beside it. The value is the CORE's
+        // — it validates every keystroke — so the field holds no copy.
+        let strings = crate::ui::NameFieldStrings {
+            label: model.token.1.clone(),
+            placeholder: field.placeholder.clone(),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+        let block = column().child(crate::ui::text_field(
+            "send-amount",
+            theme,
+            &strings,
+            &field.value,
+            false,
+            false,
+            &field.focus,
+            window,
+            field.on_change,
+        ));
+        let mut under = div().flex().items_center().justify_between().gap(px(8.));
+        if let Some((_, fiat)) = &model.amount {
+            under = under.child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_muted)
+                    .child(fiat.clone()),
+            );
+        }
+        if let Some(max) = &model.token.3 {
+            under = under.child(clickable(
+                "send-max",
+                actions.tap_max.take(),
+                pill(theme, max.clone()),
+            ));
+        }
+        col = col.child(block.child(under));
+    } else if let Some((value, fiat)) = &model.amount {
         col = col.child(
             div()
                 .flex()
@@ -740,7 +826,39 @@ fn send_form(
         );
     }
 
-    if let Some((label, lines, seed)) = &model.recipient {
+    if let Some(field) = actions.recipient_field.take() {
+        // Live: the address is typed (or pasted), and the book is one pill
+        // away. The label carries the core's trust line once it has one.
+        let label = model
+            .recipient
+            .as_ref()
+            .map(|(label, _, _)| label.clone())
+            .unwrap_or_default();
+        let strings = crate::ui::NameFieldStrings {
+            label,
+            placeholder: field.placeholder.clone(),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+        col = col.child(crate::ui::text_field(
+            "send-recipient",
+            theme,
+            &strings,
+            &field.value,
+            false,
+            false,
+            &field.focus,
+            window,
+            field.on_change,
+        ));
+        if let Some(pick) = &model.pick_contacts {
+            col = col.child(div().flex().child(clickable(
+                "flow-pick-contacts",
+                actions.open_contact_pick.take(),
+                pill(theme, pick.clone()),
+            )));
+        }
+    } else if let Some((label, lines, seed)) = &model.recipient {
         col = col
             .child(
                 div()
@@ -850,7 +968,9 @@ fn contact_pick(
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
     open_scan: Option<Click>,
+    per_row: Vec<Click>,
 ) -> Div {
+    let mut per_row = per_row.into_iter();
     let mut col = column()
         .child(flow_search(theme, icons, model.search_placeholder.clone()))
         // Scan sits above the saved people: most sends go to someone already in
@@ -936,7 +1056,7 @@ fn contact_pick(
             .child(model.contacts_title.clone()),
     );
 
-    for contact in &model.contacts {
+    for (i, contact) in model.contacts.iter().enumerate() {
         let mut name_row = div().flex().items_center().gap(px(6.)).child(
             div()
                 .text_size(theme::text_row_title())
@@ -954,45 +1074,54 @@ fn contact_pick(
                     .child(group.clone()),
             );
         }
-        col = col.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .py(px(8.))
-                .child(crate::wallet::components::identicon_avatar(
-                    identicons,
-                    contact.seed.as_ref(),
-                    28.,
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex()
-                        .flex_col()
-                        .child(name_row)
-                        .child(
-                            div()
-                                .font_family(theme::font_mono())
-                                .text_size(theme::text_mono_address())
-                                .text_color(theme.fg_subtle)
-                                .child(contact.address.clone()),
-                        ),
-                )
-                .child(icon_img(
-                    icons,
-                    Icon::ChevronRight,
-                    false,
-                    theme.fg_subtle,
-                    12.,
-                )),
-        );
+        let entry = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .py(px(8.))
+            .child(crate::wallet::components::identicon_avatar(
+                identicons,
+                contact.seed.as_ref(),
+                28.,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex()
+                    .flex_col()
+                    .child(name_row)
+                    .child(
+                        div()
+                            .font_family(theme::font_mono())
+                            .text_size(theme::text_mono_address())
+                            .text_color(theme.fg_subtle)
+                            .child(contact.address.clone()),
+                    ),
+            )
+            .child(icon_img(
+                icons,
+                Icon::ChevronRight,
+                false,
+                theme.fg_subtle,
+                12.,
+            ));
+        col = col.child(clickable(
+            ElementId::from(("flow-contact", i)),
+            per_row.next(),
+            entry,
+        ));
     }
     col
 }
 
-fn fee_token(model: &FeeTokenPick, theme: &Theme, icons: &mut IconCache) -> Div {
+fn fee_token(
+    model: &FeeTokenPick,
+    theme: &Theme,
+    icons: &mut IconCache,
+    per_row: Vec<Click>,
+) -> Div {
+    let mut per_row = per_row.into_iter();
     let mut col = column().child(
         // Paying gas in a stablecoin is unusual enough that someone seeing USDC
         // offered as a fee token will wonder whether they are being asked to
@@ -1003,7 +1132,7 @@ fn fee_token(model: &FeeTokenPick, theme: &Theme, icons: &mut IconCache) -> Div 
             .text_color(theme.fg_muted)
             .child(model.hint.clone()),
     );
-    for row in &model.rows {
+    for (i, row) in model.rows.iter().enumerate() {
         let shell = div()
             .flex()
             .items_center()
@@ -1059,7 +1188,11 @@ fn fee_token(model: &FeeTokenPick, theme: &Theme, icons: &mut IconCache) -> Div 
         if row.selected {
             entry = entry.child(icon_img(icons, Icon::Check, false, theme.accent, 14.));
         }
-        col = col.child(entry);
+        col = col.child(clickable(
+            ElementId::from(("flow-fee-row", i)),
+            per_row.next(),
+            entry,
+        ));
     }
     col
 }

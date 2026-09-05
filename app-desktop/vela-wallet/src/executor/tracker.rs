@@ -271,7 +271,6 @@ static TICKING: AtomicBool = AtomicBool::new(false);
 
 /// Boot the tracker and keep it ticking for the life of the process. Called
 /// by the wallet page on every sign-in; a second call is a no-op.
-#[allow(dead_code, reason = "booted by the wallet page in the next phase")]
 pub fn start(cx: &mut App) {
     let _ = resident::resident::<TxTracker>(cx);
     if TICKING.swap(true, Ordering::SeqCst) {
@@ -291,10 +290,6 @@ pub fn start(cx: &mut App) {
 
 /// A user operation was accepted: hand it to the tracker, whose patches
 /// will find the records the send path already persisted.
-#[allow(
-    dead_code,
-    reason = "the send host's `TrackSubmitted` hand-off, wired by the next phase"
-)]
 pub fn submitted(user_op_hash: String, record_ids: Vec<String>, chain_id: u32, cx: &mut App) {
     resident::resident::<TxTracker>(cx).update(cx, |resident, cx| {
         resident.dispatch(

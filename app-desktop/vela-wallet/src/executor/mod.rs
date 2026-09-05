@@ -51,6 +51,7 @@ pub mod proxy;
 pub mod receive_watch;
 pub mod registry;
 pub mod relay;
+pub mod send;
 pub mod storage;
 pub mod token_trust;
 pub mod tracker;

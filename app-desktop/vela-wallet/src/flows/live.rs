@@ -28,10 +28,16 @@ use vela_core::l10n::datetime::{Civil, TimePreset, format_time};
 use vela_core::l10n::number::{NumberPreset, format_token_amount};
 
 use crate::flows::FlowStrings;
+use crate::wallet::fill;
+use vela_core::app::contacts::ContactsView;
+use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView, FeeView};
+use vela_core::app::send::{SendReceiptStatus, SendStage, SendToken, SendTxStatus, SendView};
+
 use crate::flows::fixtures::{
-    AddressCard, AssetsEmpty, AssetsPanel, DepositEntry as FlowDeposit, FactLead, FactRow,
-    HistoryGroup, NetworkRow, ReceiveList, ReceiveQr, StatusChip, StatusTone, TokenMark,
-    address_lines,
+    AddressCard, AssetsEmpty, AssetsPanel, ContactPick, DepositEntry as FlowDeposit, FactLead,
+    FactRow, FeeRow, FeeTokenPick, FeeTokenRow, FilterChip, HistoryGroup, NetworkRow, ReceiveList,
+    ReceiveQr, RecipientCard, SendConfirm, SendForm, SendPick, SendReceipt, StatusChip, StatusTone,
+    TokenMark, address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -632,6 +638,601 @@ fn shorten(address: &str) -> String {
         return address.to_owned();
     }
     format!("{}…{}", &address[..6], &address[address.len() - 4..])
+}
+
+// ---------------------------------------------------------------------------
+// Send (DSD1L–DSD4L, DSD2eL, DSD2fL) — spec 032
+// ---------------------------------------------------------------------------
+
+/// Everything the send screens are filled from. The amounts are the core's
+/// strings, the gate is `can_continue` / `can_confirm`, the stage is `stage`,
+/// and the words are the corpus's. Nothing here decides anything; what this
+/// half owns is wording and formatting — which template a value goes into,
+/// and how a fee reads.
+pub struct SendInputs<'a> {
+    pub send: &'a SendView,
+    pub fee: &'a FeeView,
+    pub s: &'a FlowStrings,
+    pub wallet: &'a crate::wallet::WalletStrings,
+    pub locale: &'a str,
+    pub identity_name: &'a str,
+    pub identity_address: &'a str,
+}
+
+fn native_symbol(chain_id: u32) -> String {
+    BUILTIN_CHAINS
+        .iter()
+        .find(|chain| chain.chain_id == chain_id)
+        .map_or_else(String::new, |chain| chain.native_symbol.to_owned())
+}
+
+fn trimmed(amount: f64) -> String {
+    format_token_amount(amount, NumberPreset::CommaDot, false)
+}
+
+fn fiat_line(usd: Option<f64>, locale: &str) -> Option<SharedString> {
+    usd.map(|usd| {
+        SharedString::from(format!(
+            "≈ {}",
+            format_fiat(usd, "USD", "$", locale, FiatOptions::default())
+        ))
+    })
+}
+
+/// A settled estimate as one line: the fee coin's amount. `—` while there is
+/// no quote — the drawn row shows the label alone rather than a number nobody
+/// has agreed to yet.
+fn fee_text(fee: Option<&FeeEstimateView>) -> String {
+    let Some(fee) = fee else {
+        return "—".to_owned();
+    };
+    match &fee.fee_asset {
+        FeeAssetView::Erc20 {
+            amount,
+            decimals,
+            symbol,
+            ..
+        } => {
+            let units = amount.parse::<f64>().unwrap_or(0.0) / 10f64.powi(*decimals as i32);
+            format!("{} {}", trimmed(units), symbol.clone().unwrap_or_default())
+                .trim()
+                .to_owned()
+        }
+        FeeAssetView::Native => {
+            let coin = fee.total_wei.parse::<f64>().unwrap_or(0.0) / 1e18;
+            format!("{} {}", trimmed(coin), native_symbol(fee.chain_id))
+                .trim()
+                .to_owned()
+        }
+    }
+}
+
+/// The fee coin's symbol, for the row's mark.
+fn fee_symbol(send: &SendView, fee: &FeeView) -> (String, u32) {
+    let quote = send.fee.as_ref().or(fee.fee.as_ref());
+    let chain_id = send
+        .selected_token
+        .as_ref()
+        .map(|token| token.chain_id)
+        .or_else(|| quote.map(|quote| quote.chain_id))
+        .unwrap_or(1);
+    let symbol = match quote.map(|quote| &quote.fee_asset) {
+        Some(FeeAssetView::Erc20 { symbol, .. }) => {
+            symbol.clone().unwrap_or_else(|| native_symbol(chain_id))
+        }
+        _ => native_symbol(chain_id),
+    };
+    (symbol, chain_id)
+}
+
+fn send_fee_row(i: &SendInputs<'_>) -> FeeRow {
+    let (symbol, chain_id) = fee_symbol(i.send, i.fee);
+    let quote = i.send.fee.as_ref().or(i.fee.fee.as_ref());
+    FeeRow {
+        label: i.s.network_fee.clone(),
+        mark: TokenMark {
+            ticker: symbol.into(),
+            badge: tint(chain_id),
+        },
+        value: if i.send.fee_busy || i.fee.busy {
+            i.s.fee_pending.clone()
+        } else {
+            SharedString::from(fee_text(quote))
+        },
+    }
+}
+
+/// A token row for the picker: the balance the core carries, priced by it too.
+fn send_token_row(
+    token: &SendToken,
+    wallet: &crate::wallet::WalletStrings,
+    locale: &str,
+) -> AssetRowModel {
+    let amount = token.balance.parse::<f64>().unwrap_or(0.0);
+    AssetRowModel {
+        ticker: SharedString::from(token.symbol.clone()),
+        chain: SharedString::from(chain_name(token.chain_id)),
+        badge: tint(token.chain_id),
+        balance: SharedString::from(trimmed(amount)),
+        fiat: match token.price_usd {
+            None => Fiat::NoPrice(wallet.no_price.clone()),
+            Some(price) => Fiat::Value(SharedString::from(format_fiat(
+                amount * price,
+                "USD",
+                "$",
+                locale,
+                FiatOptions::default(),
+            ))),
+        },
+    }
+}
+
+/// DSD1L — which token to send. The rows are the core's holdings.
+#[must_use]
+pub fn send_pick(i: &SendInputs<'_>) -> SendPick {
+    let s = i.s;
+    let mut dots = Vec::new();
+    for token in &i.send.tokens {
+        let colour = tint(token.chain_id);
+        if !dots.contains(&colour) {
+            dots.push(colour);
+        }
+        if dots.len() == 3 {
+            break;
+        }
+    }
+    let chip = |label: &SharedString, selected: bool| FilterChip {
+        label: label.clone(),
+        selected,
+    };
+    SendPick {
+        search_placeholder: s.send_search.clone(),
+        pill: (dots, s.pill_all.clone()),
+        filters: vec![
+            chip(&s.filter_all, true),
+            chip(&s.filter_stable, false),
+            chip(&s.filter_gas, false),
+            chip(&s.filter_other, false),
+        ],
+        rows: i
+            .send
+            .tokens
+            .iter()
+            .map(|token| send_token_row(token, i.wallet, i.locale))
+            .collect(),
+        cta: s.multi_send_title.clone(),
+    }
+}
+
+/// The token ids in the order `send_pick` draws them — the page binds one
+/// listener per row from this, so row N selects token N.
+#[must_use]
+pub fn send_token_ids(view: &SendView) -> Vec<String> {
+    view.tokens.iter().map(SendToken::id).collect()
+}
+
+/// The recipient's trust line: a name the core resolved, else the
+/// first-interaction tell (the one that matters for a poisoned look-alike).
+fn recipient_note(send: &SendView, s: &FlowStrings) -> Option<SharedString> {
+    if let Some(identity) = &send.recipient_identity
+        && let Some(name) = &identity.name
+    {
+        return Some(SharedString::from(match &identity.source {
+            Some(source) => format!("{name} · {source}"),
+            None => name.clone(),
+        }));
+    }
+    send.recipient_risk
+        .as_ref()
+        .is_some_and(|risk| risk.first_time == Some(true))
+        .then(|| s.first_time_tag.clone())
+}
+
+/// DSD2L / DSD2bL — recipient and amount.
+#[must_use]
+pub fn send_form(i: &SendInputs<'_>) -> SendForm {
+    let (send, s) = (i.send, i.s);
+    let token = send.selected_token.as_ref();
+    let symbol = token.map(|t| t.symbol.clone()).unwrap_or_default();
+    let usd = token
+        .and_then(|t| t.price_usd)
+        .map(|price| send.token_amount.parse::<f64>().unwrap_or(0.0) * price);
+    let split = send.split_mode;
+
+    let header = match token {
+        Some(token) => (
+            TokenMark {
+                ticker: token.symbol.clone().into(),
+                badge: tint(token.chain_id),
+            },
+            SharedString::from(token.symbol.clone()),
+            SharedString::from(format!(
+                "{} · {}",
+                chain_name(token.chain_id),
+                fill(
+                    &s.balance_label,
+                    "amount",
+                    &trimmed(token.balance.parse::<f64>().unwrap_or(0.0))
+                )
+            )),
+            (!split).then(|| s.max.clone()),
+        ),
+        None => (
+            TokenMark {
+                ticker: "—".into(),
+                badge: tint(1),
+            },
+            SharedString::from("—"),
+            SharedString::default(),
+            None,
+        ),
+    };
+
+    let recipient = (!split).then(|| {
+        let lines = if send.recipient.is_empty() {
+            (String::new(), String::new())
+        } else {
+            address_lines(&send.recipient)
+        };
+        (
+            recipient_note(send, s).unwrap_or_else(|| s.recipient_label.clone()),
+            (lines.0.into(), lines.1.into()),
+            SharedString::from(send.recipient.clone()),
+        )
+    });
+
+    SendForm {
+        token: header,
+        amount: (!split).then(|| {
+            (
+                SharedString::from(if send.amount.is_empty() {
+                    "0".to_owned()
+                } else {
+                    send.amount.clone()
+                }),
+                fiat_line(usd, i.locale).unwrap_or_default(),
+            )
+        }),
+        recipient,
+        add_recipient: (!split).then(|| s.add_recipient.clone()),
+        recipients: if split {
+            send.recipients
+                .iter()
+                .enumerate()
+                .map(|(index, draft)| RecipientCard {
+                    ordinal: fill(&s.recipient_n, "n", &(index + 1).to_string()).into(),
+                    name: draft
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| shorten(&draft.address))
+                        .into(),
+                    seed: draft.address.clone().into(),
+                    amount: format!("{} {symbol}", draft.amount)
+                        .trim()
+                        .to_owned()
+                        .into(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        },
+        recipient_actions: if split {
+            vec![
+                s.add_recipient.clone(),
+                s.from_contacts.clone(),
+                s.batch_import.clone(),
+            ]
+        } else {
+            Vec::new()
+        },
+        summary: split.then(|| {
+            (
+                format!(
+                    "{} · {}",
+                    s.split_total,
+                    fill(
+                        &s.recipient_count,
+                        "count",
+                        &send.recipients.len().to_string()
+                    )
+                )
+                .into(),
+                format!("{} {symbol}", send.token_amount)
+                    .trim()
+                    .to_owned()
+                    .into(),
+            )
+        }),
+        pick_contacts: (!split).then(|| s.from_contacts.clone()),
+        fee: send_fee_row(i),
+        cta: s.continue_btn.clone(),
+    }
+}
+
+/// The two error wordings the core chooses between.
+fn tx_error_text(send: &SendView, s: &FlowStrings) -> Option<SharedString> {
+    send.tx_error.map(|key| match key {
+        vela_core::app::send::SendTxErrorKey::Generic => s.tx_error_generic.clone(),
+        vela_core::app::send::SendTxErrorKey::BundlerFund => s.tx_error_bundler_fund.clone(),
+    })
+}
+
+/// DSD3L — what is about to be signed.
+#[must_use]
+pub fn send_confirm(i: &SendInputs<'_>) -> SendConfirm {
+    let (send, s) = (i.send, i.s);
+    let token = send.selected_token.as_ref();
+    let symbol = token.map(|t| t.symbol.clone()).unwrap_or_default();
+    let chain_id = token.map_or(1, |t| t.chain_id);
+    let usd = token
+        .and_then(|t| t.price_usd)
+        .map(|price| send.confirm_amount.parse::<f64>().unwrap_or(0.0) * price);
+    let to_name = send
+        .recipient_identity
+        .as_ref()
+        .and_then(|identity| identity.name.clone());
+    let facts = vec![
+        FactRow {
+            label: s.from_label.clone(),
+            value: i.identity_name.to_owned().into(),
+            lead: FactLead::Identicon(i.identity_address.to_owned().into()),
+            mono: false,
+            copyable: false,
+        },
+        FactRow {
+            label: s.to_label.clone(),
+            value: to_name
+                .clone()
+                .unwrap_or_else(|| shorten(&send.recipient))
+                .into(),
+            lead: FactLead::Identicon(send.recipient.clone().into()),
+            mono: to_name.is_none(),
+            copyable: false,
+        },
+        FactRow {
+            label: s.detail_chain.clone(),
+            value: chain_name(chain_id).into(),
+            lead: FactLead::Token(TokenMark {
+                ticker: native_symbol(chain_id).into(),
+                badge: tint(chain_id),
+            }),
+            mono: false,
+            copyable: false,
+        },
+        FactRow {
+            label: s.est_fee.clone(),
+            value: if send.fee_busy || i.fee.busy {
+                s.fee_pending.clone()
+            } else {
+                fee_text(send.fee.as_ref().or(i.fee.fee.as_ref())).into()
+            },
+            lead: FactLead::None,
+            mono: false,
+            copyable: false,
+        },
+    ];
+    // The subline is the fiat figure — or, when the last attempt failed, the
+    // sentence the core chose for it; the confirm page has no other slot.
+    let subline = tx_error_text(send, s)
+        .or_else(|| fiat_line(usd, i.locale))
+        .unwrap_or_default();
+    SendConfirm {
+        amount: format!("{} {symbol}", send.confirm_amount)
+            .trim()
+            .to_owned()
+            .into(),
+        subline,
+        facts,
+        breakdown: Vec::new(),
+        cta: s.confirm_send.clone(),
+    }
+}
+
+/// DSD4L — the receipt.
+///
+/// The stage comes from `receipt.status`, not from `tx_status`: the core flips
+/// `tx_status` to `confirmed` the moment the signature is a fact, while the
+/// receipt's own status is what tracks the chain. Reading the wrong one would
+/// say the money had arrived while it was still in the air.
+#[must_use]
+pub fn send_receipt(i: &SendInputs<'_>) -> SendReceipt {
+    let (send, s) = (i.send, i.s);
+    let token = send.selected_token.as_ref();
+    let symbol = token.map(|t| t.symbol.clone()).unwrap_or_default();
+    let chain_id = token.map_or(1, |t| t.chain_id);
+    let to = send
+        .recipient_identity
+        .as_ref()
+        .and_then(|identity| identity.name.clone())
+        .unwrap_or_else(|| shorten(&send.recipient));
+    let status = send.receipt.as_ref().map(|receipt| receipt.status);
+
+    if status == Some(SendReceiptStatus::Failed) || send.tx_status == SendTxStatus::Error {
+        return SendReceipt {
+            title: tx_error_text(send, s).unwrap_or_else(|| s.tx_error_generic.clone()),
+            captions: Vec::new(),
+            hash: None,
+            cta: s.done.clone(),
+        };
+    }
+    if status == Some(SendReceiptStatus::Confirmed) {
+        let amount = send
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.amount.clone())
+            .filter(|amount| !amount.is_empty())
+            .unwrap_or_else(|| send.confirm_amount.clone());
+        return SendReceipt {
+            title: fill(
+                &fill(&s.tx_confirmed_title, "amount", &amount),
+                "symbol",
+                &symbol,
+            )
+            .into(),
+            captions: vec![
+                format!(
+                    "{} · {}",
+                    fill(&s.to_name, "name", &to),
+                    chain_name(chain_id)
+                )
+                .into(),
+            ],
+            hash: send
+                .tx_hash
+                .clone()
+                .map(|hash| (s.tx_hash.clone(), hash.into())),
+            cta: s.done.clone(),
+        };
+    }
+    if status == Some(SendReceiptStatus::Submitted) {
+        return SendReceipt {
+            title: s.tx_submitted_title.clone(),
+            captions: vec![s.tx_waiting_confirm.clone()],
+            hash: send
+                .tx_hash
+                .clone()
+                .or_else(|| send.user_op_hash.clone())
+                .map(|hash| (s.tx_hash.clone(), hash.into())),
+            cta: s.tx_close_background.clone(),
+        };
+    }
+    // Signing or submitting: nothing has been accepted yet.
+    SendReceipt {
+        title: s.tx_submitting.clone(),
+        captions: vec![s.tx_preparing.clone(), s.tx_background_hint.clone()],
+        hash: None,
+        cta: s.tx_close_background.clone(),
+    }
+}
+
+/// DSD2fL — the fee coin sheet. Every row the relay published, including the
+/// ones that cannot pay: which is spendable is `insufficient`, the core's
+/// verdict, and hiding a row here would be a second filter beside it.
+#[must_use]
+pub fn fee_token(i: &SendInputs<'_>) -> FeeTokenPick {
+    let chain_id = i.send.selected_token.as_ref().map_or(1, |t| t.chain_id);
+    FeeTokenPick {
+        hint: i.s.fee_token_hint.clone(),
+        estimate_label: i.s.fee_token_estimate.clone(),
+        rows: i
+            .fee
+            .options
+            .iter()
+            .map(|option| {
+                let scale = 10f64.powi(option.decimals as i32);
+                let balance = option.balance.parse::<f64>().unwrap_or(0.0) / scale;
+                FeeTokenRow {
+                    mark: TokenMark {
+                        ticker: option.symbol.clone().into(),
+                        badge: tint(chain_id),
+                    },
+                    symbol: option.symbol.clone().into(),
+                    balance: fill(&i.s.balance_label, "amount", &trimmed(balance)).into(),
+                    fee: match &option.amount {
+                        None => "—".into(),
+                        Some(amount) => format!(
+                            "~{} {}",
+                            trimmed(amount.parse::<f64>().unwrap_or(0.0) / scale),
+                            option.symbol
+                        )
+                        .into(),
+                    },
+                    selected: option.selected,
+                }
+            })
+            .collect(),
+    }
+}
+
+/// The fee coins in the order `fee_token` draws them (`None` = native).
+#[must_use]
+pub fn fee_token_contracts(fee: &FeeView) -> Vec<Option<String>> {
+    fee.options
+        .iter()
+        .map(|option| option.contract.clone())
+        .collect()
+}
+
+/// DSD2eL — the address book, as a picker. The rows are the core's book in
+/// its order; the group a person is filed under is the first that lists them.
+#[must_use]
+pub fn contact_pick(view: &ContactsView, s: &FlowStrings) -> ContactPick {
+    let group_of = |address: &str| {
+        view.groups
+            .iter()
+            .find(|group| {
+                group
+                    .members
+                    .iter()
+                    .any(|member| member.address.eq_ignore_ascii_case(address))
+            })
+            .map(|group| SharedString::from(group.name.clone()))
+    };
+    ContactPick {
+        search_placeholder: s.pick_contact_search.clone(),
+        scan_row: s.scan_to_fill.clone(),
+        groups_title: s.contacts_groups.clone(),
+        groups: view
+            .groups
+            .iter()
+            .map(|group| {
+                (
+                    SharedString::from(group.name.clone()),
+                    fill(&s.group_members, "count", &group.members.len().to_string()).into(),
+                    tint(100),
+                    tint(1),
+                )
+            })
+            .collect(),
+        contacts_title: s.contacts_title.clone(),
+        contacts: view
+            .contacts
+            .iter()
+            .map(|contact| crate::flows::fixtures::ContactEntry {
+                name: contact
+                    .name
+                    .clone()
+                    .or_else(|| contact.resolved_name.clone())
+                    .unwrap_or_else(|| shorten(&contact.address))
+                    .into(),
+                group: group_of(&contact.address),
+                address: shorten(&contact.address).into(),
+                seed: contact.address.clone().into(),
+            })
+            .collect(),
+    }
+}
+
+/// The addresses in the order `contact_pick` draws them.
+#[must_use]
+pub fn contact_addresses(view: &ContactsView) -> Vec<String> {
+    view.contacts
+        .iter()
+        .map(|contact| contact.address.clone())
+        .collect()
+}
+
+/// Which panel the send journey is on. The core's `stage` decides the step;
+/// the two pickers are the core's flags; the fee sheet is the page's own.
+#[must_use]
+pub fn send_panel(view: &SendView, fee_picker_open: bool) -> crate::flows::FlowPanel {
+    use crate::flows::FlowPanel;
+    if view.show_contact_picker {
+        return FlowPanel::Dsd2e;
+    }
+    if view.show_batch_import {
+        return FlowPanel::Dsd2c;
+    }
+    if fee_picker_open {
+        return FlowPanel::Dsd2f;
+    }
+    match view.stage {
+        SendStage::SelectToken | SendStage::LockError | SendStage::LockResolving => FlowPanel::Dsd1,
+        SendStage::EnterDetails if view.split_mode => FlowPanel::Dsd2b,
+        SendStage::EnterDetails => FlowPanel::Dsd2,
+        SendStage::Confirm => FlowPanel::Dsd3,
+        SendStage::Receipt => FlowPanel::Dsd4,
+    }
 }
 
 #[cfg(test)]

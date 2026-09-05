@@ -861,7 +861,7 @@ impl OnboardingPage {
 /// that dialog take focus and sit in the right place. gpui implements
 /// `raw_window_handle`, so this is a read rather than the 1×1 helper window a
 /// library without a window of its own has to invent.
-fn native_window_handle(window: &Window) -> WindowHandle {
+pub(crate) fn native_window_handle(window: &Window) -> WindowHandle {
     #[cfg(windows)]
     {
         use raw_window_handle::{HasWindowHandle, RawWindowHandle};

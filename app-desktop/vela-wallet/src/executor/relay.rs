@@ -273,10 +273,6 @@ fn native_symbol(chain_id: u32) -> String {
 /// `GET /v1/treasury/{chain}` (`probeTreasury`), four ways: 404 is the relay
 /// saying it does not serve this chain; any other non-2xx, a timeout or a
 /// malformed body is TRANSIENT and answers `Unknown` — never `Uncovered`.
-#[allow(
-    dead_code,
-    reason = "the send executor's `ProbeTreasury`, wired by the next phase"
-)]
 pub fn probe_treasury(chain_id: u32) -> SendTreasuryProbe {
     let data = match rest_get(chain_id, &format!("/v1/treasury/{chain_id}")) {
         Rest::Ok(data) => data,

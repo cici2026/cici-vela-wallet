@@ -185,7 +185,7 @@ next machine change should make `fee_policy` call this one.
 
 **Gates**: vela-core **1,243 → 1,264** · fmt clean · `cargo clippy
 --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings`
-clean · `rust/pkg-web` rebuilt (see the commit for the byte count).
+clean · `rust/pkg-web` rebuilt — the wasm is **3,630,664 bytes again**: the module is dead code to the wasm crate, so only the source fingerprint moved.
 
 ## Phase 3 — the relay, the reads, and the submit spine
 
@@ -257,3 +257,72 @@ send host of the next phase to carry a quote the core displayed.
 
 **Gates**: desktop **225 → 244** with the feature (240 without) · fmt clean
 · warnings 1 (pre-existing) · `rust/` untouched this phase.
+
+## Phase 4 — the send host, and the screens
+
+**What shipped**: the desktop sends. Every drawn send panel (DSD1L–DSD4L,
+DSD2eL, DSD2fL) now reads the `send` and `fee_policy` machines when a person
+is signed in, and every affordance on them is an EVENT to the core.
+
+- **`executor/send.rs`** — the nineteen operations as the web executor has
+  them: the token fetch through `balances::fetch_all` (chains read AFTER the
+  fetch), the credential lookup, the record persistence in one write, the
+  identity waterfall, the recipient risk (`eth_getCode` with the EIP-7702
+  delegated-EOA exemption + the prior-interaction read), and `SubmitUserOp`
+  as the sign closure over `passkey::assert` — routed on the first key's
+  transports (a phone over caBLE, a platform vault, or a security key asked
+  DISCOVERABLY so any founding key on it can answer). Four arms are the
+  screen's and say so.
+- **`wallet/money.rs`** — `SendHost`: one `send` + one `fee_policy` per
+  journey, born with the flow and dropped with it; `EstimateFee` answered by
+  the live fee session (deployment read → `QuoteRequested` → settle on the
+  same view the card renders); the card's re-quotes mirrored back as
+  `FeeBusyChanged` / `FeeUpdated`; `TrackSubmitted` handed to the resident
+  tracker whose view the host observes and forwards as the three
+  `ReceiptUpdate` verdicts; the ceremony channel's poll for PIN / pick /
+  touch / QR; `SigningStarted` raised by the sign closure and dispatched
+  once.
+- **`flows/live.rs`** — `send_pick`, `send_form`, `send_confirm`,
+  `send_receipt`, `fee_token`, `contact_pick`, and `send_panel` (the core's
+  stage → the panel; the two pickers are the core's flags, the fee sheet is
+  the page's). The receipt reads `receipt.status`, never `tx_status`.
+- **`flows/panels.rs`** — the drawn gaps closed as props: per-row listeners
+  on the token, contact and fee-coin rows; editable amount and recipient
+  fields (the value is the core's; the field holds no copy); the Max chip;
+  an address-book pill beside the typed recipient. Fixtures untouched; the
+  gallery renders every state exactly as before (sweep: 36, every state
+  rendered).
+- **`wallet/page.rs`** — the flow stack is REBUILT from the core's stage on
+  every frame of a live send; the chevron asks the core to step back; the
+  column's close and the core's `Close` both drop the machines; the cable's
+  three dialogs and the core's alert render over the column; the tracker
+  starts on sign-in. Eight new strings resolve from keys the corpus already
+  had (`send.txConfirmedTitle`, `send.txSubmitting`, …).
+
+**Live, headless, for the golden Safe** (`wallet::money` — a synchronous
+pump of both machines, the same performs as the host minus the thread):
+
+| step | the core said |
+|---|---|
+| `Open` | 1 holding: **xDAI on Gnosis, 0.75897** — the number 031's hero showed |
+| `SelectToken` → `SetRecipient` (fixture #2) → `SetAmount "0.001"` | `can_continue: true`, no warning |
+| `Continue` | stage **Confirm**; fee **0.010 xDAI** native, quoted (not a local fallback), recipient `0xee2c…f0dd`; treasury none; no alert; **`can_confirm: true`** |
+
+That fee is the very figure 026's web sweep signed on the same Safe
+(0.001 sent + 0.010 in-band). The slide is behind `VELA_LIVE_SEND=1` and was
+NOT pulled: it spends dust, and that is the founder's call (SC-303).
+
+**Recorded, not done**:
+- `AddNetwork` from a locked request answers the ported `catch` (`Error`);
+  the settings wizard is the desktop's add-network journey and the send flow
+  has no `/pay` link to arrive from yet.
+- `SimulateCalls` answers no simulation — no engine on the desktop.
+- The batch importer (DSD2cL) still draws the fixture; its machine is phase 5.
+- The scan row (DS1) stays a picture; no camera pipeline.
+- A real USB / caBLE / vault signature for a send has not been run on a
+  device this session; the parallel space's signer went through the same
+  `passkey::assert` seam login uses.
+
+**Gates**: desktop **244 → 251** with the feature (247 without) · fmt clean
+· 1 pre-existing warning · gallery sweep every state rendered ·
+`check-windows.sh` green · `rust/` untouched.

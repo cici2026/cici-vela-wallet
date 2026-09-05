@@ -336,6 +336,18 @@ pub struct FlowStrings {
     pub tx_close_background: SharedString,
     pub tx_hash: SharedString,
     pub done: SharedString,
+
+    // Send · live (spec 032). The receipt's other three states, the two error
+    // wordings the core chooses between, and the recipient trust line.
+    /// Template carrying `{{amount}}` / `{{symbol}}`.
+    pub tx_confirmed_title: String,
+    pub tx_submitting: SharedString,
+    pub tx_preparing: SharedString,
+    pub tx_background_hint: SharedString,
+    pub tx_error_generic: SharedString,
+    pub tx_error_bundler_fund: SharedString,
+    pub first_time_tag: SharedString,
+    pub fee_pending: SharedString,
 }
 
 impl FlowStrings {
@@ -476,6 +488,15 @@ impl FlowStrings {
             tx_close_background: s("send.txCloseBackground"),
             tx_hash: s("componentsTx.receipt.txHash"),
             done: s("componentsTx.receipt.done"),
+
+            tx_confirmed_title: raw("send.txConfirmedTitle"),
+            tx_submitting: s("send.txSubmitting"),
+            tx_preparing: s("send.txPreparingBiometric"),
+            tx_background_hint: s("send.txBackgroundHint"),
+            tx_error_generic: s("send.txErrorGeneric"),
+            tx_error_bundler_fund: s("send.txErrorBundlerFund"),
+            first_time_tag: s("componentsUi.signing.firstTimeTag"),
+            fee_pending: SharedString::from("…"),
         }
     }
 }

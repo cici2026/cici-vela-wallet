@@ -9,6 +9,7 @@
 //! the sidebar, third column, Esc handling and gallery chrome already exist,
 //! so contacts is a `Section` switch on the content column (research.md D1).
 
+use gpui::AppContext as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, Context, Div, ElementId, FocusHandle, InteractiveElement as _, IntoElement,
@@ -46,6 +47,8 @@ const WIZARD_SEARCH_FOCUS: usize = ENDPOINT_FOCUS_COUNT + 3;
 const WIZARD_RPC_FOCUS: usize = WIZARD_SEARCH_FOCUS + 1;
 /// Two handles per network card, past everything above.
 const OVERRIDE_FOCUS_BASE: usize = WIZARD_RPC_FOCUS + 1;
+use crate::executor::passkey::WindowHandle;
+use crate::hardware;
 use crate::settings::components::{
     CalloutTone, callout, chain_mark, check_list, danger_card, dropdown_menu, dropdown_trigger,
     editable_url_field, form_row, key_value_row, network_row, rpc_banner, segmented,
@@ -64,6 +67,7 @@ use crate::theme::{
     THIRD_PANEL_W, Theme, ThemeMode, WALLET_PAD_TOP, WALLET_PAD_X,
 };
 use crate::wallet::live as wallet_live;
+use crate::wallet::money::{self, SendHost};
 use crate::window_frame::{
     CAPTION_H, frame_tiling, owns_titlebar, round_to_frame, titlebar, window_frame,
 };
@@ -73,10 +77,12 @@ use vela_core::app::contacts::{
     ContactGroupInput, ContactSaveInput, Contacts, Event as ContactEvent,
 };
 use vela_core::app::display_currency::DisplayCurrency;
+use vela_core::app::fee_policy::Event as FeeEvent;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
 use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
 use vela_core::app::payment_request::PaymentRequest;
 use vela_core::app::receive_watch::ReceiveWatch;
+use vela_core::app::send::{Event as SendEvent, SendAlertKind, SendDisplayContext, SendOpenParams};
 
 use super::WalletStrings;
 use super::components::{
@@ -311,6 +317,21 @@ pub struct WalletPage {
     /// validates the address and clears the found cards on every keystroke, so
     /// a second copy here would be a second opinion about what was typed.
     add_token_focus: gpui::FocusHandle,
+    /// Spec 032: the send journey's two machines, alive while the flow is
+    /// open and discarded with it — a second send starts from a fresh
+    /// machine, never a resumed one.
+    send_host: Option<gpui::Entity<SendHost>>,
+    send_amount_focus: gpui::FocusHandle,
+    send_recipient_focus: gpui::FocusHandle,
+    /// DSD2fL is the page's own overlay: the core has no flag for it.
+    send_fee_picker: bool,
+    /// The native window, for the one platform whose passkey dialog is the
+    /// OS's; captured once, because a ceremony runs off the main thread and
+    /// cannot reach `Window` from there.
+    window_handle: WindowHandle,
+    /// The resolved locale, kept for the cable's own dialogs (touch / PIN /
+    /// pick), which take it whole.
+    loc: Loc,
     /// One per editable settings field, made on first use.
     endpoint_focuses: Vec<gpui::FocusHandle>,
     /// Which network card's probes have been asked for, so opening one asks
@@ -386,6 +407,19 @@ pub struct Identity {
     pub address: String,
 }
 
+/// What the live send panels bind to (spec 032): the host to dispatch to,
+/// and the per-row facts each listener carries.
+struct SendBindings {
+    host: gpui::Entity<SendHost>,
+    token_ids: Vec<String>,
+    contact_addresses: Vec<String>,
+    fee_contracts: Vec<Option<String>>,
+    amount: String,
+    recipient: String,
+    amount_focus: gpui::FocusHandle,
+    recipient_focus: gpui::FocusHandle,
+}
+
 impl Identity {
     /// `0x14fB1f…D1eA5c` — the same middle-truncation every other client uses.
     fn display(&self) -> SharedString {
@@ -424,6 +458,9 @@ impl WalletPage {
         };
         let mut page = Self::with_section(section, false, window, cx);
         page.identity = Some(identity);
+        // Money in flight outlives every screen: the tracker runs from the
+        // moment somebody is signed in, not from the moment a send opens.
+        crate::executor::tracker::start(cx);
         // `VELA_SETTINGS_STATE` picks WHICH panel, on this path too. Without it
         // `VELA_SECTION=settings` can only ever open 账户, so the live 网络 and
         // 本地化 surfaces would still have no way to be screenshotted.
@@ -523,6 +560,11 @@ impl WalletPage {
             tx_detail: None,
             asset_detail: None,
             add_token_focus: cx.focus_handle(),
+            send_host: None,
+            send_amount_focus: cx.focus_handle(),
+            send_recipient_focus: cx.focus_handle(),
+            send_fee_picker: false,
+            window_handle: crate::onboarding::native_window_handle(window),
             endpoint_focuses: Vec::new(),
             settings_probed_network: None,
             settings_fix_chain: None,
@@ -555,6 +597,7 @@ impl WalletPage {
             icons: IconCache::default(),
             identicons: IdenticonCache::default(),
             focus_handle,
+            loc,
         }
     }
 
@@ -1268,7 +1311,7 @@ impl WalletPage {
                     self.strings.action_receive.clone(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.enter_flow(FlowEntry::Receive);
+                    this.enter_flow(FlowEntry::Receive, cx);
                     cx.notify();
                 })),
             )
@@ -1281,7 +1324,7 @@ impl WalletPage {
                     self.strings.action_send.clone(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.enter_flow(FlowEntry::Send);
+                    this.enter_flow(FlowEntry::Send, cx);
                     cx.notify();
                 })),
             )
@@ -1294,7 +1337,7 @@ impl WalletPage {
                     self.strings.action_scan.clone(),
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.enter_flow(FlowEntry::Scan);
+                    this.enter_flow(FlowEntry::Scan, cx);
                     cx.notify();
                 })),
             );
@@ -1317,7 +1360,7 @@ impl WalletPage {
                         let id = home_tx_ids.get(i).cloned();
                         cx.listener(move |this, _, _, cx| {
                             this.tx_detail = id.clone();
-                            this.enter_flow(FlowEntry::TxDetail);
+                            this.enter_flow(FlowEntry::TxDetail, cx);
                             cx.notify();
                         })
                     }),
@@ -1356,7 +1399,7 @@ impl WalletPage {
                     .cursor_pointer()
                     .child(section_header(theme, &mut self.icons, s_activity, s_all))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.enter_flow(FlowEntry::Activity);
+                        this.enter_flow(FlowEntry::Activity, cx);
                         cx.notify();
                     })),
             )
@@ -1374,7 +1417,7 @@ impl WalletPage {
                             .cursor_pointer()
                             .child(title)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.enter_flow(FlowEntry::Assets);
+                                this.enter_flow(FlowEntry::Assets, cx);
                                 cx.notify();
                             })),
                     )
@@ -1384,7 +1427,7 @@ impl WalletPage {
                             .cursor_pointer()
                             .child(action)
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.enter_flow(FlowEntry::AddToken);
+                                this.enter_flow(FlowEntry::AddToken, cx);
                                 cx.notify();
                             })),
                     )
@@ -2313,11 +2356,7 @@ impl WalletPage {
                 16.,
             ))
             .on_click(cx.listener(|this, _, _, cx| {
-                this.flows.pop();
-                if this.flows.is_empty() {
-                    this.panel = PanelId::None;
-                }
-                cx.notify();
+                this.flow_back(cx);
             }));
         self.panel_scaffold_with(
             theme,
@@ -2330,9 +2369,289 @@ impl WalletPage {
     }
 
     /// Open a flow from the wallet home (spec 021 SC-002).
-    fn enter_flow(&mut self, entry: FlowEntry) {
+    fn enter_flow(&mut self, entry: FlowEntry, cx: &mut Context<Self>) {
         self.flows = FlowPanel::entry(entry);
         self.panel = PanelId::Flow;
+        self.send_host = None;
+        self.send_fee_picker = false;
+        if entry == FlowEntry::Send && self.identity.is_some() {
+            self.open_send(SendOpenParams::default(), cx);
+        }
+    }
+
+    /// Spec 032: the send journey's machines, born with the flow. The mocks
+    /// keep drawing when there is no account to send from.
+    fn open_send(&mut self, params: SendOpenParams, cx: &mut Context<Self>) {
+        let Some(account) = money::active_account() else {
+            return;
+        };
+        let display = self.send_display(cx);
+        let window_handle = self.window_handle;
+        let host = cx.new(|cx| SendHost::open(account, params, display, window_handle, cx));
+        cx.observe(&host, |_, _, cx| cx.notify()).detach();
+        self.send_host = Some(host);
+    }
+
+    /// The display currency, as the send machine's context: its code, the
+    /// USD rate the core committed (`None` = unpriceable, never 1), and the
+    /// fiat input's precision.
+    fn send_display(&self, cx: &mut Context<Self>) -> SendDisplayContext {
+        let view = resident::resident::<DisplayCurrency>(cx).read(cx).view();
+        SendDisplayContext {
+            fiat_decimals: if matches!(view.code.as_str(), "JPY" | "KRW" | "VND" | "IDR") {
+                0
+            } else {
+                2
+            },
+            rate: view.rate,
+            code: view.code,
+        }
+    }
+
+    /// The live send machines' views, when the flow is live.
+    fn send_views(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<(
+        vela_core::app::send::SendView,
+        vela_core::app::fee_policy::FeeView,
+    )> {
+        let host = self.send_host.as_ref()?.read(cx);
+        Some((host.view.clone(), host.fee_view.clone()))
+    }
+
+    /// Which panel the flow column shows. For a live send the CORE's stage
+    /// decides, and the stack is rebuilt from it so the chevron stays truthful;
+    /// a core that asked to leave takes the machines with it.
+    fn sync_send_flow(&mut self, cx: &mut Context<Self>) -> Option<FlowPanel> {
+        if let Some(host) = self.send_host.clone() {
+            if host.read(cx).closed {
+                self.send_host = None;
+                self.send_fee_picker = false;
+                self.flows.clear();
+                self.panel = PanelId::None;
+                return None;
+            }
+            let panel = flows_live::send_panel(&host.read(cx).view, self.send_fee_picker);
+            self.flows = panel.stack();
+            return Some(panel);
+        }
+        self.flows.last().copied()
+    }
+
+    /// Back, one level. A live send asks the CORE to step back — it owns the
+    /// step — and the page only closes what it opened itself.
+    fn flow_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(host) = self.send_host.clone() {
+            match self.flows.last().copied() {
+                Some(FlowPanel::Dsd2e) => host.update(cx, |host, cx| {
+                    host.dispatch(SendEvent::CloseContactPicker, cx);
+                }),
+                Some(FlowPanel::Dsd2c) => host.update(cx, |host, cx| {
+                    host.dispatch(SendEvent::CloseBatchImport, cx);
+                }),
+                Some(FlowPanel::Dsd2f) => self.send_fee_picker = false,
+                Some(FlowPanel::Dsd1) | None => {
+                    self.send_host = None;
+                    self.flows.clear();
+                    self.panel = PanelId::None;
+                }
+                Some(_) => host.update(cx, |host, cx| host.dispatch(SendEvent::Back, cx)),
+            }
+            cx.notify();
+            return;
+        }
+        self.flows.pop();
+        if self.flows.is_empty() {
+            self.panel = PanelId::None;
+        }
+        cx.notify();
+    }
+
+    /// What the live send panels bind to.
+    fn send_bindings(&self, panel: FlowPanel, cx: &mut Context<Self>) -> Option<SendBindings> {
+        let host = self.send_host.clone()?;
+        let (view, fee) = self.send_views(cx)?;
+        let contact_addresses = if panel == FlowPanel::Dsd2e {
+            flows_live::contact_addresses(&resident::resident::<Contacts>(cx).read(cx).view())
+        } else {
+            Vec::new()
+        };
+        Some(SendBindings {
+            host,
+            token_ids: flows_live::send_token_ids(&view),
+            contact_addresses,
+            fee_contracts: flows_live::fee_token_contracts(&fee),
+            amount: view.amount.clone(),
+            recipient: view.recipient.clone(),
+            amount_focus: self.send_amount_focus.clone(),
+            recipient_focus: self.send_recipient_focus.clone(),
+        })
+    }
+
+    /// The cable's dialogs and the core's alert, over the send flow.
+    fn send_prompts(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let host = self.send_host.clone()?;
+        let (touch, qr, pin, pick, alert) = {
+            let read = host.read(cx);
+            (
+                read.touch_waiting(),
+                read.qr_showing(),
+                read.pin
+                    .as_ref()
+                    .map(|pin| (pin.request.clone(), pin.value.clone(), pin.focus.clone())),
+                read.pick.clone(),
+                read.alert.clone(),
+            )
+        };
+        let scrim = |id: &'static str| {
+            div()
+                .id(id)
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.backdrop)
+        };
+        if let Some((request, value, focus)) = pin {
+            let on_change = {
+                let host = host.clone();
+                move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                    host.update(cx, |host, cx| {
+                        if let Some(pin) = host.pin.as_mut() {
+                            pin.value = text;
+                        }
+                        cx.notify();
+                    });
+                }
+            };
+            let on_confirm = {
+                let host = host.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    let value = host.read(cx).pin.as_ref().map(|pin| pin.value.clone());
+                    host.update(cx, |host, cx| host.answer_pin(value, cx));
+                }
+            };
+            let on_cancel = {
+                let host = host.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    host.update(cx, |host, cx| host.answer_pin(None, cx));
+                }
+            };
+            let card = hardware::pin_card(
+                theme, &self.loc, &request, &value, &focus, window, on_change, on_confirm,
+                on_cancel,
+            );
+            return Some(scrim("send-pin-scrim").child(card).into_any_element());
+        }
+        if let Some(choices) = pick {
+            let on_pick = {
+                let host = host.clone();
+                move |index: &usize, _: &mut Window, cx: &mut gpui::App| {
+                    let index = *index;
+                    host.update(cx, |host, cx| host.answer_choice(Some(index), cx));
+                }
+            };
+            let on_cancel = {
+                let host = host.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    host.update(cx, |host, cx| host.answer_choice(None, cx));
+                }
+            };
+            let card = hardware::pick_card(theme, &self.loc, &choices, on_pick, on_cancel);
+            return Some(scrim("send-pick-scrim").child(card).into_any_element());
+        }
+        if let Some(payload) = qr {
+            let card = hardware::qr_card(theme, &self.loc, &payload);
+            return Some(scrim("send-qr-scrim").child(card).into_any_element());
+        }
+        if let Some(waiting) = touch {
+            let card = hardware::touch_card(theme, &self.loc, &waiting);
+            return Some(scrim("send-touch-scrim").child(card).into_any_element());
+        }
+        if let Some(kind) = alert {
+            let (title, body) = self.send_alert_words(&kind);
+            let mut card = div()
+                .w(px(400.))
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .p(px(24.))
+                .rounded(px(20.))
+                .bg(theme.bg_raised)
+                .border_1()
+                .border_color(theme.border_card)
+                .child(
+                    div()
+                        .text_size(theme::text_panel_title())
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_color(theme.fg_base)
+                        .child(title),
+                );
+            if let Some(body) = body {
+                card = card.child(
+                    div()
+                        .text_size(theme::text_row_sub())
+                        .text_color(theme.fg_muted)
+                        .child(body),
+                );
+            }
+            let dismiss = {
+                let host = host.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                    host.update(cx, |host, cx| host.acknowledge_alert(cx));
+                }
+            };
+            card = card.child(
+                div()
+                    .id("send-alert-ok")
+                    .h(px(CONTACTS_BUTTON_H))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .bg(theme.accent)
+                    .text_size(theme::text_row_title())
+                    .text_color(theme.fg_inverse)
+                    .child(self.flow_strings.done.clone())
+                    .on_click(dismiss),
+            );
+            return Some(scrim("send-alert-scrim").child(card).into_any_element());
+        }
+        None
+    }
+
+    /// The core's alert kind, in the corpus's words. Semantic keys only —
+    /// the core never hands over a sentence.
+    fn send_alert_words(&self, kind: &SendAlertKind) -> (SharedString, Option<SharedString>) {
+        let t = |key: &str| self.loc.t(key);
+        match kind {
+            SendAlertKind::InvalidAddress => (
+                t("send.alertInvalidAddressTitle"),
+                Some(t("send.alertInvalidAddressBody")),
+            ),
+            SendAlertKind::InvalidAmount => (
+                t("send.alertInvalidAmountTitle"),
+                Some(t("send.alertInvalidAmountBody")),
+            ),
+            SendAlertKind::InsufficientBalance { .. } | SendAlertKind::SplitOverBalance => (
+                t("send.alertInsufficientBalanceTitle"),
+                Some(t("send.alertInsufficientBalanceBody")),
+            ),
+            SendAlertKind::LoadTokensFailed => (t("send.alertLoadTokensError"), None),
+            SendAlertKind::EstimateFailed { .. } => (
+                t("send.alertEstimateFailedTitle"),
+                Some(t("send.alertEstimateFailedBody")),
+            ),
+            SendAlertKind::AccountUnavailable => (t("send.alertAccountUnavailableBody"), None),
+        }
     }
 
     /// The panel's body: the cores' for a real session, the mocks' otherwise.
@@ -2423,17 +2742,57 @@ impl WalletPage {
                 let view = resident::resident::<ManageTokens>(cx).read(cx).view();
                 flow_fixtures::FlowBody::AddToken(flows_live::add_token(&view, &self.flow_strings))
             }
-            FlowPanel::Dr3
-            | FlowPanel::Ds1
-            | FlowPanel::Dt3b
-            | FlowPanel::Dsd1
+            // Spec 032: the send journey reads its own two machines. The mocks
+            // keep drawing when no flow is live (the gallery, an unsigned
+            // window), and for the batch importer until its phase lands.
+            FlowPanel::Dsd1
             | FlowPanel::Dsd2
             | FlowPanel::Dsd2b
-            | FlowPanel::Dsd2c
             | FlowPanel::Dsd2e
             | FlowPanel::Dsd2f
             | FlowPanel::Dsd3
-            | FlowPanel::Dsd4 => flow_fixtures::body(panel, &self.flow_strings),
+            | FlowPanel::Dsd4 => match self.send_views(cx) {
+                Some((send, fee)) => {
+                    let identity = self.identity();
+                    let inputs = flows_live::SendInputs {
+                        send: &send,
+                        fee: &fee,
+                        s: &self.flow_strings,
+                        wallet: &self.strings,
+                        locale: &self.locale,
+                        identity_name: &identity.name,
+                        identity_address: &identity.address,
+                    };
+                    match panel {
+                        FlowPanel::Dsd1 => {
+                            flow_fixtures::FlowBody::SendPick(flows_live::send_pick(&inputs))
+                        }
+                        FlowPanel::Dsd2 | FlowPanel::Dsd2b => {
+                            flow_fixtures::FlowBody::SendForm(flows_live::send_form(&inputs))
+                        }
+                        FlowPanel::Dsd2e => {
+                            let contacts = resident::resident::<Contacts>(cx).read(cx).view();
+                            flow_fixtures::FlowBody::ContactPick(flows_live::contact_pick(
+                                &contacts,
+                                &self.flow_strings,
+                            ))
+                        }
+                        FlowPanel::Dsd2f => {
+                            flow_fixtures::FlowBody::FeeToken(flows_live::fee_token(&inputs))
+                        }
+                        FlowPanel::Dsd3 => {
+                            flow_fixtures::FlowBody::SendConfirm(flows_live::send_confirm(&inputs))
+                        }
+                        _ => {
+                            flow_fixtures::FlowBody::SendReceipt(flows_live::send_receipt(&inputs))
+                        }
+                    }
+                }
+                None => flow_fixtures::body(panel, &self.flow_strings),
+            },
+            FlowPanel::Dr3 | FlowPanel::Ds1 | FlowPanel::Dt3b | FlowPanel::Dsd2c => {
+                flow_fixtures::body(panel, &self.flow_strings)
+            }
         }
     }
 
@@ -2470,6 +2829,7 @@ impl WalletPage {
         focus: &gpui::FocusHandle,
         address: &str,
         placeholder: &SharedString,
+        send: Option<SendBindings>,
         cx: &mut Context<Self>,
     ) -> panels::PanelActions {
         let bind = |step: FlowStep, cx: &mut Context<Self>| {
@@ -2490,6 +2850,12 @@ impl WalletPage {
             advance: bind(FlowStep::SendConfirm, cx).or(bind(FlowStep::SendReceipt, cx)),
             address_field: None,
             add_to_wallet: None,
+            open_send_rows: Vec::new(),
+            amount_field: None,
+            recipient_field: None,
+            tap_max: None,
+            pick_contact_rows: Vec::new(),
+            fee_rows: Vec::new(),
         };
         // DR1L, live: one listener per network row, each remembering WHICH
         // chain it opened. The fixture keeps its single first-row listener,
@@ -2589,6 +2955,107 @@ impl WalletPage {
                     cx.notify();
                 },
             )));
+        }
+
+        // Spec 032, live: every affordance on the send panels is an EVENT to
+        // the core, which owns the step, the validation and the gates. The
+        // page's own hand is the fee sheet, the one overlay the core has no
+        // flag for.
+        if let Some(send) = send {
+            let host = send.host;
+            let to_host = |event: SendEvent| -> panels::Click {
+                let host = host.clone();
+                Box::new(
+                    move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                        host.update(cx, |host, cx| host.dispatch(event.clone(), cx));
+                    },
+                )
+            };
+            match panel {
+                FlowPanel::Dsd1 => {
+                    actions.open_send_form = None;
+                    actions.open_send_rows = send
+                        .token_ids
+                        .into_iter()
+                        .map(|token_id| to_host(SendEvent::SelectToken { token_id }))
+                        .collect();
+                }
+                FlowPanel::Dsd2 | FlowPanel::Dsd2b => {
+                    actions.amount_field = Some(panels::AddressField {
+                        focus: send.amount_focus,
+                        value: send.amount,
+                        placeholder: SharedString::from("0"),
+                        on_change: Box::new({
+                            let host = host.clone();
+                            move |amount: String, _: &mut Window, cx: &mut gpui::App| {
+                                host.update(cx, |host, cx| {
+                                    host.dispatch(SendEvent::SetAmount { amount }, cx);
+                                });
+                            }
+                        }),
+                    });
+                    actions.recipient_field = Some(panels::AddressField {
+                        focus: send.recipient_focus,
+                        value: send.recipient,
+                        placeholder: SharedString::from("0x…"),
+                        on_change: Box::new({
+                            let host = host.clone();
+                            move |recipient: String, _: &mut Window, cx: &mut gpui::App| {
+                                host.update(cx, |host, cx| {
+                                    host.dispatch(SendEvent::SetRecipient { recipient }, cx);
+                                });
+                            }
+                        }),
+                    });
+                    actions.tap_max = Some(to_host(SendEvent::TapMax));
+                    actions.open_contact_pick =
+                        Some(to_host(SendEvent::OpenContactPicker { target: None }));
+                    actions.add_recipient = Some(to_host(SendEvent::EnterSplitMode));
+                    actions.open_batch_import = Some(to_host(SendEvent::OpenBatchImport));
+                    actions.open_fee_token = Some(Box::new(cx.listener(
+                        |this, _: &gpui::ClickEvent, _, cx| {
+                            this.send_fee_picker = true;
+                            cx.notify();
+                        },
+                    )));
+                    actions.advance = Some(to_host(SendEvent::Continue));
+                }
+                FlowPanel::Dsd2e => {
+                    actions.open_scan = None;
+                    actions.pick_contact_rows = send
+                        .contact_addresses
+                        .into_iter()
+                        .map(|address| to_host(SendEvent::PickedAddress { address }))
+                        .collect();
+                }
+                FlowPanel::Dsd2f => {
+                    actions.fee_rows = send
+                        .fee_contracts
+                        .into_iter()
+                        .map(|token| -> panels::Click {
+                            Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.send_fee_picker = false;
+                                if let Some(host) = this.send_host.clone() {
+                                    let token = token.clone();
+                                    host.update(cx, |host, cx| {
+                                        host.fee_dispatch(
+                                            FeeEvent::SelectFeeAsset {
+                                                token: token.clone(),
+                                            },
+                                            cx,
+                                        );
+                                        host.dispatch(SendEvent::ChooseFeeToken { token }, cx);
+                                    });
+                                }
+                                cx.notify();
+                            }))
+                        })
+                        .collect();
+                }
+                FlowPanel::Dsd3 => actions.advance = Some(to_host(SendEvent::SlideConfirm)),
+                FlowPanel::Dsd4 => actions.advance = Some(to_host(SendEvent::Done)),
+                _ => {}
+            }
         }
         actions
     }
@@ -5827,11 +6294,12 @@ impl WalletPage {
                 let title = self.signing.panel_title.clone();
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
-            PanelId::Flow => match self.flows.last().copied() {
+            PanelId::Flow => match self.sync_send_flow(cx) {
                 // DS1L is a centred modal over the window, not a column — the
                 // page root draws it; see `scan_overlay`.
                 None | Some(FlowPanel::Ds1) => columns,
                 Some(panel) => {
+                    let send = self.send_bindings(panel, cx);
                     let body = self.flow_body(panel, cx);
                     let tx_ids = if self.identity.is_some() && panel == FlowPanel::Da1 {
                         flows_live::history_ids(
@@ -5840,7 +6308,23 @@ impl WalletPage {
                     } else {
                         Vec::new()
                     };
-                    let title = flow_fixtures::panel_title(panel, &self.flow_strings);
+                    // A live send names the coin in its title; the mock's is USDT.
+                    let title = match (&send, panel) {
+                        (Some(_), FlowPanel::Dsd2 | FlowPanel::Dsd2b) => self
+                            .send_views(cx)
+                            .and_then(|(view, _)| view.selected_token)
+                            .map_or_else(
+                                || flow_fixtures::panel_title(panel, &self.flow_strings),
+                                |token| {
+                                    SharedString::from(crate::wallet::fill(
+                                        &self.flow_strings.send_title,
+                                        "symbol",
+                                        &token.symbol,
+                                    ))
+                                },
+                            ),
+                        _ => flow_fixtures::panel_title(panel, &self.flow_strings),
+                    };
                     let address = if self.identity.is_some() && panel == FlowPanel::Dt3 {
                         resident::resident::<ManageTokens>(cx)
                             .read(cx)
@@ -5858,6 +6342,7 @@ impl WalletPage {
                         &focus,
                         &address,
                         &placeholder,
+                        send,
                         cx,
                     );
                     let rendered = panels::render(
@@ -6161,6 +6646,12 @@ impl Render for WalletPage {
         // that content is pushed clear of it below.
         let caption = owns_titlebar(window);
 
+        // The column was closed under a live send: its machines go with it.
+        if self.panel != PanelId::Flow && self.send_host.is_some() {
+            self.send_host = None;
+            self.send_fee_picker = false;
+        }
+
         let body = if self.gallery {
             let bar = self.gallery_bar(&theme, caption, cx);
             let content: gpui::AnyElement = match self.tab {
@@ -6189,6 +6680,7 @@ impl Render for WalletPage {
         };
 
         let scan = self.scan_overlay(&theme, cx);
+        let send_prompt = self.send_prompts(&theme, window, cx);
         let menu = self.menu_overlay(&theme, cx);
         let sign_out = self.sign_out_dialog(&theme, cx);
         let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
@@ -6203,6 +6695,10 @@ impl Render for WalletPage {
             .child(body);
         if let Some(scan) = scan {
             root = root.child(scan);
+        }
+        // The cable's dialogs and the core's alert, over the send flow.
+        if let Some(prompt) = send_prompt {
+            root = root.child(prompt);
         }
         if let Some(menu) = menu {
             root = root.child(menu);

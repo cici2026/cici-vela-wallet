@@ -334,6 +334,9 @@ pub struct SendForm {
     pub recipients: Vec<RecipientCard>,
     pub recipient_actions: Vec<SharedString>,
     pub summary: Option<(SharedString, SharedString)>,
+    /// Live only: the pill that opens the address book beside a typed field.
+    /// The mock's recipient card opens the picker itself, so it has none.
+    pub pick_contacts: Option<SharedString>,
     pub fee: FeeRow,
     pub cta: SharedString,
 }
@@ -883,6 +886,7 @@ fn send_form(s: &FlowStrings, split: bool) -> SendForm {
                 .into(),
                 "120 USDT · ≈$120.00".into(),
             )),
+            pick_contacts: None,
             fee,
             cta: s.continue_btn.clone(),
         };
@@ -900,6 +904,7 @@ fn send_form(s: &FlowStrings, split: bool) -> SendForm {
         recipients: Vec::new(),
         recipient_actions: Vec::new(),
         summary: None,
+        pick_contacts: None,
         fee,
         cta: s.continue_btn.clone(),
     }
