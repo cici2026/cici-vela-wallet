@@ -273,7 +273,11 @@ fn sign_and_submit(
 ///
 /// The params are FINAL by the time they reach here (the core's invariant ⑨
 /// caps them), so this only reads them.
-fn calls_of(method: &str, params_json: &str) -> Option<Vec<FeeCall>> {
+///
+/// Shared with the host, which prices the SAME calls it will later submit —
+/// two readings of one params array is how a quote ends up describing a
+/// different transaction than the one that gets signed.
+pub fn calls_of(method: &str, params_json: &str) -> Option<Vec<FeeCall>> {
     let params: Value = serde_json::from_str(params_json).ok()?;
     let first = params.get(0)?;
     match method {

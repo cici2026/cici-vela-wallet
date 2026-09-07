@@ -6620,6 +6620,21 @@ impl WalletPage {
         }
         #[cfg(target_os = "linux")]
         let _ = cx;
+
+        // Passed ONLY when the three machines agreed. A shut slide that still
+        // carried an action would be a control the core said no to, waiting
+        // for a click to say yes.
+        #[cfg(not(target_os = "linux"))]
+        let confirm_action: Option<panels::Click> =
+            (model.confirm_enabled && self.signing_host.is_some()).then(|| {
+                Box::new(cx.listener(|page, _: &gpui::ClickEvent, _, cx| {
+                    if let Some(host) = page.signing_host.as_ref() {
+                        host.update(cx, |host, cx| host.approve(cx));
+                    }
+                })) as panels::Click
+            });
+        #[cfg(target_os = "linux")]
+        let confirm_action: Option<panels::Click> = None;
         let mut column = div()
             .flex()
             .flex_col()
@@ -6671,6 +6686,7 @@ impl WalletPage {
                 &mut self.icons,
                 model.confirm_label.clone(),
                 model.confirm_enabled,
+                confirm_action,
             ));
         column
     }

@@ -751,13 +751,17 @@ pub fn signer_row(
 /// The one way to confirm (spec 022 §4). There is no reject button beside it:
 /// closing the column IS the rejection, so the only deliberate act here is the
 /// affirmative one.
+/// The confirm. `action` is `None` for the mocks — a drawn slide that answers
+/// to nothing — and `Some` for a live request. It is only ever passed when
+/// `enabled`, so a shut slide cannot be fired by a click that lands on it.
 pub fn slide_to_confirm(
     theme: &Theme,
     icons: &mut IconCache,
     label: SharedString,
     enabled: bool,
+    action: Option<crate::flows::panels::Click>,
 ) -> Div {
-    div()
+    let slide = div()
         .h(px(SLIDE_H))
         .rounded_full()
         .bg(theme.bg_sunken)
@@ -791,7 +795,12 @@ pub fn slide_to_confirm(
                 .text_color(theme.fg_muted)
                 .child(label),
         )
-        .child(div().w(px(SLIDE_KNOB)))
+        .child(div().w(px(SLIDE_KNOB)));
+    // A shut slide answers to nothing. The drawings have no reject button —
+    // closing the column IS the rejection — so the only thing this control
+    // can do is confirm, and it may only do that when all three machines
+    // agreed.
+    crate::flows::panels::clickable("signing-confirm", action, slide)
 }
 
 use super::fixtures::ChipState;

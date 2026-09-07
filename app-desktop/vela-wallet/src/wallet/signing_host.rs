@@ -32,8 +32,12 @@ use vela_core::app::approval_guard::{
 use vela_core::app::clear_signing::{
     ClearOperation, ClearShellResult, ClearSigning, ClearSigningView, Event as ClearEvent,
 };
+use vela_core::app::fee_policy::{
+    Event as FeeEvent, FeeCall, FeeOperation, FeePolicy, FeeShellResult, FeeTier, FeeView,
+};
 use vela_core::app::sign_request::{
-    Event as SignEvent, SignOperation, SignRequest, SignShellResult, SignView,
+    Event as SignEvent, SignApproveOpts, SignOperation, SignQuotedFee, SignRequest,
+    SignShellResult, SignView,
 };
 
 use crate::ceremony::CeremonyChannel;
@@ -62,17 +66,16 @@ pub struct SigningHost {
     pub clear_view: ClearSigningView,
     guard: CoreHost<ApprovalGuard>,
     pub guard_view: GuardView,
-    /// The fourth view the sheet reads — and the one machine of the four that
-    /// is NOT running yet.
-    ///
-    /// A pristine `fee_policy` answers `confirm_fee_ready: false`, so the
-    /// slide stays shut while this is unwired. That is the right failure —
-    /// arming a confirm over a price nobody obtained is the specific thing
-    /// the three-way AND exists to prevent — but it is a HELD view rather
-    /// than one rebuilt per frame, so the day the session lands there is one
-    /// place to attach it, and only one (this cut's second lesson: the fee
-    /// session must be one session).
-    pub fee_view: vela_core::app::fee_policy::FeeView,
+    /// The fourth machine. ONE session for the whole request — the sheet
+    /// renders this view and the approve hands back the quote FROM it, so the
+    /// figure somebody agreed to and the figure that gets signed cannot be
+    /// two different numbers (this cut's second lesson, which the web
+    /// recorded four failed integrations of).
+    fee: CoreHost<FeePolicy>,
+    pub fee_view: FeeView,
+    /// Guards the deployment read: a slower one must not quote for a request
+    /// that has been superseded.
+    fee_seq: u64,
     ctx: SignContext,
     #[allow(dead_code, reason = "held so the ceremony outlives the request")]
     channel: Arc<CeremonyChannel>,
@@ -95,7 +98,8 @@ impl SigningHost {
         // The cores' own pristine views rather than a `Default` they do not
         // have: the shell must never invent a starting shape for a machine.
         let (view, clear_view, guard_view) = (sign.view(), clear.view(), guard.view());
-        let fee_view = CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
+        let fee = CoreHost::<FeePolicy>::new();
+        let fee_view = fee.view();
         let mut host = Self {
             sign,
             view,
@@ -103,7 +107,9 @@ impl SigningHost {
             clear_view,
             guard,
             guard_view,
+            fee,
             fee_view,
+            fee_seq: 0,
             ctx,
             channel,
             closed: false,
@@ -162,6 +168,13 @@ impl SigningHost {
             self.dispatch_clear(event, cx);
         }
 
+        // What it costs. Only a transaction has a fee.
+        if let Some(calls) =
+            crate::executor::sign_request::calls_of(&request.method, &request.params_json)
+        {
+            self.request_quote(request.chain_id, wallet.to_owned(), calls, cx);
+        }
+
         // What it may be edited to. `read_only` is false: this sheet is the
         // one place the never-unlimited gate can be satisfied, and a guard
         // that cannot be edited would leave "unlimited" as the only option.
@@ -176,6 +189,135 @@ impl SigningHost {
             },
             cx,
         );
+    }
+
+    /// Price this request.
+    ///
+    /// Only a transaction has a fee: a `personal_sign` costs nothing, and
+    /// quoting one would put a network fee on a signature that never touches
+    /// a chain.
+    fn request_quote(
+        &mut self,
+        chain_id: u32,
+        account: String,
+        calls: Vec<FeeCall>,
+        cx: &mut Context<Self>,
+    ) {
+        if calls.is_empty() {
+            return;
+        }
+        self.fee_seq += 1;
+        let seq = self.fee_seq;
+        let public_key_available = !self.ctx.keys.is_empty();
+        cx.spawn(async move |host, cx| {
+            let probe = account.clone();
+            let deployed = cx
+                .background_executor()
+                .spawn(async move { crate::executor::chain::is_deployed(&probe, chain_id) })
+                .await;
+            host.update(cx, |host, cx| {
+                if seq != host.fee_seq {
+                    return;
+                }
+                // An indeterminate read never reaches the core: guessing
+                // "deployed" ships an operation without initCode, and guessing
+                // "undeployed" attaches one to a live account. Either way the
+                // fee is for a different operation than the one that would be
+                // sent, so no quote is better than a wrong one — the slide
+                // stays shut, which is what `confirm_fee_ready: false` means.
+                let Ok(deployed) = deployed else {
+                    return;
+                };
+                host.dispatch_fee(
+                    FeeEvent::QuoteRequested {
+                        chain_id,
+                        account,
+                        deployed,
+                        public_key_available,
+                        tier: FeeTier::Fast,
+                        calls,
+                        fee_token: None,
+                    },
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Approve, carrying the fee THIS sheet displayed.
+    ///
+    /// The quote is read off `fee_view` — the same view the confirm card
+    /// rendered — rather than re-asked. A second question would produce a
+    /// second number, and the figure somebody agreed to would not be the
+    /// figure that gets signed.
+    pub fn approve(&mut self, cx: &mut Context<Self>) {
+        let quoted = self.fee_view.fee.as_ref().map(|estimate| SignQuotedFee {
+            amount: estimate.total_wei.clone(),
+            recipient: estimate.fee_recipient.clone().unwrap_or_default(),
+        });
+        let max_fee_per_gas = self
+            .fee_view
+            .fee
+            .as_ref()
+            .map(|estimate| estimate.max_fee_per_gas.clone());
+        self.dispatch_sign(
+            SignEvent::ApproveTapped {
+                opts: SignApproveOpts {
+                    max_fee_per_gas,
+                    bundler_cost_wei: None,
+                    gas_fee_token: None,
+                    quoted_fee: quoted,
+                    fee_collector: None,
+                    params_override_json: None,
+                    intent: self
+                        .clear_view
+                        .result
+                        .as_ref()
+                        .map(|result| result.intent.clone()),
+                },
+            },
+            cx,
+        );
+    }
+
+    pub fn dispatch_fee(&mut self, event: FeeEvent, cx: &mut Context<Self>) {
+        let pending = self.fee.dispatch(event);
+        self.pump_fee(pending, cx);
+    }
+
+    fn resolve_fee(&mut self, id: u64, result: FeeShellResult, cx: &mut Context<Self>) {
+        let pending = self.fee.resolve(id, result);
+        self.pump_fee(pending, cx);
+    }
+
+    fn pump_fee(&mut self, pending: Vec<Pending<FeeOperation>>, cx: &mut Context<Self>) {
+        for effect in pending {
+            let id = effect.id;
+            match FeePolicy::perform(&effect.operation) {
+                Answer::Now(result) => self.resolve_fee(id, result, cx),
+                Answer::Blocking(work) => {
+                    cx.spawn(async move |host, cx| {
+                        let result = cx.background_executor().spawn(async move { work() }).await;
+                        host.update(cx, |host, cx| host.resolve_fee(id, result, cx))
+                            .ok();
+                    })
+                    .detach();
+                }
+                Answer::After(delay, result) => {
+                    cx.spawn(async move |host, cx| {
+                        cx.background_executor().timer(delay).await;
+                        host.update(cx, |host, cx| host.resolve_fee(id, result, cx))
+                            .ok();
+                    })
+                    .detach();
+                }
+                Answer::Streaming(_) => unreachable!("fee_policy reports nothing mid-flight"),
+            }
+        }
+        self.fee_view = self.fee.view();
+        cx.notify();
     }
 
     pub fn dispatch_sign(&mut self, event: SignEvent, cx: &mut Context<Self>) {
@@ -402,5 +544,75 @@ mod tests {
         assert_eq!(typed_data_of(object), r#"{"primaryType":"Permit"}"#);
 
         assert_eq!(typed_data_of("[]"), "", "nothing to decode is not a panic");
+    }
+}
+
+#[cfg(test)]
+mod approve_tests {
+    use super::*;
+
+    /// The approve carries the fee the sheet DISPLAYED.
+    ///
+    /// Read off `fee_view` — the same view the confirm card rendered — rather
+    /// than re-asked. A second question produces a second number, and then
+    /// the figure somebody agreed to is not the figure that gets signed.
+    /// This is the desktop's version of the rule four web integrations failed
+    /// on (this cut's second lesson).
+    #[test]
+    fn the_quote_that_is_signed_is_the_quote_that_was_shown() {
+        use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView};
+
+        let shown = FeeEstimateView {
+            chain_id: 100,
+            total_wei: "10000000000000000".to_owned(),
+            max_fee_per_gas: "1500000000".to_owned(),
+            network_fee_per_gas: "1000000000".to_owned(),
+            relayer_fee_per_gas: "500000000".to_owned(),
+            bundler_gas_price: "1000000000".to_owned(),
+            in_band_gas_basis: "21000".to_owned(),
+            total_gas: "21000".to_owned(),
+            deployed: true,
+            tier: FeeTier::Fast,
+            quoted: true,
+            fee_asset: FeeAssetView::Native,
+            fee_recipient: Some("0xee2c".to_owned()),
+        };
+
+        // What `approve` would put in the opts, from that view alone.
+        let quoted = Some(SignQuotedFee {
+            amount: shown.total_wei.clone(),
+            recipient: shown.fee_recipient.clone().unwrap_or_default(),
+        });
+        let opts = SignApproveOpts {
+            max_fee_per_gas: Some(shown.max_fee_per_gas.clone()),
+            bundler_cost_wei: None,
+            gas_fee_token: None,
+            quoted_fee: quoted,
+            fee_collector: None,
+            params_override_json: None,
+            intent: None,
+        };
+
+        let signed = opts
+            .quoted_fee
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("a priced sheet approves with its price"));
+        assert_eq!(signed.amount, shown.total_wei, "the figure on the screen");
+        assert_eq!(signed.recipient, "0xee2c");
+        assert_eq!(opts.max_fee_per_gas.as_deref(), Some("1500000000"));
+    }
+
+    /// An unpriced sheet approves with no quote rather than a zero.
+    ///
+    /// It cannot be reached — the slide is shut without `confirm_fee_ready` —
+    /// but a zero here would be a fee claim, and the submit would sign it.
+    #[test]
+    fn an_unpriced_sheet_carries_no_quote_at_all() {
+        let none: Option<&vela_core::app::fee_policy::FeeEstimateView> = None;
+        let quoted = none.map(|estimate| SignQuotedFee {
+            amount: estimate.total_wei.clone(),
+            recipient: estimate.fee_recipient.clone().unwrap_or_default(),
+        });
+        assert!(quoted.is_none());
     }
 }
