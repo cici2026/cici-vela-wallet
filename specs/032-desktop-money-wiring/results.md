@@ -599,6 +599,58 @@ batch: None`——028 phase 10 的"选中就暖一次报价"),于是当场炸。
 它被**改写而不是删掉**:字母是目录(A–Z 然后 `#`),字母**之内**仍是书序(收藏优先、
 最近其次)——后半句一直是对的。新增 2 个测试(拼音首字母、一个字母一段)。
 
+## Phase 9 — 并完之后再跑一次第二条 grep
+
+核心在脚下换过了(028 给 `send.rs` 加了 229 行、`contacts.rs` 加了 349 行),而桌面的
+live 构造器是在那之前写的。所以并完树立刻重跑普查:**核心所有 View 的判断字段 vs
+桌面读了什么**,7 个未读,逐条判:
+
+| 未读字段 | 判定 |
+|---|---|
+| `SendReceiptView.hold_reason` | **真缺陷,关钱。已修** |
+| `BalanceView.failed_chain_ids` | 有意不读——核心给了 `banner_chain_ids`(失败减限流,不变量⑦),`wallet/live.rs:608` 已注明 |
+| `RpcPoolView.failed_chains` | 同上,它是余额横幅的来源,余额那台机器已经在读 |
+| `FeeView.stale` | 有意不读。**核心自己写着**:"Staleness is advisory — it does not disable confirm, because today's UI does not either",真正的门在提交侧(`tempo_quote_is_stale`、中继的 in-band gate)。要做刷新控件得先有图 |
+| `SignFundingView.denial_reason` | B 组,桌面还没有请求来源 |
+| `PaymentRequestView.can_copy` / `can_save` | **要创始人定**,见下 |
+
+### 修的那个:收据不说它为什么停着
+
+核心把收据的"停"分成两种(`SendHoldReason`),桌面一种都没读:
+
+- **`FeeHold`** — 手续费涨过了你批准的数,**交易排着队,费用回落会自动发出去**。
+  状态仍是 `Submitted`,所以屏幕说的是普通的"等待确认"。那不是同一件事:
+  人盯着一笔可能很久不动的转账,屏幕上没有一个字解释。
+- **`FeeRejected`** — 费用一直没回落,**什么都没发出去**,出路是按当前费用重发,
+  不是重试同一笔。屏幕原来只给一句通用错误。
+
+**新增语料键 0 个**——`send.txHeldFees` 和 `send.txRejectedFees` 这两句话一直在语料里,
+一字不差,**而且 web 也没读**(`hold_reason` 在 app-web 只出现在一个测试夹具里)。
+这条是跨端的:核心算了,两个壳都没说。+2 测试,基线 **265 / 261**。
+
+> **给 web 那边的人**(不是我的范围,但漏在同一处):
+> `app-web/vela-wallet/src/lib/flows/live-send.ts:572` 的 `submitted` 分支写死
+> `captions: [m['send.txWaitingConfirm']]`,`failed` 分支同理没有 hold 的位置。
+> `hold_reason` 在 app-web 只出现在 `live-send.test.ts:270` 的夹具里(`null`)。
+> 两句语料键:`send.txHeldFees`、`send.txRejectedFees`。
+> 注意两个标志不互斥,别把两句合成一句(下面那段)。
+
+**改完自己又抓到一个边**:两个模型标志**不互斥**——先 `FeeHold` 后失败的收据,
+`fee_held` 还留着。第一版我把 `hold_reason` 当成一句话往两个分支里塞,
+于是"排着队、费用回落会自动发出去"有可能印在一张**失败**的收据下面。
+现在每个分支只认自己那个原因,并且有一条测试专门盯着这个组合。
+**核心把两件事分开了,壳就不能把它们合成一句。**
+
+### 要创始人定的:收款页的确认门
+
+`PaymentRequestView` 的 `can_copy` / `can_save` 都等于 `acknowledged`——人得先确认过
+一个提示,才允许复制/保存收款请求。桌面的收款页是**活的**(它已经在读 `payment_request`
+决定二维码内容),但这两个字段和 `acknowledged`、`gate_loading` 都没读,等于门是开的。
+
+**没有自作主张给它加门**:记忆里 Receive 的链上门(issue #14)是 2026-07-03 被判为
+过时关掉的(passkey 才是信任根)。这个门是不是同一件事、还该不该有,是产品判断,
+不是接线判断。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
@@ -638,10 +690,11 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线(**并入 028 之后**):desktop **263 passed(feature on)/ 259(off)· 32 ignored**,
+基线(**并入 028、走完 phase 9 之后**):desktop **265 passed(feature on)/ 261(off)· 32 ignored**,
 vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
 **两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
-桌面数字比 phase 7 的 267/263 少 4:删掉的 `executor/contact_io.rs` 带走 6 个测试,新增 2 个。
+桌面数字比 phase 7 的 267/263 少 2:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
+phase 8 新增 2 个、phase 9 再加 2 个。
 (phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -674,6 +727,8 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
 | 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |
 | 10b | `NetNetworkRow.explorer_health` | 浏览器端点探针的结果没画(RPC 的画了)。同类,但不关钱,phase 7 没做 |
+| 10c | **`PaymentRequestView.can_copy` / `can_save`(要创始人定)** | 收款页是活的,但这道"确认过才允许复制/保存"的门桌面没实现。没自作主张加——Receive 的链上门(issue #14)是被判过时关掉的,这道该不该有是产品判断。见 phase 9 |
+| 10d | `FeeView.stale` | 30 秒 TTL 到了没有刷新控件。核心说这是 advisory、提交侧另有硬门;要做得先有图 |
 | 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |
 
 ## 本刀最值得记的五件事

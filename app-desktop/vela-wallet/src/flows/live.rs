@@ -33,8 +33,8 @@ use vela_core::app::batch_import::{BatchRateStatus, BatchUnit, BatchView};
 use vela_core::app::contacts::ContactsView;
 use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView, FeeView};
 use vela_core::app::send::{
-    SendAddNetworkMsg, SendAmountWarning, SendLockError, SendReceiptStatus, SendStage, SendToken,
-    SendTreasuryAsset, SendTxStatus, SendUnitIssue, SendView,
+    SendAddNetworkMsg, SendAmountWarning, SendHoldReason, SendLockError, SendReceiptStatus,
+    SendStage, SendToken, SendTreasuryAsset, SendTxStatus, SendUnitIssue, SendView,
 };
 
 use crate::flows::fixtures::{
@@ -1360,10 +1360,27 @@ pub fn send_receipt(i: &SendInputs<'_>) -> SendReceipt {
         .unwrap_or_else(|| shorten(&send.recipient));
     let status = send.receipt.as_ref().map(|receipt| receipt.status);
 
+    // Why it is held, when the core knows: `hold_reason` is the difference
+    // between a payment that is queued and one that is over, and between
+    // "try again" and "send again at the current fee". Both sentences have
+    // been in the corpus since the send flow was written; no shell said
+    // either — the web does not read this field yet.
+    //
+    // Each branch takes only ITS reason. The two model flags are not mutually
+    // exclusive — a receipt that was held and then failed still carries
+    // `fee_held` — and "will be sent automatically once fees settle" printed
+    // under a failure is worse than saying nothing.
+    let hold = send
+        .receipt
+        .as_ref()
+        .and_then(|receipt| receipt.hold_reason);
+    let held = (hold == Some(SendHoldReason::FeeHold)).then(|| s.tx_held_fees.clone());
+    let rejected = (hold == Some(SendHoldReason::FeeRejected)).then(|| s.tx_rejected_fees.clone());
+
     if status == Some(SendReceiptStatus::Failed) || send.tx_status == SendTxStatus::Error {
         return SendReceipt {
             title: tx_error_text(send, s).unwrap_or_else(|| s.tx_error_generic.clone()),
-            captions: Vec::new(),
+            captions: rejected.into_iter().collect(),
             hash: None,
             cta: s.done.clone(),
         };
@@ -1400,7 +1417,10 @@ pub fn send_receipt(i: &SendInputs<'_>) -> SendReceipt {
     if status == Some(SendReceiptStatus::Submitted) {
         return SendReceipt {
             title: s.tx_submitted_title.clone(),
-            captions: vec![s.tx_waiting_confirm.clone()],
+            // A held payment is NOT waiting for a confirmation: it is queued
+            // until fees settle, and it says so in place of the ordinary wait
+            // rather than beside it.
+            captions: vec![held.unwrap_or_else(|| s.tx_waiting_confirm.clone())],
             hash: send
                 .tx_hash
                 .clone()
@@ -1675,6 +1695,87 @@ mod tests {
 
     fn wallet_strings() -> crate::wallet::WalletStrings {
         crate::wallet::WalletStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A receipt in each of the two states the core can hold one in.
+    ///
+    /// The `SendView` is the booted core's; only the receipt is substituted,
+    /// because reaching a real fee hold means driving a submit and a relay
+    /// answer, and what is under test is the sentence, not the pipeline.
+    fn receipt_with(
+        status: vela_core::app::send::SendReceiptStatus,
+        hold: Option<vela_core::app::send::SendHoldReason>,
+    ) -> SendReceipt {
+        use vela_core::app::send::{Send, SendReceiptView};
+        let s = strings();
+        let wallet = wallet_strings();
+        let fee = CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
+        let mut send = CoreHost::<Send>::new().view();
+        send.receipt = Some(SendReceiptView {
+            status,
+            hold_reason: hold,
+            kind: None,
+            transfers: Vec::new(),
+            amount: "0.001".to_owned(),
+            usd_value: 0.0,
+        });
+        send_receipt(&SendInputs {
+            send: &send,
+            fee: &fee,
+            s: &s,
+            wallet: &wallet,
+            locale: "en",
+            identity_name: "Golden",
+            identity_address: "0x88cCA0EeDbF2C4426110bbFc998F048689266894",
+        })
+    }
+
+    /// A payment queued until fees settle is NOT waiting for a confirmation.
+    /// Saying the ordinary wait over it leaves somebody watching a transfer
+    /// that will not move for as long as the fee stays up, with nothing on
+    /// screen to explain it — and the sentence has been in the corpus the
+    /// whole time.
+    #[test]
+    fn a_payment_held_for_fees_says_it_is_held_for_fees() {
+        use vela_core::app::send::{SendHoldReason, SendReceiptStatus};
+        let s = strings();
+        let held = receipt_with(SendReceiptStatus::Submitted, Some(SendHoldReason::FeeHold));
+        assert_eq!(held.captions, vec![s.tx_held_fees.clone()]);
+        assert_ne!(
+            held.captions,
+            vec![s.tx_waiting_confirm.clone()],
+            "the ordinary wait must not stand in for the hold"
+        );
+
+        // No hold: the ordinary wait, unchanged.
+        let plain = receipt_with(SendReceiptStatus::Submitted, None);
+        assert_eq!(plain.captions, vec![s.tx_waiting_confirm]);
+    }
+
+    /// A fee rejection is not a generic failure: nothing was sent, and the
+    /// way out is to send again at the current fee rather than to retry the
+    /// same one.
+    #[test]
+    fn a_fee_rejection_says_what_to_do_instead() {
+        use vela_core::app::send::{SendHoldReason, SendReceiptStatus};
+        let s = strings();
+        let rejected = receipt_with(SendReceiptStatus::Failed, Some(SendHoldReason::FeeRejected));
+        assert_eq!(rejected.captions, vec![s.tx_rejected_fees]);
+        assert!(
+            receipt_with(SendReceiptStatus::Failed, None)
+                .captions
+                .is_empty(),
+            "a failure the core gave no reason for invents none"
+        );
+        // `fee_held` survives into a failed receipt, so Failed + FeeHold is
+        // reachable — and the queued sentence under a failure would be worse
+        // than silence.
+        assert!(
+            receipt_with(SendReceiptStatus::Failed, Some(SendHoldReason::FeeHold))
+                .captions
+                .is_empty(),
+            "the queued sentence never appears under a failure"
+        );
     }
 
     /// A real `PaymentRequestView`, from a booted core.

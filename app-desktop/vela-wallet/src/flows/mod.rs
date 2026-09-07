@@ -334,6 +334,11 @@ pub struct FlowStrings {
     // Send · receipt.
     pub tx_submitted_title: SharedString,
     pub tx_waiting_confirm: SharedString,
+    /// The two holds the core distinguishes on a receipt
+    /// (`SendReceiptView.hold_reason`). Both sentences were already in the
+    /// corpus and no shell — desktop or web — was saying either.
+    pub tx_held_fees: SharedString,
+    pub tx_rejected_fees: SharedString,
     pub tx_typical_time: String,
     pub tx_close_background: SharedString,
     pub tx_hash: SharedString,
@@ -537,6 +542,8 @@ impl FlowStrings {
 
             tx_submitted_title: s("send.txSubmittedTitle"),
             tx_waiting_confirm: s("send.txWaitingConfirm"),
+            tx_held_fees: s("send.txHeldFees"),
+            tx_rejected_fees: s("send.txRejectedFees"),
             tx_typical_time: raw("send.txTypicalTime"),
             tx_close_background: s("send.txCloseBackground"),
             tx_hash: s("componentsTx.receipt.txHash"),
