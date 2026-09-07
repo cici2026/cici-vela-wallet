@@ -152,7 +152,10 @@ fn fetch_uncached(chain_id: u32) -> Option<ChainTokenData> {
 /// Where the index lives: the configured endpoint, or its default. The same
 /// resolution `network_admin` does, and it must stay the same one — two
 /// answers here is a settings screen that changes one caller's host.
-fn data_base() -> String {
+///
+/// Shared with `clear_signing`, which fetches ERC-7730 descriptors from the
+/// same host, for exactly that reason.
+pub(crate) fn data_base() -> String {
     storage::read_value(storage::KEY_SERVICE_ENDPOINTS)
         .ok()
         .flatten()

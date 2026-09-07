@@ -36,6 +36,7 @@ pub mod batch;
 pub mod chain;
 pub mod chain_tokens;
 pub mod chainlink;
+pub mod clear_signing;
 pub mod contacts;
 pub mod custom_tokens;
 pub mod display_currency;
