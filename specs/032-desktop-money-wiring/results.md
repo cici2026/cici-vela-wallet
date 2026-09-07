@@ -651,6 +651,38 @@ live 构造器是在那之前写的。所以并完树立刻重跑普查:**核心
 过时关掉的(passkey 才是信任根)。这个门是不是同一件事、还该不该有,是产品判断,
 不是接线判断。
 
+## Phase 10 — 那张从来没被打开过的表
+
+欠账第 1 条的后半句:"没提交 xlsx 样张"。查下来比缺个样张更糟——**workbook 那条路
+一次都没在测试里跑过**。`executor/batch.rs` 的四个测试测的是:扩展名判断、单元格格式化、
+一个"不是 zip 的假 xlsx"、以及 CSV。`calamine::open_workbook_auto` → `worksheet_range_at(0)`
+这一句,也就是真正读表的那句,从来没执行过。
+
+"从 Excel 把工资表拿进来"是**花钱的路**,以前每一个测它的测试用的都是测试里自己敲的文本。
+
+现在提交了一张真表 `app-desktop/vela-wallet/tests/fixtures/payroll-sample.xlsx`
+(1,737 字节,手工装配的 OOXML:五个 part,inlineStr + 数字单元格),故意做了三件事:
+
+| 表里有什么 | 想钉住什么 |
+|---|---|
+| `5000`(整数) | 表格眼里是数字,人眼里是 `5000`——不能变成 `5000.0` |
+| `173.88` | 上面那条去 `.0` 不能变成无差别截断 |
+| 只有一个单元格的**短行** | 读的时候要补齐到最宽;不补,下一行的值会滑进别人的金额列 |
+
+两个测试:一个在 `read_table` 旁边,证明 calamine 把文件读成了那个矩阵;一个在
+`wallet/money.rs`,把**同一个文件**经 `PickFile` 喂进 `BatchImport` 一路走到付款行——
+表头不算行、短行进 `rejected` 计数(不是悄悄丢掉)、合计 `5173.88`、
+Apply 之后两行金额 `5000` 和 `173.88` 一位不差。
+
+**"真表格实机点一次"仍然欠着**——那要人去点文件对话框。但现在它不是唯一的证据了。
+
+### 顺手:浏览器端点的探针结果(欠账 10b)
+
+网络卡片的浏览器地址栏和 RPC 地址栏用的是**同一个组件、同一个徽章位**,RPC 传了
+`rpc_badge`,浏览器传的是 `None`。核心两个都探了,`explorer_health` 就这么扔了——
+量到延迟的浏览器和根本没探过的长得一模一样。改成传 `explorer_badge`,一行,
+用的是已经有的 `probe_badge`,没有新画面。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
@@ -690,11 +722,11 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线(**并入 028、走完 phase 9 之后**):desktop **265 passed(feature on)/ 261(off)· 32 ignored**,
+基线(**并入 028、走完 phase 10 之后**):desktop **267 passed(feature on)/ 263(off)· 32 ignored**,
 vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
 **两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
-桌面数字比 phase 7 的 267/263 少 2:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
-phase 8 新增 2 个、phase 9 再加 2 个。
+桌面数字回到 phase 7 的 267/263:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
+phase 8 加 2、phase 9 加 2、phase 10 加 2。
 (phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -717,7 +749,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 
 | # | 事 | 状态 |
 |---|---|---|
-| 1 | ~~Phase 5 批量导入~~ | **已交付**(phase 5):`executor/batch.rs` + SendHost 里的 `CoreHost<BatchImport>`,DSD2cL 活了。没提交 xlsx 样张,真表格实机点一次 |
+| 1 | ~~Phase 5 批量导入~~ | **已交付**(phase 5)。**phase 10 补上样张**:`tests/fixtures/payroll-sample.xlsx` 已提交,workbook 那条路以前一次都没在测试里跑过;两个测试从文件一路走到付款行。**仍欠**:真表格实机点一次(要人点文件对话框) |
 | 2 | **B 组签名面板**(`clear_signing` `approval_guard` `sign_request`,9,362 行) | 图 DCS1–8 画好、33 个手写场景;`user_op::compute_safe_message_hash` 与 `build_eip1271_signature` 已备好。请求来源仍缺(C 组要 web 引擎) |
 | 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
 | 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
@@ -726,7 +758,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
 | 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |
-| 10b | `NetNetworkRow.explorer_health` | 浏览器端点探针的结果没画(RPC 的画了)。同类,但不关钱,phase 7 没做 |
+| 10b | ~~`NetNetworkRow.explorer_health`~~ | **已交付**(phase 10):同一个徽章位,RPC 传了、浏览器传的是 `None`。一行 |
 | 10c | **`PaymentRequestView.can_copy` / `can_save`(要创始人定)** | 收款页是活的,但这道"确认过才允许复制/保存"的门桌面没实现。没自作主张加——Receive 的链上门(issue #14)是被判过时关掉的,这道该不该有是产品判断。见 phase 9 |
 | 10d | `FeeView.stale` | 30 秒 TTL 到了没有刷新控件。核心说这是 advisory、提交侧另有硬门;要做得先有图 |
 | 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |

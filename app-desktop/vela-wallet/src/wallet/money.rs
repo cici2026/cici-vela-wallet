@@ -1088,6 +1088,82 @@ mod tests {
         );
     }
 
+    /// The committed workbook, all the way from the disk to payment rows.
+    ///
+    /// The unit test beside `read_table` proves calamine reads the file; this
+    /// proves the matrix it produces is one the core turns into recipients and
+    /// amounts. Between them sits the whole reason the fixture exists:
+    /// "bring your payroll from Excel" is a money path, and until now every
+    /// test of it used text somebody typed into the test.
+    #[test]
+    fn the_committed_workbook_becomes_payment_rows() {
+        use vela_core::app::batch_import::{
+            BatchImport, BatchToken, BatchUnit, Event as BatchEvent,
+        };
+        let mut batch = CoreHost::<BatchImport>::new();
+        let pump = |batch: &mut CoreHost<BatchImport>, event: BatchEvent| {
+            let mut pending = batch.dispatch(event);
+            while let Some(effect) = pending.pop() {
+                let result = match effect.operation {
+                    BatchOperation::FetchUsdFiatRate { code } => BatchShellResult::RateResolved {
+                        rate: batch::usd_fiat_rate(&code),
+                        code,
+                    },
+                    // The real picker's answer, read off the real file.
+                    BatchOperation::PickFile => {
+                        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("tests/fixtures/payroll-sample.xlsx");
+                        let content = batch::read_table(&path)
+                            .unwrap_or_else(|| unreachable!("the fixture reads"));
+                        BatchShellResult::FilePicked {
+                            name: batch::file_name(&path),
+                            content,
+                        }
+                    }
+                    BatchOperation::SaveTemplateFile { .. } => BatchShellResult::TemplateSaved,
+                };
+                pending.extend(batch.resolve(effect.id, result));
+            }
+        };
+        pump(
+            &mut batch,
+            BatchEvent::Open {
+                token: BatchToken {
+                    symbol: "USDT".to_owned(),
+                    decimals: 6,
+                    balance: "20000".to_owned(),
+                    price_usd: Some(1.0),
+                },
+                currency_code: "USD".to_owned(),
+                max_recipients: 60,
+            },
+        );
+        pump(&mut batch, BatchEvent::PickFileRequested);
+
+        let view = batch.view();
+        assert_eq!(view.file_name.as_deref(), Some("payroll-sample.xlsx"));
+        assert_eq!(view.unit, BatchUnit::Fiat);
+        // Two priced rows; the header is not one of them, and neither is the
+        // short row that carries an address and no amount.
+        assert_eq!(view.preview.len(), 2, "{view:?}");
+        assert_eq!(
+            view.rejected, 1,
+            "the amount-less row is counted, not hidden"
+        );
+        assert_eq!(
+            view.total_token, "5173.88",
+            "5000 + 173.88, at USD's own rate"
+        );
+
+        pump(&mut batch, BatchEvent::Apply);
+        let view = batch.view();
+        assert!(view.applied);
+        assert_eq!(view.recipients.len(), 2);
+        assert_eq!(view.recipients[0].amount, "5000");
+        // The decimal survives the sheet, the reader and the conversion.
+        assert_eq!(view.recipients[1].amount, "173.88");
+    }
+
     /// The core refuses and the screen SAYS SO — the defect this phase
     /// exists for. Every branch is driven through the real machine (no
     /// hand-written view), and the assertion is on the sentence a person

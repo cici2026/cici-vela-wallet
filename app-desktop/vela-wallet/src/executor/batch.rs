@@ -138,6 +138,47 @@ mod tests {
 
     /// A number in a sheet is `5000` to the person and must stay so; a
     /// fraction keeps its digits; the empty cell is the empty string.
+    /// A REAL workbook, opened by calamine, end to end.
+    ///
+    /// Everything above tests the pieces: the extension test, the cell
+    /// formatter, a file that is not a zip. None of them ever opened a
+    /// workbook, so the one line that matters — `open_workbook_auto` into
+    /// `worksheet_range_at(0)` — had never run. The fixture is committed
+    /// beside this file because "bring your payroll from Excel" is a money
+    /// path and it deserves a table it has actually read.
+    #[test]
+    fn a_real_workbook_becomes_the_matrix_the_core_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/payroll-sample.xlsx");
+        let Some(BatchFileContent::Matrix { rows }) = read_table(&path) else {
+            unreachable!("a workbook reads as a matrix")
+        };
+        assert_eq!(
+            rows,
+            vec![
+                vec!["address".to_owned(), "amount".to_owned()],
+                vec![
+                    "0x031d7D57c99CAF891e1C250554691Fd12D84772b".to_owned(),
+                    // 5000 is a NUMBER to the sheet; the core's amount parser
+                    // wants what the person typed, not "5000.0".
+                    "5000".to_owned(),
+                ],
+                vec![
+                    "0x88cCA0EeDbF2C4426110bbFc998F048689266894".to_owned(),
+                    // …and trimming the `.0` must not truncate a real decimal.
+                    "173.88".to_owned(),
+                ],
+                // A row with one cell in a two-column sheet is PADDED, so the
+                // amount column stays the amount column. An unpadded short row
+                // would slide the next value into somebody's amount.
+                vec![
+                    "0xee2cca98ecbff34663591a925968fa4db5a1f0dd".to_owned(),
+                    String::new(),
+                ],
+            ]
+        );
+    }
+
     #[test]
     fn cells_read_as_the_text_a_csv_would_carry() {
         assert_eq!(cell_text(&calamine::Data::Float(5000.0)), "5000");

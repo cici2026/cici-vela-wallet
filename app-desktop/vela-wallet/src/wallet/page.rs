@@ -4843,6 +4843,13 @@ impl WalletPage {
         };
 
         let rpc_badge = row.rpc_health.as_ref().and_then(settings_live::probe_badge);
+        // The explorer is probed too, and the field has the same badge slot
+        // the RPC one uses — it was being passed `None`, so a measured
+        // explorer looked exactly like an unprobed one.
+        let explorer_badge = row
+            .explorer_health
+            .as_ref()
+            .and_then(settings_live::probe_badge);
         // The refusal, in words, over the hint. A person who just watched
         // nothing happen needs to be told why, and "saved" would be a lie —
         // which it also is for the seconds the verdict is still outstanding.
@@ -4887,7 +4894,7 @@ impl WalletPage {
                 Some(self.settings.explorer.clone()),
                 &row.explorer_url,
                 self.settings.explorer.clone(),
-                None,
+                explorer_badge.as_ref(),
                 None,
                 None,
                 &explorer_focus,
