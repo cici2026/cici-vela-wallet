@@ -621,6 +621,10 @@ phase 6/6b 是**对我自己 phase 4/5 的自查**:那两刀写的 live 构造�
 
 ## 立刻可跑的闸门
 
+> **别把 `cargo test` 接进管道再用 `&&` 串**(比如 `| tail -3 &&`):`&&` 接的是
+> `tail` 的退出码,永远是 0,测试挂了照样报绿。要么原样跑,要么先 `set -o pipefail`。
+> phase 8 有一次真实失败就是这么被瞒过去的。
+
 ```bash
 cd /Volumes/data/production/vela-wallet-native/app-desktop/vela-wallet
 cargo fmt --all --check && cargo test --features dev-fixtures && cargo test \
@@ -634,13 +638,16 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线:desktop **267 passed(feature on)/ 263(off)· 32 ignored**(phase 7 前是 258/254),
-vela-core **1,264**,fmt clean,gallery 36 态全渲染,**两种 feature 配置下各 1 个 warning**
-(`BLE_CHANNEL_SUPPORTED`)——phase 7 之前 `--tests` 下其实是 3 个,多的两个一个是真缺陷。
+基线(**并入 028 之后**):desktop **263 passed(feature on)/ 259(off)· 32 ignored**,
+vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
+**两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
+桌面数字比 phase 7 的 267/263 少 4:删掉的 `executor/contact_io.rs` 带走 6 个测试,新增 2 个。
+(phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
-要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。本刀两次都是
-wasm 3,630,664 字节不变、只有指纹改名。
+要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。
+当前 wasm:`1b6c8ce4be03`,**3,725,860 字节**(032 自己那两次是 3,630,664 只改指纹名;
+并入 028 后长了,因为 028 的新事件和拼音首字母表在里面)。
 
 ## SC-303:那一推怎么拉(**已拉,2026-09-07**;命令留着,复跑还会再花一次 dust)
 
@@ -692,12 +699,11 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
    多出来的那两个里有一个(`AddToken.notice` 从来没被画)是 phase 6 自己留下的真缺陷,
    编译器指着它说了不知道多少遍。压着不看的警告,下一条真的就藏在它后面。
 
-## 028 合并后要立刻做的(**已合并**:`origin/main` = `61568f22`,PR #186,2026-09-07 确认)
+## ~~028 合并后要立刻做的~~ — **已并、六步已走完(phase 8,2026-09-07)**
 
-> 触发条件已经成立。本分支(以及它下面的 029/030/031)仍从 `f9bcb278` 长出来,
-> 66 个提交都不在 main 里,所以下面六步一步没做。把 main 并进来是会改动整棵树的操作,
-> 而这个工作区当下还有别的会话在跑(`app-web/clearsigning/`、`design/clearsigning/`、
-> `lib/` 三个未跟踪目录不是本会话建的)——并树前先跟创始人确认,或者换独立 worktree。
+> `origin/main` = `61568f22`(PR #186)已并进本分支,`executor/contact_io.rs` 已删,
+> 分组字母归核心。详见上面的 **Phase 8**。下面这份原始清单留着当对照记录。
+> **注意**:029/030/031 仍未单独合并进 main;本分支现在既含它们也含 028。
 
 028 把联系人导入/导出的规则从桌面的 `executor/contact_io.rs` **提进了核心**
 (`app/contacts_io.rs`),并改了 `contacts.rs` 的事件与视图字段。rebase 到含 028 的 main 后:
