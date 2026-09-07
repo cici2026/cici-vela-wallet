@@ -123,6 +123,7 @@ pub enum Answer<T, E> {
 /// draining after the work has returned and dropped its sink. What it does not
 /// reproduce is the concurrency, which is the point of the real path and not
 /// of a test.
+#[cfg(test)]
 pub fn run_streaming<T, E>(work: Box<dyn FnOnce(&Sink<E>) -> T + Send>) -> (Vec<E>, T) {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     let result = work(&Sink(tx));

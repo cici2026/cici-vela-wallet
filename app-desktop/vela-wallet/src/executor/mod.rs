@@ -54,6 +54,18 @@ pub mod receive_watch;
 pub mod registry;
 pub mod relay;
 pub mod send;
+/// The signing panel's seven operations.
+///
+/// Unwired until the panel's host exists — the same state `pool::call` sat in
+/// between 030 and 031, and marked the same way rather than left to make the
+/// warning count meaningless. **Take this off when the host lands**: an
+/// `allow(dead_code)` marks a function's CALLEES live too (spec 032 lesson 1),
+/// so while it is here nothing inside this module can be seen to be dead.
+#[allow(
+    dead_code,
+    reason = "wired by the signing panel's host, spec 032 phase 18"
+)]
+pub mod sign_request;
 pub mod storage;
 pub mod token_trust;
 pub mod tracker;
