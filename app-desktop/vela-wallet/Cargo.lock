@@ -9134,6 +9134,7 @@ dependencies = [
  "uuid",
  "vela-core",
  "vela-passkey-win",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 

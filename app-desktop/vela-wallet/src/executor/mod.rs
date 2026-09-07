@@ -410,16 +410,71 @@ fn local_utc_offset_seconds() -> i64 {
     tm.tm_gmtoff
 }
 
-/// Windows has no `localtime_r`; `GetTimeZoneInformation` is the equivalent and
-/// is not wired yet.
+/// Windows has no `localtime_r`; `GetTimeZoneInformation` is the equivalent.
 ///
-/// The consequence is visible rather than subtle: the activity feed groups by
-/// UTC day on Windows, so a late-evening transaction files under tomorrow. A
-/// recorded debt, and a small one — but it is somebody's feed reading wrong for
-/// part of every day, not a rounding error.
-#[cfg(not(unix))]
+/// Until spec 032 phase 11 this returned `0`, so the activity feed grouped by
+/// UTC day on Windows and a late-evening transaction filed under tomorrow —
+/// somebody's feed reading wrong for part of every day.
+///
+/// **This call cannot be compiled here.** The app's dependency tree builds C
+/// (ThorVG, resvg, hidapi), so `--target x86_64-pc-windows-gnu` dies in a
+/// build script long before it reaches Rust — the reason `check-windows.sh`
+/// checks a separate crate. It was verified by lifting exactly these lines
+/// into an isolated crate and cross-checking them, which is how the missing
+/// `TIME_ZONE_ID_UNKNOWN` export was found. The ARITHMETIC is a separate,
+/// unsafe-free function below with tests that run on every platform.
+// `windows` rather than `not(unix)`: the body needs `windows-sys`, which is a
+// dependency only under that same cfg. A target that is neither would now fail
+// to find this function at all — louder, and better, than silently grouping a
+// third platform by UTC.
+#[cfg(windows)]
 fn local_utc_offset_seconds() -> i64 {
-    0
+    use windows_sys::Win32::System::Time::{
+        GetTimeZoneInformation, TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
+    };
+    // windows-sys 0.59 exports only this one of the four ids; the other three
+    // are matched by value in `windows_offset_seconds`. Pin what is exported,
+    // so a version that renumbered them would fail to build rather than
+    // quietly shift everyone's day boundary.
+    const _: () = assert!(TIME_ZONE_ID_INVALID == u32::MAX);
+
+    let mut info: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `GetTimeZoneInformation` fills a struct this call owns and reads
+    // no global state of ours. A failure returns TIME_ZONE_ID_INVALID and
+    // leaves the struct meaningless, which the arithmetic below refuses rather
+    // than computes.
+    let id = unsafe { GetTimeZoneInformation(&raw mut info) };
+    windows_offset_seconds(id, info.Bias, info.StandardBias, info.DaylightBias)
+}
+
+/// Win32's three biases as one UTC offset in seconds.
+///
+/// The sign is the trap: Win32 defines **UTC = local + bias**, so the offset a
+/// person east of Greenwich lives at is the NEGATIVE of their bias. Berlin's
+/// winter bias is −60 and its offset is +3600.
+///
+/// Which seasonal bias applies is the id's to say, and the two must not be
+/// crossed: adding `StandardBias` while the zone is on daylight time is an
+/// hour's error in the direction that looks plausible.
+///
+/// Split out and free of `unsafe` on purpose — this half is compiled and
+/// tested on every platform, so the part of the Windows path that can be
+/// wrong arithmetically is the part that is not Windows-only.
+#[cfg(any(windows, test))]
+fn windows_offset_seconds(id: u32, bias: i32, standard_bias: i32, daylight_bias: i32) -> i64 {
+    let seasonal = match id {
+        // TIME_ZONE_ID_STANDARD
+        1 => standard_bias,
+        // TIME_ZONE_ID_DAYLIGHT
+        2 => daylight_bias,
+        // TIME_ZONE_ID_UNKNOWN — the zone has no seasonal rule at all.
+        0 => 0,
+        // TIME_ZONE_ID_INVALID, or anything undocumented: the struct was never
+        // filled, so every field is garbage. Fall back to UTC rather than
+        // compute a day boundary out of it.
+        _ => return 0,
+    };
+    -(i64::from(bias) + i64::from(seasonal)) * 60
 }
 
 /// Local midnight for an instant, as epoch milliseconds.
@@ -484,4 +539,50 @@ pub fn now_iso() -> String {
         civil.second,
         unix_millis().rem_euclid(1_000)
     )
+}
+
+#[cfg(test)]
+mod timezone_tests {
+    use super::windows_offset_seconds;
+
+    /// Win32 defines UTC = local + bias, so the offset is the bias NEGATED.
+    /// Getting this backwards puts Berlin at UTC−1 and New York at UTC+5,
+    /// which is the whole day-boundary bug in the other direction.
+    #[test]
+    fn the_offset_is_the_bias_negated() {
+        // Berlin in winter: bias −60, on standard time.
+        assert_eq!(windows_offset_seconds(1, -60, 0, -60), 3_600);
+        // New York in winter: bias 300, on standard time.
+        assert_eq!(windows_offset_seconds(1, 300, 0, -60), -18_000);
+    }
+
+    /// Daylight time takes the DAYLIGHT bias. Reaching for the standard one
+    /// while the zone is on summer time is an hour out, in the direction that
+    /// looks entirely plausible on screen.
+    #[test]
+    fn summer_time_uses_its_own_bias() {
+        // Berlin in summer: −60 base, −60 more for daylight ⇒ UTC+2.
+        assert_eq!(windows_offset_seconds(2, -60, 0, -60), 7_200);
+        // New York in summer ⇒ UTC−4, not UTC−5.
+        assert_eq!(windows_offset_seconds(2, 300, 0, -60), -14_400);
+    }
+
+    /// A zone with no seasonal rule reports UNKNOWN and carries only a bias.
+    /// India is the half-hour case, which a whole-hour assumption would lose.
+    #[test]
+    fn a_zone_without_a_season_uses_its_bias_alone() {
+        assert_eq!(windows_offset_seconds(0, -330, 0, 0), 19_800);
+        // Even if the struct carries seasonal biases, UNKNOWN ignores them.
+        assert_eq!(windows_offset_seconds(0, -60, -30, -90), 3_600);
+    }
+
+    /// The call FAILED and the struct is meaningless. Computing a day boundary
+    /// out of uninitialised fields would be worse than the UTC grouping this
+    /// replaces, because it would be wrong unpredictably rather than
+    /// consistently.
+    #[test]
+    fn a_failed_call_falls_back_to_utc_rather_than_to_garbage() {
+        assert_eq!(windows_offset_seconds(u32::MAX, 999, 999, 999), 0);
+        assert_eq!(windows_offset_seconds(7, -60, 0, -60), 0);
+    }
 }

@@ -683,6 +683,56 @@ Apply 之后两行金额 `5000` 和 `173.88` 一位不差。
 量到延迟的浏览器和根本没探过的长得一模一样。改成传 `explorer_badge`,一行,
 用的是已经有的 `probe_badge`,没有新画面。
 
+## Phase 11 — Windows 的日界线,以及怎么验一段编译不了的代码
+
+031 留的第 5 件:`GetTimeZoneInformation` 没接,`local_utc_offset_seconds()` 在
+非 unix 上直接返回 0。后果不小:**Windows 上活动列表按 UTC 分日**,晚上的转账归到明天,
+"每天有一段时间,谁的列表都在说错话"。
+
+**这段代码在这台机器上编译不了。** 桌面 app 的依赖树要编 C(ThorVG、resvg、hidapi),
+`--target x86_64-pc-windows-gnu` 会死在 build script 里,连 Rust 都到不了——
+这正是 `check-windows.sh` 只检一个独立小 crate 的原因。所以验证分三层:
+
+1. **算术单独拆出来、不带 `unsafe`、每个平台都编都测**。`windows_offset_seconds`
+   是纯函数,4 个测试在本机跑:
+   - **符号**:Win32 定义 `UTC = local + bias`,所以偏移是 bias 取反。柏林冬天 bias −60 → +3600。
+     搞反了柏林就成 UTC−1、纽约成 UTC+5。
+   - **季节**:DAYLIGHT 要用 `DaylightBias`。夏天误用 `StandardBias` 就差一小时,
+     而且差得"看着很合理"。
+   - **半小时区**:印度 UNKNOWN + bias −330 → +19800,整点假设会丢掉它。
+   - **调用失败**:`TIME_ZONE_ID_INVALID` 时结构体根本没填,必须**退回 UTC 而不是拿垃圾算**
+     ——错得没规律比错得有规律更糟。
+2. **FFI 那几行,原样抬进一个隔离 crate 交叉编译**(`x86_64-pc-windows-gnu`,
+   `clippy -D warnings` 也过)。这一步当场抓到:**windows-sys 0.59 只导出
+   `TIME_ZONE_ID_INVALID`**,另外三个 id 不存在,所以按值匹配、并对导出的那个下
+   `const _: () = assert!(… == u32::MAX)`——将来哪个版本改了编号会编译失败,
+   而不是悄悄挪掉所有人的日界线。
+3. **依赖连线**:`cargo tree --target x86_64-pc-windows-gnu -i windows-sys@0.59.0`
+   确实显示 `vela-wallet` 这条边。Cargo.toml 第 150 行那段警告是认真的
+   ——这个 crate 就曾经被写进 macOS 的 target 段里、Windows 路径整个没链上而闸门全绿。
+
+顺手把 cfg 从 `not(unix)` 收紧成 `windows`:函数体现在依赖 `windows-sys`,而它只在
+`cfg(windows)` 下存在;既不是 unix 又不是 windows 的目标现在会**找不到这个函数**,
+比再默默按 UTC 分一次日要好。
+
+**没验的那一层写在这里**:没有在 Windows 上跑过。编译、clippy、算术都过了,
+行为没有。和 `check-windows.sh` 自己的说明是同一句话。
+
+### 把那次验证做成闸门,而不是一句记录
+
+上面第 2 层本来是我在临时目录里手工做的一次性动作。现在写进 `scripts/check-windows.sh`:
+它把 `src/executor/mod.rs` 里那两个函数**原样抬**进一个临时 crate(没有 C),
+交叉编译 + `clippy -D warnings`。抬取是**故意死板的文本匹配**,函数被改名就大声失败,
+而不是悄悄什么都没检。
+
+**并且验过它会失败**:把 `info.StandardBias` 改成 `info.StandrdBias`,脚本以 1 退出、
+指着那个字段报错;改回来就绿。一条不会失败的闸门比没有闸门更糟,这是本刀
+"管道吃掉退出码"那条的同一个教训。
+
+> **闸门的第二个坑**(第一个是管道吃退出码):Bash 工具的**工作目录会留在上一条命令**。
+> 我在隔离 crate 里 `cd` 过一次,下一条闸门就在**那个目录**跑了 `cargo fmt --all --check`,
+> 报的是隔离 crate 的格式问题。闸门命令自己带上 `cd`,别指望继承。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
@@ -722,11 +772,11 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线(**并入 028、走完 phase 10 之后**):desktop **267 passed(feature on)/ 263(off)· 32 ignored**,
+基线(**并入 028、走完 phase 11 之后**):desktop **271 passed(feature on)/ 267(off)· 32 ignored**,
 vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
 **两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
-桌面数字回到 phase 7 的 267/263:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
-phase 8 加 2、phase 9 加 2、phase 10 加 2。
+桌面数字:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
+phase 8 加 2、9 加 2、10 加 2、11 加 4。
 (phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -754,7 +804,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
 | 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
 | 5 | `SimulateCalls` | 桌面没有模拟引擎,答 `None` |
-| 6 | 031 留的五件:收藏控件、设置页新建/登录账户、扫码、余额流式、Windows 日界线 | 原样 |
+| 6 | 031 留的五件 | **Windows 日界线已交付**(phase 11,算术有测、FFI 交叉编译验过、没在 Windows 上跑过)。其余四件原样:收藏控件(桌面图里没有星标,**缺图**)、设置页新建/登录账户(**要导航决策**)、扫码(桌面没有相机管线,是新功能不是接线)、余额流式(要 worker→resident 事件推送,**纯工时**) |
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
 | 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |

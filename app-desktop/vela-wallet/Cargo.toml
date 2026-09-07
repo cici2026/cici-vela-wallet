@@ -287,6 +287,16 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
 
+# `GetTimeZoneInformation`, for the one fact the core cannot derive: which day
+# a timestamp belongs to. Bindings rather than a hand-rolled
+# `TIME_ZONE_INFORMATION`, because getting that struct's layout wrong is
+# undetectable from a machine that cannot compile this target — and this crate
+# cannot be cross-checked at all (its C dependencies die in their build
+# scripts), so the call was verified in an isolated crate against
+# x86_64-pc-windows-gnu instead. Note 0.59 exports only TIME_ZONE_ID_INVALID
+# of the four ids; the other three are matched by value.
+windows-sys = { version = "0.59", features = ["Win32_System_Time"] }
+
 # Embeds the application icon into vela-wallet.exe as resource id 1, which is
 # where gpui's LoadImageW looks for it. Declared unconditionally rather than
 # under [target.'cfg(windows)'.build-dependencies], because that section is
