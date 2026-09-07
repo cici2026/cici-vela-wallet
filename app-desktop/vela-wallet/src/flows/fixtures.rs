@@ -399,6 +399,9 @@ pub struct FeeTokenRow {
     pub balance: SharedString,
     pub fee: SharedString,
     pub selected: bool,
+    /// The core's balance<fee gate (invariant ⑧): shown for context, NOT
+    /// selectable — paying gas in it would only produce a doomed operation.
+    pub insufficient: bool,
 }
 
 #[derive(Clone)]
@@ -430,9 +433,9 @@ pub struct BatchImport {
     pub parsed: SharedString,
     pub rows: Vec<BatchRow>,
     pub rejected: SharedString,
-    /// Live only: the over-cap / over-balance notice, beside `rejected`
-    /// (the two never hide each other).
-    pub notice: Option<SharedString>,
+    /// Live only: the over-cap / over-balance / unreadable-file notice,
+    /// beside `rejected` (the two never hide each other).
+    pub notice: Option<SendNotice>,
     /// Live only: the "Auto" affordance once the rate was edited by hand.
     pub rate_reset: Option<SharedString>,
     /// The apply gate is the core's; the mock's button is always armed.
@@ -1010,6 +1013,7 @@ fn fee_token(s: &FlowStrings) -> FeeTokenPick {
         balance: fill(&s.balance_label, "amount", amount).into(),
         fee: fee.into(),
         selected,
+        insufficient: false,
     };
     FeeTokenPick {
         hint: s.fee_token_hint.clone(),

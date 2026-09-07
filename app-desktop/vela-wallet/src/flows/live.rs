@@ -1442,6 +1442,7 @@ pub fn fee_token(i: &SendInputs<'_>) -> FeeTokenPick {
                         .into(),
                     },
                     selected: option.selected,
+                    insufficient: option.insufficient,
                 }
             })
             .collect(),
@@ -1589,10 +1590,34 @@ pub fn batch_import(view: &BatchView, symbol: &str, s: &FlowStrings) -> BatchImp
             })
             .collect(),
         rejected: rejected.into(),
-        notice: if view.over_balance {
-            Some(s.batch_over_balance.clone())
+        // A file that could not be read must SAY so — the core raises the
+        // flag for exactly that, and a picker that silently does nothing is
+        // indistinguishable from one that is broken.
+        notice: if view.file_error {
+            Some(SendNotice {
+                title: Some(s.batch_import_failed_title.clone()),
+                body: s.batch_import_failed_body.clone(),
+                detail: None,
+                action: None,
+                error: true,
+            })
+        } else if view.over_balance {
+            Some(SendNotice {
+                title: None,
+                body: s.batch_over_balance.clone(),
+                // The figure the refusal is about — no key needed for a number.
+                detail: Some(format!("{} {symbol}", view.total_token).into()),
+                action: None,
+                error: true,
+            })
         } else if view.over_cap {
-            Some(s.batch_over_cap.clone())
+            Some(SendNotice {
+                title: None,
+                body: s.batch_over_cap.clone(),
+                detail: None,
+                action: None,
+                error: false,
+            })
         } else {
             None
         },

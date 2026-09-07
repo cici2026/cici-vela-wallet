@@ -417,13 +417,24 @@ precisely why dropping it was worse than it looked. The test now drives the
 real machine through both steps and asserts the sentence, the armed button,
 the alert and that the flow stays on the form.
 
+**Two more of the same class, found by carrying the sweep into phase 5's
+work**: the fee sheet drew a coin that cannot cover the fee as selectable
+(`FeeOptionView.insufficient` dropped — the core's invariant ⑧ says such a
+row is shown for context and is NOT selectable, because paying gas in it only
+produces a doomed operation), and a picked file the shell could not read
+raised `BatchView.file_error` that nothing showed — a picker that silently
+does nothing is indistinguishable from a broken one. Both fixed; the fee gate
+lives in ONE place (the panel dims the row and drops its listener from the
+core's own flag — a second gate in the page would be a second opinion about
+one fact), and the over-balance refusal now carries the figure it is about.
+
 **Still not drawn** (recorded, not hidden): the ⇄ fiat/token control (its
 refusal is now spoken, but the control itself is a drawing the desktop does
 not have), the multi-token sweep picker (`multi_select_mode` and its
 checkbox column), and per-row editing of a split (a seeded group's amounts
 are typed in the batch importer or not at all).
 
-**Gates**: desktop **256 → 257** with the feature (253 without) · fmt clean ·
+**Gates**: desktop **256 → 258** with the feature (254 without) · fmt clean ·
 1 pre-existing warning · gallery sweep every state rendered · the live spine
 still reaches Confirm with the relay's real 0.010 xDAI quote.
 
@@ -455,7 +466,7 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线:desktop **257 passed(feature on)/ 253(off)· 32 ignored**,vela-core **1,264**,
+基线:desktop **258 passed(feature on)/ 254(off)· 32 ignored**,vela-core **1,264**,
 fmt clean,gallery 36 态全渲染,1 个既有 warning(`BLE_CHANNEL_SUPPORTED`)。
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -533,3 +544,15 @@ grep -n 'fixtures::' src/wallet/page.rs
 本刀新增的 Dsd 臂全部走 `send_views(cx)` 门:有宿主读核心,没宿主画 mock;phase 5 后
 `FlowPanel::Dsd2c` 也读 `batch_view`。已登录能点到的界面里只剩 explore(等 web 引擎)
 和 DS1 扫码(等相机)在画 mock。
+
+**但 031 那条 grep 不够。** 它抓"还在画 mock 的界面";phase 6 抓到的是另一类——
+**界面是活的,却把核心算出的判断丢在地上**。第二条 grep,每接完一台机器就跑:
+
+```bash
+# 视图给了什么(判断字段) vs live 构造器读了什么
+grep -o "    pub [a-z_]*" ../../rust/crates/vela-core/src/app/<machine>.rs
+grep -o "view\.[a-z_]*\|send\.[a-z_]*\|option\.[a-z_]*" src/flows/live.rs | sort -u
+```
+差集里每一个 `warning` / `issue` / `failure` / `can_*` / `insufficient` /
+`*_error`,都是核心替人算好、屏幕却不说的一句话。phase 6 一次找出十六个,
+其中三个(余额警告、手续费币种不可选、文件读不出)直接影响钱。

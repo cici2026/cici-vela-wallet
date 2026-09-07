@@ -1293,6 +1293,85 @@ mod tests {
         .cta_state
     }
 
+    /// The two gates the core owns and the screen must not re-decide: a fee
+    /// coin that cannot cover the fee is drawn unselectable, and a file that
+    /// could not be read says so.
+    #[test]
+    fn the_fee_gate_and_the_unreadable_file_reach_the_screen() {
+        use crate::flows::FlowStrings;
+        use crate::flows::live::{SendInputs, batch_import, fee_token};
+        use crate::loc::Loc;
+        use crate::wallet::WalletStrings;
+        use vela_core::app::batch_import::{BatchRateStatus, BatchUnit, BatchView};
+        use vela_core::app::fee_policy::FeeOptionView;
+
+        let loc = Loc::from_env();
+        let s = FlowStrings::resolve(&loc);
+        let wallet = WalletStrings::resolve(&loc);
+        let option = |symbol: &str, insufficient: bool| FeeOptionView {
+            symbol: symbol.to_owned(),
+            contract: (symbol != "xDAI").then(|| format!("0x{symbol}")),
+            decimals: 18,
+            balance: "1000000000000000000".to_owned(),
+            recipient: "0x1111111111111111111111111111111111111111".to_owned(),
+            usd_balance: "1".to_owned(),
+            usd_price: Some("1".to_owned()),
+            amount: Some("10000000000000000".to_owned()),
+            insufficient,
+            selected: symbol == "xDAI",
+        };
+        let fee = FeeView {
+            options: vec![option("xDAI", false), option("USDC", true)],
+            ..CoreHost::<FeePolicy>::new().view()
+        };
+        let send = CoreHost::<Send>::new().view();
+        let rows = fee_token(&SendInputs {
+            send: &send,
+            fee: &fee,
+            s: &s,
+            wallet: &wallet,
+            locale: "en",
+            identity_name: "Golden",
+            identity_address: "0x0",
+        })
+        .rows;
+        assert_eq!(rows.len(), 2, "both are shown — for context");
+        assert!(!rows[0].insufficient && rows[0].selected);
+        assert!(
+            rows[1].insufficient,
+            "a coin that cannot pay the fee is not selectable"
+        );
+
+        // A picked file the shell could not read.
+        let batch = BatchView {
+            file_error: true,
+            unit: BatchUnit::Fiat,
+            fiat_code: "USD".to_owned(),
+            rate_status: BatchRateStatus::Ok,
+            rate_input: "1".to_owned(),
+            ..CoreHost::<BatchImport>::new().view()
+        };
+        let notice = batch_import(&batch, "USDT", &s)
+            .notice
+            .unwrap_or_else(|| unreachable!("an unreadable file must say so"));
+        assert!(notice.error);
+        assert_eq!(notice.title, Some(s.batch_import_failed_title.clone()));
+
+        // Over balance: the refusal carries the figure it is about. (The
+        // unreadable file above outranks it — the priority order is the
+        // point, so this case has to clear that flag.)
+        let batch = BatchView {
+            file_error: false,
+            over_balance: true,
+            total_token: "13000".to_owned(),
+            ..batch
+        };
+        let notice = batch_import(&batch, "USDT", &s)
+            .notice
+            .unwrap_or_else(|| unreachable!("over balance must say so"));
+        assert_eq!(notice.detail.as_deref(), Some("13000 USDT"));
+    }
+
     #[test]
     fn the_fee_vocabulary_maps_one_to_one() {
         assert_eq!(

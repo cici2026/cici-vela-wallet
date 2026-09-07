@@ -1294,9 +1294,17 @@ fn fee_token(
         if row.selected {
             entry = entry.child(icon_img(icons, Icon::Check, false, theme.accent, 14.));
         }
+        // A coin that cannot cover the fee is shown for context and answers
+        // to nothing (invariant ⑧) — the listener is dropped, not just dimmed.
+        let action = per_row.next();
+        let (entry, action) = if row.insufficient {
+            (entry.opacity(0.45), None)
+        } else {
+            (entry, action)
+        };
         col = col.child(clickable(
             ElementId::from(("flow-fee-row", i)),
-            per_row.next(),
+            action,
             entry,
         ));
     }
@@ -1494,12 +1502,7 @@ fn batch_import(
             .child(model.rejected.clone()),
     );
     if let Some(notice) = &model.notice {
-        col = col.child(
-            div()
-                .text_size(theme::text_row_sub())
-                .text_color(theme.warning_base)
-                .child(notice.clone()),
-        );
+        col = col.child(notice_card(notice, theme, None));
     }
     // Bad rows are marked and skipped, never silently dropped, and the CTA
     // counts only the good ones — a button that says "Import 3" and imports 2

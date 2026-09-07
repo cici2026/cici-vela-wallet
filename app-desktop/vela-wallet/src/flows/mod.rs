@@ -395,6 +395,8 @@ pub struct FlowStrings {
     pub batch_rejected_other: String,
     pub batch_apply_empty: SharedString,
     pub batch_no_price: SharedString,
+    pub batch_import_failed_title: SharedString,
+    pub batch_import_failed_body: SharedString,
 }
 
 impl FlowStrings {
@@ -581,6 +583,8 @@ impl FlowStrings {
             batch_rejected_other: raw("send.batchRejected_other"),
             batch_apply_empty: s("send.batchApplyEmpty"),
             batch_no_price: s("send.batchNoPrice"),
+            batch_import_failed_title: s("send.batchImportFailedTitle"),
+            batch_import_failed_body: s("send.batchImportFailedBody"),
         }
     }
 }
