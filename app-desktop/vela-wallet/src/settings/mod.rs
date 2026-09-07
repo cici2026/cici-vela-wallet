@@ -76,6 +76,11 @@ pub struct SettingsStrings {
     /// The prefix a slow endpoint's pill wears: "Slower · 1.2s".
     pub network_slow: SharedString,
     pub network_save_hint: SharedString,
+    /// While the blur's chain-id verdict is outstanding. The standing hint
+    /// says "saved as soon as you leave the field", which for those seconds
+    /// is not yet true — the override is written only once the RPC agrees
+    /// about which chain it serves.
+    pub network_save_checking: SharedString,
     pub compatible: SharedString,
     pub compatibility_check: SharedString,
     pub check_safe: SharedString,
@@ -110,6 +115,22 @@ pub struct SettingsStrings {
     /// The wizard's retry, for a chain the probe could not reach — never a
     /// condemnation (the core's invariant ③).
     pub recheck: SharedString,
+    /// What the wizard is DOING between a click and a verdict. The dialog is
+    /// otherwise inert while the index resolves and the probes run, which is
+    /// the specific silence phase 6 found on the send screen: a screen that
+    /// looks broken because nobody said it was working.
+    pub wizard_searching: SharedString,
+    pub wizard_checking: SharedString,
+    /// The four ways the wizard STOPS (`NetWizardErrorKind`). The core decides
+    /// which; these are only the words, and all four were already in the
+    /// corpus — the scan path and the add-token screen say the same things.
+    pub wizard_already_added: SharedString,
+    pub wizard_not_found: SharedString,
+    /// `{{name}} RPC unavailable`: the registry listed no endpoint for the
+    /// resolved chain, and no custom RPC was typed. Carries the chain's name
+    /// because at this point the wizard HAS resolved it.
+    pub wizard_no_rpc: String,
+    pub wizard_incompatible: SharedString,
     pub endpoints_reset: SharedString,
     pub endpoints_guide: SharedString,
     // storage panel
@@ -218,6 +239,7 @@ impl SettingsStrings {
             network_custom: s("settings.networks.custom"),
             network_slow: s("settings.networks.slow"),
             network_save_hint: s("settings.networks.saveHint"),
+            network_save_checking: s("componentsUi.funding.checking"),
             compatible: s("settingsModals.addNetwork.compatible"),
             compatibility_check: s("settingsModals.addNetwork.compatibilityCheck"),
             check_safe: s("settingsModals.addNetwork.checkSafe"),
@@ -246,6 +268,12 @@ impl SettingsStrings {
             health_offline: s("settingsModals.health.offline"),
             health_invalid: s("settingsModals.health.invalid"),
             recheck: s("settingsModals.addNetwork.recheck"),
+            wizard_searching: s("settingsModals.addNetwork.searching"),
+            wizard_checking: s("settingsModals.addNetwork.checkingCompatibility"),
+            wizard_already_added: s("addToken.errorAlreadyAdded"),
+            wizard_not_found: s("addToken.errorChainNotFound"),
+            wizard_no_rpc: raw("assets.rpcUnavailableSingle"),
+            wizard_incompatible: s("settingsModals.addNetwork.incompatible"),
             endpoints_reset: s("settingsModals.endpoints.resetToDefaults"),
             endpoints_guide: s("settingsModals.endpoints.selfHostGuide"),
             storage_subtitle: s("settings.storage.subtitle"),

@@ -14,7 +14,8 @@ use crate::settings::model::{NetworkRowModel, chain_tint, lettermark};
 
 use vela_core::app::display_currency::CurrencyView;
 use vela_core::app::network_admin::{
-    NetCompatibility, NetProbeHealth, NetProviderId, NetServiceHealth, NetView,
+    NetCompatibility, NetNetworkRow, NetProbeHealth, NetProviderId, NetServiceHealth, NetView,
+    NetWizardErrorKind, NetWizardPhase, NetWizardView,
 };
 use vela_core::l10n::currency::{FiatOptions, format_fiat};
 
@@ -420,6 +421,309 @@ pub fn network_rows(view: &NetView) -> Vec<NetworkRowModel> {
             custom: row.is_custom,
         })
         .collect()
+}
+
+/// The line under a network's RPC field, in the order the core's three states
+/// deserve.
+///
+/// A refusal outranks everything: nothing was written and the person is owed
+/// the reason. Then the **pending** verdict — because the standing hint says
+/// "saved as soon as you leave the field", and while `rpc_save_deferred` is
+/// true that sentence is not yet true. Leaving it up is the small version of
+/// lesson 3: a screen claiming a write landed before anyone checked.
+#[must_use]
+pub fn override_hint(row: &NetNetworkRow, s: &SettingsStrings) -> SharedString {
+    if let Some(mismatch) = &row.rpc_chain_mismatch {
+        return SharedString::from(crate::wallet::fill(
+            &crate::wallet::fill(
+                &s.rpc_wrong_chain,
+                "actual",
+                &mismatch.reported_chain_id.to_string(),
+            ),
+            "expected",
+            &mismatch.expected_chain_id.to_string(),
+        ));
+    }
+    if row.rpc_save_deferred {
+        return s.network_save_checking.clone();
+    }
+    s.network_save_hint.clone()
+}
+
+/// The one line the add-network dialog owes the person: what the wizard is
+/// doing, or why it stopped.
+///
+/// `Progress` is a wait on something outside the app (the chain index, the RPC
+/// probes) and draws a spinner; `Refusal` is a verdict and draws in the error
+/// tint. `Idle`, `Suggested` and `Checked` return **nothing**, because in those
+/// three the dialog already speaks — the suggestion list, the check list, the
+/// CTA.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WizardNotice {
+    Progress(SharedString),
+    Refusal(SharedString),
+}
+
+/// What the core decided the wizard is, in words.
+///
+/// Every one of these already existed in the corpus: the scan path and the
+/// add-token screen refuse in the same four ways (`NetWizardErrorKind` serves
+/// both callers — the core's invariant ①), so this adds no new key. The
+/// alternative — a silent dialog — is the phase 6 bug in another screen:
+/// **the core computed a refusal and the screen kept it to itself.**
+#[must_use]
+pub fn wizard_notice(view: &NetWizardView, s: &SettingsStrings) -> Option<WizardNotice> {
+    match view.phase {
+        NetWizardPhase::Idle | NetWizardPhase::Suggested | NetWizardPhase::Checked => None,
+        NetWizardPhase::Searching => Some(WizardNotice::Progress(s.wizard_searching.clone())),
+        // Resolving the chain and probing its endpoints are one wait as far as
+        // the person is concerned; the core keeps them apart for its own
+        // generation rules, not for the screen.
+        NetWizardPhase::Resolving | NetWizardPhase::Checking => {
+            Some(WizardNotice::Progress(s.wizard_checking.clone()))
+        }
+        NetWizardPhase::Error => view.error.as_ref().map(|kind| {
+            WizardNotice::Refusal(match kind {
+                NetWizardErrorKind::AlreadyAdded { .. } => s.wizard_already_added.clone(),
+                NetWizardErrorKind::NotFound { .. } => s.wizard_not_found.clone(),
+                // The chain resolved — its name is the honest subject of the
+                // sentence. The query is the fallback for a state the core
+                // does not produce today (`chain_info` is set before this
+                // error is raised), never a guess dressed as a chain name.
+                NetWizardErrorKind::NoRpcEndpoint => {
+                    let name = view
+                        .chain_info
+                        .as_ref()
+                        .map_or_else(|| view.query.clone(), |info| info.name.clone());
+                    SharedString::from(crate::wallet::fill(&s.wizard_no_rpc, "name", &name))
+                }
+                NetWizardErrorKind::NotCompatible { .. } => s.wizard_incompatible.clone(),
+            })
+        }),
+    }
+}
+
+#[cfg(test)]
+mod wizard_tests {
+    use super::*;
+
+    use crate::core_host::{CoreHost, Pending};
+    use vela_core::app::network_admin::{
+        Event as NetEvent, NetOperation, NetProviderKeys, NetRawChainData, NetShellResult,
+        NetStoredEndpoints, NetworkAdmin,
+    };
+
+    fn strings() -> SettingsStrings {
+        SettingsStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A core whose ledger is in.
+    ///
+    /// Not optional decoration: `select_chain` FAILS CLOSED until the store
+    /// has loaded (acting before it could add a duplicate), so a wizard test
+    /// on an unloaded core silently exercises nothing.
+    fn loaded_host() -> CoreHost<NetworkAdmin> {
+        let mut host = CoreHost::<NetworkAdmin>::new();
+        let pending = host.dispatch(NetEvent::Started);
+        for Pending { id, operation } in pending {
+            if matches!(operation, NetOperation::ReadStore) {
+                host.resolve(
+                    id,
+                    NetShellResult::StoreLoaded {
+                        custom_networks: Vec::new(),
+                        network_configs: Vec::new(),
+                        endpoints: NetStoredEndpoints::default(),
+                        provider_keys: NetProviderKeys::default(),
+                    },
+                );
+            }
+        }
+        host
+    }
+
+    /// Nothing has happened yet, so there is nothing to say. A notice here
+    /// would be noise in an empty dialog.
+    #[test]
+    fn an_untouched_wizard_says_nothing() {
+        let host = loaded_host();
+        assert_eq!(wizard_notice(&host.view().wizard, &strings()), None);
+    }
+
+    /// Typing arms a search that runs on a debounce and then a network call.
+    /// Until phase 6b's rule reached this dialog it drew a still list and no
+    /// word about the query being worked on.
+    #[test]
+    fn a_running_search_says_it_is_running() {
+        let mut host = loaded_host();
+        host.dispatch(NetEvent::SearchInput {
+            query: "gnosis".to_owned(),
+        });
+        let s = strings();
+        assert_eq!(
+            wizard_notice(&host.view().wizard, &s),
+            Some(WizardNotice::Progress(s.wizard_searching.clone()))
+        );
+    }
+
+    /// Picking a chain starts a resolve and then a probe race — seconds of
+    /// waiting, previously spent staring at an unchanged dialog.
+    #[test]
+    fn a_chain_being_checked_says_it_is_being_checked() {
+        let mut host = loaded_host();
+        host.dispatch(NetEvent::ChainSelected {
+            chain_id: 7_777_777,
+            keep_custom_rpc: false,
+        });
+        let s = strings();
+        assert_eq!(
+            wizard_notice(&host.view().wizard, &s),
+            Some(WizardNotice::Progress(s.wizard_checking.clone()))
+        );
+    }
+
+    /// The refusal the person is most likely to meet: they pick a chain the
+    /// wallet already has. The core stops the wizard dead (invariant ①) and
+    /// draws no CTA — so without this line the dialog just stops responding.
+    #[test]
+    fn a_chain_already_added_says_so() {
+        let mut host = loaded_host();
+        // Chain 1 is built in, which is the dedup gate's other half.
+        host.dispatch(NetEvent::ChainSelected {
+            chain_id: 1,
+            keep_custom_rpc: false,
+        });
+        let s = strings();
+        assert_eq!(
+            wizard_notice(&host.view().wizard, &s),
+            Some(WizardNotice::Refusal(s.wizard_already_added.clone()))
+        );
+    }
+
+    /// The registry has no such chain.
+    #[test]
+    fn a_chain_the_registry_does_not_know_says_so() {
+        let mut host = loaded_host();
+        let pending = host.dispatch(NetEvent::ChainSelected {
+            chain_id: 7_777_777,
+            keep_custom_rpc: false,
+        });
+        for Pending { id, operation } in pending {
+            if let NetOperation::FetchChainInfo { chain_id } = operation {
+                host.resolve(
+                    id,
+                    NetShellResult::ChainInfo {
+                        chain_id,
+                        data: None,
+                    },
+                );
+            }
+        }
+        let s = strings();
+        assert_eq!(
+            wizard_notice(&host.view().wizard, &s),
+            Some(WizardNotice::Refusal(s.wizard_not_found.clone()))
+        );
+    }
+
+    fn row(mismatch: Option<(u32, u32)>, deferred: bool) -> NetNetworkRow {
+        use vela_core::app::network_admin::NetChainMismatch;
+        NetNetworkRow {
+            id: "chain-100".to_owned(),
+            chain_id: 100,
+            display_name: "Gnosis".to_owned(),
+            native_symbol: "XDAI".to_owned(),
+            is_custom: false,
+            rpc_url: String::new(),
+            explorer_url: String::new(),
+            bundler_url: String::new(),
+            rpc_health: None,
+            explorer_health: None,
+            rpc_chain_mismatch: mismatch.map(|(reported, expected)| NetChainMismatch {
+                reported_chain_id: reported,
+                expected_chain_id: expected,
+            }),
+            rpc_save_deferred: deferred,
+        }
+    }
+
+    /// While the chain-id verdict is outstanding the override has NOT been
+    /// written, so the standing "saved as soon as you leave the field" must
+    /// stand down. It is the same defect as a receipt read off the wrong
+    /// field, one size smaller: a write claimed before anyone checked.
+    #[test]
+    fn a_pending_verdict_does_not_claim_the_save_landed() {
+        let s = strings();
+        assert_eq!(override_hint(&row(None, false), &s), s.network_save_hint);
+        assert_eq!(override_hint(&row(None, true), &s), s.network_save_checking);
+    }
+
+    /// A refusal outranks both: nothing was written, and the person watching
+    /// nothing happen is owed the reason.
+    #[test]
+    fn a_refused_endpoint_says_which_chain_it_actually_serves() {
+        let hint = override_hint(&row(Some((1, 100)), true), &strings());
+        assert!(hint.contains('1') && hint.contains("100"), "{hint}");
+    }
+
+    /// The gate the dialog's CTA now trusts.
+    ///
+    /// `add_confirmed` refuses — silently, by design — unless the wizard is
+    /// `Checked` and compatible. `last_added_chain_id` is the only outward
+    /// sign that it did NOT refuse, which is why the shell closes the dialog
+    /// on that field changing rather than on the press.
+    #[test]
+    fn an_unchecked_wizard_records_no_add() {
+        let mut host = loaded_host();
+        host.dispatch(NetEvent::ChainSelected {
+            chain_id: 1,
+            keep_custom_rpc: false,
+        });
+        host.dispatch(NetEvent::AddConfirmed {
+            now_iso: "2026-09-07T00:00:00.000Z".to_owned(),
+        });
+        assert_eq!(host.view().last_added_chain_id, None);
+    }
+
+    /// A chain that resolved but lists no endpoint. The sentence names the
+    /// chain, because by now the wizard knows which one it is — and the custom
+    /// RPC field sitting under the notice is the way out.
+    #[test]
+    fn a_chain_with_no_endpoint_is_named_in_the_refusal() {
+        let mut host = loaded_host();
+        let pending = host.dispatch(NetEvent::ChainSelected {
+            chain_id: 7_777_777,
+            keep_custom_rpc: false,
+        });
+        for Pending { id, operation } in pending {
+            if let NetOperation::FetchChainInfo { chain_id } = operation {
+                host.resolve(
+                    id,
+                    NetShellResult::ChainInfo {
+                        chain_id,
+                        data: Some(NetRawChainData {
+                            chain_id: Some(chain_id),
+                            name: Some("Zora".to_owned()),
+                            short_name: None,
+                            native_currency_name: None,
+                            native_currency_symbol: None,
+                            native_currency_decimals: None,
+                            rpc: Vec::new(),
+                            explorers: Vec::new(),
+                            testnet: false,
+                        }),
+                    },
+                );
+            }
+        }
+        let Some(WizardNotice::Refusal(body)) = wizard_notice(&host.view().wizard, &strings())
+        else {
+            unreachable!("a chain with no endpoint is refused")
+        };
+        assert!(
+            body.contains("Zora"),
+            "the refusal names the chain it refused: {body}"
+        );
+    }
 }
 
 #[cfg(test)]

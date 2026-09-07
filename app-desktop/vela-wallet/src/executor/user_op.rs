@@ -645,6 +645,10 @@ pub fn key_hexes(keys: &[WalletKey]) -> Vec<String> {
 mod tests {
     use super::*;
     use vela_core::app::AccountKey;
+    // Only the fixture-signing test needs it, and that test is behind the
+    // feature — an import that is unused with the feature off is a warning
+    // sitting in front of the next real one.
+    #[cfg(feature = "dev-fixtures")]
     use vela_core::primitives::to_hex;
 
     fn account(keys: usize) -> Account {

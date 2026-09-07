@@ -456,10 +456,65 @@ are typed in the batch importer or not at all).
 1 pre-existing warning · gallery sweep every state rendered · the live spine
 still reaches Confirm with the relay's real 0.010 xDAI quote.
 
+## Phase 7 — the same sweep, on somebody else's screen
+
+交接表里的第 9 条:加网络向导。**不是本刀画的界面**,但是本刀 phase 6 那个毛病的同一株
+——核心把判断算好了,屏幕不说。这一刀把 phase 6 的规矩搬过去。
+
+`NetWizardView` 有 `phase` 和 `error`,`NetView` 有 `last_added_chain_id`;桌面
+`settings/live.rs` 一个都没读(第二条 grep 的差集)。后果不是难看,是**对话框看着坏了**:
+
+| 核心说什么 | 之前 | 现在 |
+|---|---|---|
+| `phase: Searching` | 无 | 转圈 + "Searching…" |
+| `phase: Resolving` / `Checking` | 无——点完一条建议,索引解析加一轮 RPC 竞速,几秒里对话框一动不动 | 转圈 + "Checking compatibility…" |
+| `error: AlreadyAdded` | 无——最常撞上的那条:挑一条钱包已有的链,向导原地停死,CTA 也不画,对话框像是没反应 | "This network is already added" |
+| `error: NotFound` | 无 | "Chain info not found" |
+| `error: NoRpcEndpoint` | 无 | "{链名} RPC unavailable"——链已经解析出来了,句子就该点名它;底下那个自定义 RPC 框就是出路 |
+| `error: NotCompatible`(扫码路径) | 无 | "Incompatible" |
+| `last_added_chain_id` | 没读:**按下就关**对话框 | 关不关由核心说了算 |
+
+最后一条是本刀改动里唯一动了行为的。`add_confirmed` 的每一道门(未加载、非 `Checked`、
+不兼容)都是**静默** `return done()`,而壳按下就把对话框关掉——一旦哪道门拦住,人按了一下,
+屏幕消失,什么都没加。现在壳在派发前后各读一次 `last_added_chain_id`,变了才关;没变就把
+对话框留在原地,上面那行拒绝理由自己会说话。
+
+### 顺着同一把尺子往下查:网络卡片上的那句"已保存"
+
+第二条 grep 对 `network_admin` 的 38 个视图字段跑完,还剩四个没读:`rpc_save_deferred`、
+`explorer_health`、`bundler_url`、`native_symbol`。后两个是资料不是判断,`explorer_health`
+记进欠账;`rpc_save_deferred` 当场修了,因为它**不是沉默,是小谎**:
+
+改完 RPC 一失焦,卡片下面那句提示写着"Saved as soon as you leave the field"。可核心这时
+把 `rpc_save_deferred` 置了真——覆盖值**还没写**,要等 RPC 自报的 chain id 对上才写。
+那几秒里屏幕替一件没发生的事打了包票。现在三态按核心的分量排:拒绝(说清它到底服务哪条链)
+> 待判(`componentsUi.funding.checking` = "Checking…")> 那句常驻提示。抽成
+`settings::live::override_hint`,页面只负责画——+2 个测试。
+
+**新增语料键 0 个**,和 phase 6 一样。六句话本来就都在语料里:`addToken.errorAlreadyAdded`
+/ `errorChainNotFound` 是因为 `NetWizardErrorKind` 一份服务两个调用方(核心的不变量①),
+扫码路径和加代币页早就在说同样的话;`assets.rpcUnavailableSingle` 带 `{{name}}`,正好点名。
+
+新增 9 个测试(`settings::live::wizard_tests`)。要点:`select_chain` 在 `loaded` 之前
+**fail closed**,所以测试必须先把 `ReadStore` 答掉——不答的话向导测试是空跑,一条都验不到。
+
+### 编译器早就在报的第 11 条
+
+`cargo test` 有一条 `field \`notice\` is never read`(`flows/fixtures.rs` 的 `AddToken`)。
+那个字段是 **phase 6 自己加的**:`live.rs` 从 `MtokView.save_error` 填了它,而
+`panels.rs::add_token` 从来没画。**代币存不进的那句话,phase 6 送到显示模型就死在那儿了**
+——和文件读不出被吃掉是同一个缺陷,只是往外挪了一层,而且唯一注意到的是一条没人看的警告。
+现在画在 CTA 上方(复用 `notice_card`)。
+
+顺带:交接里写的基线"1 个既有 warning"不实。`--tests` 下有 3 个,多出来的两个是
+`AddToken.notice`(真缺陷,已修)和 `user_op.rs` 测试里的 `to_hex`(feature 关掉时没人用,
+已按 feature 门住)。现在两种 feature 配置下都确实只剩 `BLE_CHANNEL_SUPPORTED` 一个。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
-工作区 `/Volumes/data/production/vela-wallet-native`,六个 phase(1–5 加自查的 6/6b),十一个提交。
+工作区 `/Volumes/data/production/vela-wallet-native`,七个 phase(1–5、自查的 6/6b,
+和把同一把尺子用到隔壁屏幕的 7),十二个提交。
 
 ## 一句话状态
 
@@ -489,8 +544,9 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线:desktop **258 passed(feature on)/ 254(off)· 32 ignored**,vela-core **1,264**,
-fmt clean,gallery 36 态全渲染,1 个既有 warning(`BLE_CHANNEL_SUPPORTED`)。
+基线:desktop **267 passed(feature on)/ 263(off)· 32 ignored**(phase 7 前是 258/254),
+vela-core **1,264**,fmt clean,gallery 36 态全渲染,**两种 feature 配置下各 1 个 warning**
+(`BLE_CHANNEL_SUPPORTED`)——phase 7 之前 `--tests` 下其实是 3 个,多的两个一个是真缺陷。
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
 要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。本刀两次都是
@@ -519,7 +575,8 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 6 | 031 留的五件:收藏控件、设置页新建/登录账户、扫码、余额流式、Windows 日界线 | 原样 |
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
-| 9 | 设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id` | phase 6b 的普查抓到的同类:向导失败了屏幕不说。不是本刀的界面,但是同一个毛病 |
+| 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |
+| 10b | `NetNetworkRow.explorer_health` | 浏览器端点探针的结果没画(RPC 的画了)。同类,但不关钱,phase 7 没做 |
 | 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |
 
 ## 本刀最值得记的五件事
@@ -541,7 +598,16 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
    (这十六处新增键 0 个)。判定要逐条看核心意图:`failed_chain_ids` 未读是对的,因为核心
    给了 `banner_chain_ids`(减去会自愈的限流)。
 
-## 028 合并后要立刻做的(web 会话 2026-09-05 预警,commit `6cec4ddf`,尚未在 origin/main)
+6. **警告数要按真数字记,别按印象记。** 交接写"1 个既有 warning",`cargo test` 下其实是 3 个;
+   多出来的那两个里有一个(`AddToken.notice` 从来没被画)是 phase 6 自己留下的真缺陷,
+   编译器指着它说了不知道多少遍。压着不看的警告,下一条真的就藏在它后面。
+
+## 028 合并后要立刻做的(**已合并**:`origin/main` = `61568f22`,PR #186,2026-09-07 确认)
+
+> 触发条件已经成立。本分支(以及它下面的 029/030/031)仍从 `f9bcb278` 长出来,
+> 66 个提交都不在 main 里,所以下面六步一步没做。把 main 并进来是会改动整棵树的操作,
+> 而这个工作区当下还有别的会话在跑(`app-web/clearsigning/`、`design/clearsigning/`、
+> `lib/` 三个未跟踪目录不是本会话建的)——并树前先跟创始人确认,或者换独立 worktree。
 
 028 把联系人导入/导出的规则从桌面的 `executor/contact_io.rs` **提进了核心**
 (`app/contacts_io.rs`),并改了 `contacts.rs` 的事件与视图字段。rebase 到含 028 的 main 后:

@@ -4843,21 +4843,9 @@ impl WalletPage {
 
         let rpc_badge = row.rpc_health.as_ref().and_then(settings_live::probe_badge);
         // The refusal, in words, over the hint. A person who just watched
-        // nothing happen needs to be told why, and "saved" would be a lie.
-        let hint = row.rpc_chain_mismatch.as_ref().map_or_else(
-            || self.settings.network_save_hint.clone(),
-            |mismatch| {
-                gpui::SharedString::from(crate::wallet::fill(
-                    &crate::wallet::fill(
-                        &self.settings.rpc_wrong_chain,
-                        "actual",
-                        &mismatch.reported_chain_id.to_string(),
-                    ),
-                    "expected",
-                    &mismatch.expected_chain_id.to_string(),
-                ))
-            },
-        );
+        // nothing happen needs to be told why, and "saved" would be a lie —
+        // which it also is for the seconds the verdict is still outstanding.
+        let hint = settings_live::override_hint(&row, &self.settings);
         let refused = row.rpc_chain_mismatch.is_some();
         let rpc_focus = self.endpoint_focus(OVERRIDE_FOCUS_BASE + index * 2, cx);
         let explorer_focus = self.endpoint_focus(OVERRIDE_FOCUS_BASE + index * 2 + 1, cx);
@@ -5618,6 +5606,36 @@ impl WalletPage {
             );
         }
 
+        // What the wizard is doing, or why it stopped. Everything below this
+        // line — the check list, the RPC field, the CTA — draws only once the
+        // core has a verdict, so without it the dialog answers a click with
+        // nothing at all. (The 032 phase 6 rule, applied to somebody else's
+        // screen: the core computed a refusal; the screen must say it.)
+        if let Some(notice) = settings_live::wizard_notice(&wizard, &self.settings) {
+            col = col.child(match notice {
+                settings_live::WizardNotice::Progress(body) => div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(crate::ui::spinner(theme.fg_subtle, px(14.), px(2.)))
+                    .child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(theme.fg_subtle)
+                            .child(body),
+                    ),
+                settings_live::WizardNotice::Refusal(body) => div()
+                    .p(px(12.))
+                    .rounded(px(12.))
+                    .bg(theme.error_soft)
+                    .border_1()
+                    .border_color(theme.error_base)
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_base)
+                    .child(body),
+            });
+        }
+
         if let Some(compat) = wizard.compat.as_ref() {
             match settings_live::compat_checks(compat, &self.settings) {
                 Some(checks) => {
@@ -5704,10 +5722,23 @@ impl WalletPage {
                     .child(cta)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let now_iso = crate::executor::now_iso();
-                        resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
-                            resident.dispatch(NetEvent::AddConfirmed { now_iso }, cx);
-                        });
-                        this.settings_dialog = None;
+                        // Close on the core's word, not on the click. Every
+                        // gate in `add_confirmed` — not loaded, not Checked,
+                        // not compatible — refuses by returning `done()`, so a
+                        // dialog that closes itself would be the phase 6
+                        // pattern in its worst form: the person's press
+                        // disappears the screen and nothing was added. If the
+                        // core did not record it, the dialog stays up with its
+                        // state, and the notice above says why.
+                        let added =
+                            resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                                let before = resident.view().last_added_chain_id;
+                                resident.dispatch(NetEvent::AddConfirmed { now_iso }, cx);
+                                resident.view().last_added_chain_id != before
+                            });
+                        if added {
+                            this.settings_dialog = None;
+                        }
                         cx.notify();
                     })),
             );

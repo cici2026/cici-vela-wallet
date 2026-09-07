@@ -700,6 +700,15 @@ fn add_token(
         }
     };
 
+    // The write that failed, said above the button that failed to do it.
+    // `live.rs` has filled this from `MtokView.save_error` since phase 6; the
+    // panel dropped it on the floor, and the only thing that noticed was a
+    // dead-code warning nobody read. Same defect as the picker that eats a
+    // file: the core said no and the screen went on looking fine.
+    if let Some(notice) = &model.notice {
+        col = col.child(notice_card(notice, theme, None));
+    }
+
     col.child(clickable(
         ElementId::from("add-token-cta"),
         add_to_wallet,
