@@ -264,6 +264,8 @@ pub struct FlowStrings {
     pub label_native_token: SharedString,
     pub compatible: SharedString,
     pub add_network_btn: SharedString,
+    pub add_token_error_title: SharedString,
+    pub add_token_error_save: SharedString,
 
     // Send.
     /// The plain verb, not the "Send {{symbol}}" template — DSD4L's bar keeps
@@ -474,6 +476,8 @@ impl FlowStrings {
             label_native_token: s("addToken.labelNativeToken"),
             compatible: s("addToken.compatible"),
             add_network_btn: s("addToken.addNetworkBtn"),
+            add_token_error_title: s("addToken.errorTitle"),
+            add_token_error_save: s("addToken.errorSaveToken"),
 
             send_action: s("componentsUi.dock.send"),
             select_token_title: s("send.selectTokenTitle"),

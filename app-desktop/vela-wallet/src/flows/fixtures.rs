@@ -289,6 +289,9 @@ pub struct AddToken {
     pub field_label: SharedString,
     pub field_value: SharedString,
     pub result: AddTokenResult,
+    /// Live only: the write itself failed. A CTA that does nothing and says
+    /// nothing is the same defect as a picker that silently drops a file.
+    pub notice: Option<SendNotice>,
     pub cta: SharedString,
 }
 
@@ -838,6 +841,7 @@ fn add_token(s: &FlowStrings, native: bool) -> AddToken {
                 detail: format!("USDT · {} 6 · Ethereum", s.label_decimals).into(),
             }
         },
+        notice: None,
         cta: if native {
             s.add_network_btn.clone()
         } else {

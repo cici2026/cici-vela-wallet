@@ -462,6 +462,15 @@ pub fn add_token(view: &MtokView, s: &FlowStrings) -> crate::flows::fixtures::Ad
                 },
             },
         },
+        // The write failed — the core raises the flag and the corpus has the
+        // sentence; without it the button simply does nothing, twice.
+        notice: view.save_error.then(|| SendNotice {
+            title: Some(s.add_token_error_title.clone()),
+            body: s.add_token_error_save.clone(),
+            detail: None,
+            action: None,
+            error: true,
+        }),
         cta: if view.saving {
             s.searching_networks.clone()
         } else {

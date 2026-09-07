@@ -428,6 +428,24 @@ lives in ONE place (the panel dims the row and drops its listener from the
 core's own flag — a second gate in the page would be a second opinion about
 one fact), and the over-balance refusal now carries the figure it is about.
 
+**The sweep, carried across every machine the desktop reads.** The same
+comparison — a view's fields against what a live builder reads — run over
+`balance_dashboard`, `activity_feed`, `manage_tokens`, `receive_watch`,
+`display_currency`, `contacts`, `network_admin`, `token_trust`,
+`payment_request`. Triaged:
+
+| unread | verdict |
+|---|---|
+| `BalanceView.{failed_chain_ids, rate_limited_chain_ids}` | **correct** — the core hands over `banner_chain_ids` (failed MINUS rate-limited, invariant ⑦) and 031 reads that. A rate limit lifts on its own and must never raise the "fix your RPC" banner |
+| `BalanceView.{balance_partial, cached_total_usd, last_refreshed_at_ms}` | covered by `notice: StillUpdating` and `holdings_loading`, both read; no "as of" line is drawn |
+| `MtokView.save_error` | **a real gap, fixed here** — adding a token could fail and the button just did nothing, twice |
+| `NetWizardView.{phase, error}`, `NetView.last_added_chain_id` | the settings add-network wizard: a debt, and the same class. Not this cut's surface |
+| `FeedView.{toast, new_item_id}` | the "money arrived" celebration — no drawing on the desktop |
+| `ContactRecipientView.{saved, verified, is_contract, first_interaction}` | the contacts detail's trust line. The SEND path's own risk is live (phase 4); this one is 028's territory |
+| `PaymentRequestView` (10/14) | the pay-link surface — `/pay` has no desktop entry yet (debt #4's neighbour) |
+| `TrustView`, `TrustSimView`, `TrustIncomingView` | consumed by the executor and the feed writer, not by a display model |
+| `BalanceSwitcherView` | the home's own account switcher — undrawn on the desktop (settings has one, 031) |
+
 **Still not drawn** (recorded, not hidden): the ⇄ fiat/token control (its
 refusal is now spoken, but the control itself is a drawing the desktop does
 not have), the multi-token sweep picker (`multi_select_mode` and its
@@ -496,6 +514,8 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 6 | 031 留的五件:收藏控件、设置页新建/登录账户、扫码、余额流式、Windows 日界线 | 原样 |
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
+| 9 | 设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id` | phase 6b 的普查抓到的同类:向导失败了屏幕不说。不是本刀的界面,但是同一个毛病 |
+| 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |
 
 ## 本刀最值得记的四件事
 
