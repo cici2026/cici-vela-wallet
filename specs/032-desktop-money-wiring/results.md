@@ -514,7 +514,7 @@ still reaches Confirm with the relay's real 0.010 xDAI quote.
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
 工作区 `/Volumes/data/production/vela-wallet-native`,七个 phase(1–5、自查的 6/6b,
-和把同一把尺子用到隔壁屏幕的 7),十二个提交。
+和把同一把尺子用到隔壁屏幕的 7),**十三个**提交(交接原写「十一个」,实数是 `049617f5..` 的 13)。
 
 ## 一句话状态
 
