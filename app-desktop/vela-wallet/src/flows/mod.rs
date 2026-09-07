@@ -349,6 +349,40 @@ pub struct FlowStrings {
     pub first_time_tag: SharedString,
     pub fee_pending: SharedString,
 
+    // Send · the core's refusals, live (spec 032 phase 6). Every one of these
+    // is a sentence the core computed and this client used to throw away: a
+    // person over-typing their balance saw a button that would not move and
+    // nothing that said why.
+    /// Templates carrying `{{symbol}}` / `{{sym}}` / `{{code}}`.
+    pub warn_not_enough_token: String,
+    pub warn_insufficient_for_gas: String,
+    pub warn_need_gas: String,
+    pub warn_cannot_convert: String,
+    /// The same-asset fee ceiling: the transfer and its fee draw on one coin.
+    pub same_fee_title: String,
+    pub same_fee_body: String,
+    pub same_fee_max: String,
+    pub same_fee_edit: SharedString,
+    pub insufficient_title: SharedString,
+    pub insufficient_body: SharedString,
+    pub estimating: SharedString,
+    /// The relay's float is empty and someone has to top it up before this
+    /// chain can carry anything.
+    pub funding_title: SharedString,
+    pub funding_lead: String,
+    pub funding_address_label: SharedString,
+    pub funding_amount_label: SharedString,
+    pub funding_check_now: SharedString,
+    /// A locked payment request that cannot be fulfilled.
+    pub lock_net_title: SharedString,
+    pub lock_net_body: String,
+    pub lock_token_title: SharedString,
+    pub lock_token_body: SharedString,
+    pub lock_add_network: SharedString,
+    pub lock_net_not_found: SharedString,
+    pub lock_net_not_compatible: SharedString,
+    pub lock_net_add_error: SharedString,
+
     // Send · batch import, live (spec 032 phase 5).
     pub batch_paste_placeholder: SharedString,
     pub batch_template_saved: SharedString,
@@ -510,6 +544,31 @@ impl FlowStrings {
             tx_error_bundler_fund: s("send.txErrorBundlerFund"),
             first_time_tag: s("componentsUi.signing.firstTimeTag"),
             fee_pending: SharedString::from("…"),
+
+            warn_not_enough_token: raw("send.warnNotEnoughToken"),
+            warn_insufficient_for_gas: raw("send.warnInsufficientForGas"),
+            warn_need_gas: raw("send.warnNeedGas"),
+            warn_cannot_convert: raw("send.warnCannotConvert"),
+            same_fee_title: raw("send.sameFeeTokenTitle"),
+            same_fee_body: raw("send.sameFeeTokenBody"),
+            same_fee_max: raw("send.sameFeeTokenMax"),
+            same_fee_edit: s("send.sameFeeTokenEdit"),
+            insufficient_title: s("send.alertInsufficientBalanceTitle"),
+            insufficient_body: s("send.alertInsufficientBalanceBody"),
+            estimating: s("componentsUi.gas.estimating"),
+            funding_title: s("componentsUi.funding.title"),
+            funding_lead: raw("componentsUi.funding.lead"),
+            funding_address_label: s("componentsUi.funding.addressLabel"),
+            funding_amount_label: s("componentsUi.funding.amountLabel"),
+            funding_check_now: s("componentsUi.funding.checkNow"),
+            lock_net_title: s("send.lock.netTitle"),
+            lock_net_body: raw("send.lock.netBody"),
+            lock_token_title: s("send.lock.tokenTitle"),
+            lock_token_body: s("send.lock.tokenBody"),
+            lock_add_network: s("send.lock.addNetwork"),
+            lock_net_not_found: s("send.lock.netNotFound"),
+            lock_net_not_compatible: s("send.lock.netNotCompatible"),
+            lock_net_add_error: s("send.lock.netAddError"),
 
             batch_paste_placeholder: s("send.batchPastePlaceholder"),
             batch_template_saved: s("send.batchTemplateSaved"),

@@ -372,6 +372,61 @@ sweep mode (N tokens → one address) stays fixture, as on web.
 · 1 pre-existing warning · gallery sweep every state rendered · `rust/`
 untouched.
 
+## Phase 6 — the screen says what the core refuses
+
+**The finding, from a sweep of my own two phases.** `SendView` carries
+sixteen fields that are judgements — what is wrong, what is waiting, what may
+not proceed — and the live builders I wrote in phase 4 read **none** of them.
+Type more than you hold and the Continue button simply does not respond:
+the core computed the sentence (`send.warnNotEnoughToken`, in every locale)
+and the desktop threw it away. Fifteen more sat beside it.
+
+| the core says | phase 4 | now |
+|---|---|---|
+| `amount_warning` (4 sentences) | dropped | amber notice under the fee |
+| `same_asset_fee_issue` | dropped | title + "sending X + fee Y needs Z, you have B" + "you can send up to M" + **Edit amount** |
+| `split_over_balance` | dropped | red notice |
+| `confirm_amount_issue` | dropped | red notice + Edit amount, confirm page only |
+| `denom_toggle_reason` | dropped (no ⇄ control drawn) | said as a warning, since no control exists to explain itself |
+| `treasury_bootstrap` | **silent dead end** | the funding sheet's own words + the top-up address + the shortfall + **Check now** |
+| `lock_error` / `add_network_msg` | dropped | the lock's title/body + the last attempt's outcome + **Add this network** |
+| `can_continue` / `can_confirm` | CTA always armed | drawn shut, answering to nothing |
+| `estimating_gas` / `sending` / `tx_status` | nothing | the button says "Estimating…" and keeps its accent — busy is not disabled |
+
+Every word came from the corpus (`send.warn*`, `send.sameFeeToken*`,
+`send.lock.*`, `componentsUi.funding.*`, `componentsUi.gas.estimating`);
+**zero new keys**. One drawn model gained `notice` and `cta_state`; the
+fixtures are untouched and the gallery renders exactly as before.
+
+**One traversal, two readers.** `build_notice` returns the sentence AND the
+way out (`NoticeWayOut::{RetryAfterBootstrap, AddNetwork, EditAmount}`), so
+the button and the words can never disagree about what is being offered. The
+page maps the way-out to the core's own recovery event.
+
+**Two more drawn-but-dead affordances closed**: a group in the contact picker
+now seeds a split with everybody in it (the hand-off web calls 群发转账), and
+the notice's action is the only new button — it is the core's, not one this
+file invented.
+
+**A wrong assumption the test caught.** I asserted that an over-balance amount
+disables Continue. It does not: the ported gate arms it and the refusal
+arrives as an ALERT when it is pressed (`SendAlertKind::InsufficientBalance`,
+`can_continue` stays true for an unlocked send). So between typing and
+pressing, the warning sentence is the **only** thing on screen — which is
+precisely why dropping it was worse than it looked. The test now drives the
+real machine through both steps and asserts the sentence, the armed button,
+the alert and that the flow stays on the form.
+
+**Still not drawn** (recorded, not hidden): the ⇄ fiat/token control (its
+refusal is now spoken, but the control itself is a drawing the desktop does
+not have), the multi-token sweep picker (`multi_select_mode` and its
+checkbox column), and per-row editing of a split (a seeded group's amounts
+are typed in the batch importer or not at all).
+
+**Gates**: desktop **256 → 257** with the feature (253 without) · fmt clean ·
+1 pre-existing warning · gallery sweep every state rendered · the live spine
+still reaches Confirm with the relay's real 0.010 xDAI quote.
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
@@ -400,7 +455,7 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线:desktop **256 passed(feature on)/ 252(off)· 32 ignored**,vela-core **1,264**,
+基线:desktop **257 passed(feature on)/ 253(off)· 32 ignored**,vela-core **1,264**,
 fmt clean,gallery 36 态全渲染,1 个既有 warning(`BLE_CHANNEL_SUPPORTED`)。
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -429,6 +484,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 5 | `SimulateCalls` | 桌面没有模拟引擎,答 `None` |
 | 6 | 031 留的五件:收藏控件、设置页新建/登录账户、扫码、余额流式、Windows 日界线 | 原样 |
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
+| 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
 
 ## 本刀最值得记的四件事
 

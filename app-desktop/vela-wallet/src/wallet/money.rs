@@ -1022,7 +1022,7 @@ mod tests {
             BatchImport, BatchToken, BatchUnit, Event as BatchEvent,
         };
         let mut batch = CoreHost::<BatchImport>::new();
-        let mut pump = |batch: &mut CoreHost<BatchImport>, event: BatchEvent| {
+        let pump = |batch: &mut CoreHost<BatchImport>, event: BatchEvent| {
             let mut pending = batch.dispatch(event);
             while let Some(effect) = pending.pop() {
                 let result = match effect.operation {
@@ -1086,6 +1086,211 @@ mod tests {
             view.recipients[1].address.to_lowercase(),
             "0x58cd0ce6a27099220543b31710d7860d75ba1d3d"
         );
+    }
+
+    /// The core refuses and the screen SAYS SO — the defect this phase
+    /// exists for. Every branch is driven through the real machine (no
+    /// hand-written view), and the assertion is on the sentence a person
+    /// would read, not on the field behind it.
+    #[test]
+    fn every_refusal_the_core_makes_reaches_the_screen() {
+        use crate::flows::live::{SendInputs, notice_way_out, send_confirm, send_form};
+        use crate::flows::{FlowStrings, fixtures::CtaState};
+        use crate::loc::Loc;
+        use crate::wallet::WalletStrings;
+        use vela_core::app::send::{SendChainInfo, SendToken};
+
+        let loc = Loc::from_env();
+        let s = FlowStrings::resolve(&loc);
+        let wallet = WalletStrings::resolve(&loc);
+        let fee = CoreHost::<FeePolicy>::new().view();
+        let screen = |send: &SendView, confirming: bool| {
+            let inputs = SendInputs {
+                send,
+                fee: &fee,
+                s: &s,
+                wallet: &wallet,
+                locale: "en",
+                identity_name: "Golden",
+                identity_address: "0x88cCA0EeDbF2C4426110bbFc998F048689266894",
+            };
+            let notice = if confirming {
+                send_confirm(&inputs).notice
+            } else {
+                send_form(&inputs).notice
+            };
+            let way_out = notice_way_out(&inputs, confirming);
+            (notice, way_out)
+        };
+
+        // A real machine, driven to a form with one xDAI holding.
+        let mut host = CoreHost::<Send>::new();
+        // The alerts the core raised. `RefCell` because the closure below
+        // borrows it while it is also read between steps.
+        let alerts: std::cell::RefCell<Vec<SendAlertKind>> = std::cell::RefCell::new(Vec::new());
+        let pump = |host: &mut CoreHost<Send>, event: SendEvent, tokens: Option<Vec<SendToken>>| {
+            let mut pending = host.dispatch(event);
+            while let Some(effect) = pending.pop() {
+                let result = match &effect.operation {
+                    SendOperation::FetchTokens { .. } => SendShellResult::TokensLoaded {
+                        tokens: tokens.clone(),
+                        chains: vec![SendChainInfo {
+                            chain_id: 100,
+                            network: "gnosis".to_owned(),
+                            native_symbol: "xDAI".to_owned(),
+                        }],
+                    },
+                    // Never answer the 15s race first, or every estimate is a
+                    // timeout; every other operation answers its empty twin.
+                    SendOperation::StartTimer { .. } => continue,
+                    SendOperation::ResolveIdentity { .. } => {
+                        SendShellResult::IdentityResolved { identity: None }
+                    }
+                    SendOperation::ResolveRisk { .. } => {
+                        SendShellResult::RiskResolved { risk: None }
+                    }
+                    SendOperation::SimulateCalls { .. } => {
+                        SendShellResult::SimResolved { sim_json: None }
+                    }
+                    SendOperation::LoadAccountCredential { .. } => {
+                        SendShellResult::AccountCredential {
+                            public_key_hex: Some("04aa".to_owned()),
+                        }
+                    }
+                    SendOperation::ShowAlert { kind } => {
+                        alerts.borrow_mut().push(kind.clone());
+                        SendShellResult::AlertAcknowledged
+                    }
+                    other => unreachable!("unexpected on this path: {other:?}"),
+                };
+                pending.extend(host.resolve(effect.id, result));
+            }
+        };
+        let token = SendToken {
+            network: "gnosis".to_owned(),
+            chain_id: 100,
+            symbol: "xDAI".to_owned(),
+            balance: "0.75".to_owned(),
+            decimals: 18,
+            token_address: None,
+            price_usd: Some(1.0),
+            logo_urls: Vec::new(),
+            spam: false,
+        };
+        pump(
+            &mut host,
+            SendEvent::Open {
+                account: Some(SendAccountRef {
+                    id: "cred0".to_owned(),
+                    address: "0x88cCA0EeDbF2C4426110bbFc998F048689266894".to_owned(),
+                    name: None,
+                }),
+                params: SendOpenParams::default(),
+                display: SendDisplayContext::default(),
+            },
+            Some(vec![token.clone()]),
+        );
+        pump(
+            &mut host,
+            SendEvent::SelectToken {
+                token_id: token.id(),
+            },
+            None,
+        );
+        pump(
+            &mut host,
+            SendEvent::SetRecipient {
+                recipient: "0x031d7D57c99CAF891e1C250554691Fd12D84772b".to_owned(),
+            },
+            None,
+        );
+
+        // Nothing typed yet: no refusal, but the button is honestly shut.
+        let view = host.view();
+        assert!(screen(&view, false).0.is_none());
+        assert_eq!(
+            send_form_state(&view, &s, &wallet, &fee),
+            CtaState::Disabled
+        );
+
+        // More than the balance — the core warns, and the sentence names the
+        // coin. This is the one that used to be invisible.
+        pump(
+            &mut host,
+            SendEvent::SetAmount {
+                amount: "999".to_owned(),
+            },
+            None,
+        );
+        let view = host.view();
+        let (notice, way_out) = screen(&view, false);
+        let notice =
+            notice.unwrap_or_else(|| unreachable!("the core warned: {:?}", view.amount_warning));
+        assert!(
+            notice.body.contains("xDAI"),
+            "the warning names the coin: {}",
+            notice.body
+        );
+        assert!(!notice.error, "still typing — amber, not red");
+        assert_eq!(way_out, None);
+        // The PORTED gate: an unlocked send leaves Continue armed on an
+        // over-balance figure and refuses when it is pressed. So the sentence
+        // above is the only thing on screen between the two — which is
+        // exactly why dropping it left a person with a button that did
+        // nothing and no explanation.
+        assert!(view.can_continue, "the ported gate arms it: {view:?}");
+        assert_eq!(send_form_state(&view, &s, &wallet, &fee), CtaState::Enabled);
+        pump(&mut host, SendEvent::Continue, None);
+        assert!(
+            matches!(
+                alerts.borrow().first(),
+                Some(SendAlertKind::InsufficientBalance { .. })
+            ),
+            "pressing it refuses: {:?}",
+            alerts.borrow()
+        );
+        assert_eq!(
+            host.view().stage,
+            vela_core::app::send::SendStage::EnterDetails,
+            "and the flow stays on the form"
+        );
+
+        // A figure it can send: the warning clears and the button arms.
+        pump(
+            &mut host,
+            SendEvent::SetAmount {
+                amount: "0.001".to_owned(),
+            },
+            None,
+        );
+        let view = host.view();
+        assert!(
+            screen(&view, false).0.is_none(),
+            "{:?}",
+            view.amount_warning
+        );
+        assert!(view.can_continue);
+        assert_eq!(send_form_state(&view, &s, &wallet, &fee), CtaState::Enabled);
+    }
+
+    /// The form's CTA state, for the assertions above.
+    #[cfg(test)]
+    fn send_form_state(
+        send: &SendView,
+        s: &crate::flows::FlowStrings,
+        wallet: &crate::wallet::WalletStrings,
+        fee: &FeeView,
+    ) -> crate::flows::fixtures::CtaState {
+        crate::flows::live::send_form(&crate::flows::live::SendInputs {
+            send,
+            fee,
+            s,
+            wallet,
+            locale: "en",
+            identity_name: "Golden",
+            identity_address: "0x0",
+        })
+        .cta_state
     }
 
     #[test]

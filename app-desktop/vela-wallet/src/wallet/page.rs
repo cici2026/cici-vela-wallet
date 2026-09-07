@@ -83,7 +83,9 @@ use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwor
 use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
 use vela_core::app::payment_request::PaymentRequest;
 use vela_core::app::receive_watch::ReceiveWatch;
-use vela_core::app::send::{Event as SendEvent, SendAlertKind, SendDisplayContext, SendOpenParams};
+use vela_core::app::send::{
+    Event as SendEvent, SendAlertKind, SendDisplayContext, SendOpenParams, SendRecipientDraft,
+};
 
 use super::WalletStrings;
 use super::components::{
@@ -424,6 +426,12 @@ struct SendBindings {
     /// DSD2cL: the rate string the core holds, and the field's focus.
     batch_rate: Option<String>,
     rate_focus: gpui::FocusHandle,
+    /// DSD2eL: each group's member addresses, in drawn order.
+    group_members: Vec<Vec<String>>,
+    /// What the notice's way-out means on THIS panel — derived by the same
+    /// traversal that wrote the sentence, so the button and the words cannot
+    /// disagree about what they are offering.
+    way_out: Option<flows_live::NoticeWayOut>,
 }
 
 impl Identity {
@@ -2490,6 +2498,24 @@ impl WalletPage {
                 .as_ref()
                 .map(|batch| batch.rate_input.clone())
         });
+        let identity = self.identity();
+        let way_out = flows_live::notice_way_out(
+            &flows_live::SendInputs {
+                send: &view,
+                fee: &fee,
+                s: &self.flow_strings,
+                wallet: &self.strings,
+                locale: &self.locale,
+                identity_name: &identity.name,
+                identity_address: &identity.address,
+            },
+            panel == FlowPanel::Dsd3,
+        );
+        let group_members = if panel == FlowPanel::Dsd2e {
+            flows_live::contact_group_members(&resident::resident::<Contacts>(cx).read(cx).view())
+        } else {
+            Vec::new()
+        };
         Some(SendBindings {
             host,
             token_ids: flows_live::send_token_ids(&view),
@@ -2501,6 +2527,8 @@ impl WalletPage {
             recipient_focus: self.send_recipient_focus.clone(),
             batch_rate,
             rate_focus: self.send_rate_focus.clone(),
+            group_members,
+            way_out,
         })
     }
 
@@ -2893,6 +2921,8 @@ impl WalletPage {
             batch_template: None,
             batch_rate_field: None,
             batch_rate_reset: None,
+            notice_action: None,
+            pick_group_rows: Vec::new(),
         };
         // DR1L, live: one listener per network row, each remembering WHICH
         // chain it opened. The fixture keeps its single first-row listener,
@@ -3008,6 +3038,18 @@ impl WalletPage {
                     },
                 )
             };
+            // The way out the core's own refusal offered. `EditAmount` is its
+            // recovery from a blocked confirmation; the other two are the
+            // retries it defines.
+            actions.notice_action = send.way_out.map(|way_out| match way_out {
+                flows_live::NoticeWayOut::RetryAfterBootstrap => {
+                    to_host(SendEvent::RetryAfterBootstrap)
+                }
+                flows_live::NoticeWayOut::AddNetwork { chain_id } => {
+                    to_host(SendEvent::AddNetworkTapped { chain_id })
+                }
+                flows_live::NoticeWayOut::EditAmount => to_host(SendEvent::EditAmount),
+            });
             match panel {
                 FlowPanel::Dsd1 => {
                     actions.open_send_form = None;
@@ -3064,6 +3106,36 @@ impl WalletPage {
                     // `PickedAddress`; spec 028's core closes it itself, after
                     // which the second event is a no-op — the pair is kept so
                     // either core makes the same screen.
+                    // A whole group seeds a split with everybody in it, at
+                    // amounts the person still has to type — the same hand-off
+                    // web calls 群发转账. The core assigns the row ids.
+                    actions.pick_group_rows = send
+                        .group_members
+                        .into_iter()
+                        .map(|members| -> panels::Click {
+                            let host = host.clone();
+                            Box::new(
+                                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                    let recipients = members
+                                        .iter()
+                                        .map(|address| SendRecipientDraft {
+                                            id: String::new(),
+                                            address: address.clone(),
+                                            amount: String::new(),
+                                            name: None,
+                                        })
+                                        .collect();
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch(
+                                            SendEvent::SeedSplitRecipients { recipients },
+                                            cx,
+                                        );
+                                        host.dispatch(SendEvent::CloseContactPicker, cx);
+                                    });
+                                },
+                            )
+                        })
+                        .collect();
                     actions.pick_contact_rows = send
                         .contact_addresses
                         .into_iter()

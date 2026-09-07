@@ -32,13 +32,16 @@ use crate::wallet::fill;
 use vela_core::app::batch_import::{BatchRateStatus, BatchUnit, BatchView};
 use vela_core::app::contacts::ContactsView;
 use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView, FeeView};
-use vela_core::app::send::{SendReceiptStatus, SendStage, SendToken, SendTxStatus, SendView};
+use vela_core::app::send::{
+    SendAddNetworkMsg, SendAmountWarning, SendLockError, SendReceiptStatus, SendStage, SendToken,
+    SendTreasuryAsset, SendTxStatus, SendUnitIssue, SendView,
+};
 
 use crate::flows::fixtures::{
-    AddressCard, AssetsEmpty, AssetsPanel, BatchImport, BatchRow, ContactPick,
+    AddressCard, AssetsEmpty, AssetsPanel, BatchImport, BatchRow, ContactPick, CtaState,
     DepositEntry as FlowDeposit, FactLead, FactRow, FeeRow, FeeTokenPick, FeeTokenRow, FilterChip,
     HistoryGroup, NetworkRow, ReceiveList, ReceiveQr, RecipientCard, SendConfirm, SendForm,
-    SendPick, SendReceipt, StatusChip, StatusTone, TokenMark, address_lines,
+    SendNotice, SendPick, SendReceipt, StatusChip, StatusTone, TokenMark, address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -829,6 +832,271 @@ fn recipient_note(send: &SendView, s: &FlowStrings) -> Option<SharedString> {
         .then(|| s.first_time_tag.clone())
 }
 
+/// The core's live amount validation, in the corpus's words. The symbol a
+/// `None` carries is the chain's own coin — the core says the shell resolves
+/// it, and it is the fee coin the person is short of.
+fn amount_warning_text(
+    warning: &SendAmountWarning,
+    chain_id: u32,
+    s: &FlowStrings,
+) -> SharedString {
+    let native = || {
+        let symbol = native_symbol(chain_id);
+        if symbol.is_empty() {
+            "gas token".to_owned()
+        } else {
+            symbol
+        }
+    };
+    match warning {
+        SendAmountWarning::NotEnoughToken { symbol } => {
+            fill(&s.warn_not_enough_token, "symbol", symbol).into()
+        }
+        SendAmountWarning::InsufficientForGas { symbol } => fill(
+            &s.warn_insufficient_for_gas,
+            "sym",
+            &symbol.clone().unwrap_or_else(native),
+        )
+        .into(),
+        SendAmountWarning::NeedGas { symbol } => fill(
+            &s.warn_need_gas,
+            "sym",
+            &symbol.clone().unwrap_or_else(native),
+        )
+        .into(),
+        SendAmountWarning::CannotConvert { code, symbol } => fill(
+            &fill(&s.warn_cannot_convert, "code", code),
+            "symbol",
+            symbol,
+        )
+        .into(),
+    }
+}
+
+/// "Can't convert X to Y right now" — the one sentence three different
+/// refusals share (the typed figure, the ⇄ control, the confirm gate).
+fn cannot_convert(issue: &SendUnitIssue, s: &FlowStrings) -> SharedString {
+    fill(
+        &fill(&s.warn_cannot_convert, "code", &issue.code),
+        "symbol",
+        &issue.symbol,
+    )
+    .into()
+}
+
+/// What the core refused, in priority order — the hardest stop first.
+///
+/// Every branch here reads a field the core computed and this client used to
+/// drop on the floor: an over-typed amount left the Continue button inert
+/// with nothing on screen to explain it, which is a refusal the person cannot
+/// act on. `action` is the way out the core itself offers.
+/// The event the notice's way-out means. Derived by the SAME traversal that
+/// wrote the sentence, so the button and the words can never disagree about
+/// what they are offering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoticeWayOut {
+    /// The relay's float was topped up — probe it again.
+    RetryAfterBootstrap,
+    /// Add the network this locked request names.
+    AddNetwork { chain_id: u32 },
+    /// Back to the amount field.
+    EditAmount,
+}
+
+/// The notice a screen shows, if any.
+fn send_notice(i: &SendInputs<'_>, confirming: bool) -> Option<SendNotice> {
+    build_notice(i, confirming).map(|(notice, _)| notice)
+}
+
+/// What its action does. Same function, same order — see [`NoticeWayOut`].
+#[must_use]
+pub fn notice_way_out(i: &SendInputs<'_>, confirming: bool) -> Option<NoticeWayOut> {
+    build_notice(i, confirming).and_then(|(_, way_out)| way_out)
+}
+
+fn build_notice(
+    i: &SendInputs<'_>,
+    confirming: bool,
+) -> Option<(SendNotice, Option<NoticeWayOut>)> {
+    let (send, s) = (i.send, i.s);
+    let chain_id = send
+        .selected_token
+        .as_ref()
+        .map_or(1, |token| token.chain_id);
+
+    // The relay cannot carry anything on this chain until its float is topped
+    // up. A stop, and the only one that names an address to send to.
+    if let Some(treasury) = &send.treasury_bootstrap {
+        let native = treasury.asset == SendTreasuryAsset::Native;
+        let decimals = if native { 18 } else { 6 };
+        let symbol = if native {
+            native_symbol(treasury.chain_id)
+        } else {
+            "pathUSD".to_owned()
+        };
+        let short = treasury
+            .floor
+            .parse::<u128>()
+            .unwrap_or(0)
+            .saturating_sub(treasury.balance.parse::<u128>().unwrap_or(0));
+        #[allow(clippy::cast_precision_loss, reason = "a displayed top-up figure")]
+        let short = short as f64 / 10f64.powi(decimals);
+        let notice = SendNotice {
+            title: Some(s.funding_title.clone()),
+            body: fill(&s.funding_lead, "symbol", &symbol).into(),
+            detail: Some(
+                format!(
+                    "{} {}  ·  {} {} {symbol}",
+                    s.funding_address_label,
+                    treasury.address,
+                    s.funding_amount_label,
+                    trimmed(short),
+                )
+                .into(),
+            ),
+            action: Some(s.funding_check_now.clone()),
+            error: true,
+        };
+        return Some((notice, Some(NoticeWayOut::RetryAfterBootstrap)));
+    }
+
+    // A locked payment request nobody can fulfil, with the add-network way out.
+    if let Some(error) = &send.lock_error {
+        let (title, body) = match error {
+            SendLockError::Network { chain_id } => (
+                s.lock_net_title.clone(),
+                SharedString::from(fill(&s.lock_net_body, "chainId", &chain_id.to_string())),
+            ),
+            SendLockError::Token => (s.lock_token_title.clone(), s.lock_token_body.clone()),
+        };
+        // The line under the button is the LAST attempt's outcome; the button
+        // itself is only offered for a network the wallet could add.
+        let detail = send.add_network_msg.as_ref().map(|msg| match msg {
+            SendAddNetworkMsg::NetNotFound => s.lock_net_not_found.clone(),
+            SendAddNetworkMsg::NetNotCompatible { detail } => detail
+                .clone()
+                .map_or_else(|| s.lock_net_not_compatible.clone(), SharedString::from),
+            SendAddNetworkMsg::NetAddError => s.lock_net_add_error.clone(),
+        });
+        let way_out = match error {
+            SendLockError::Network { chain_id } => Some(NoticeWayOut::AddNetwork {
+                chain_id: *chain_id,
+            }),
+            SendLockError::Token => None,
+        };
+        let notice = SendNotice {
+            title: Some(title),
+            body,
+            detail,
+            action: way_out.is_some().then(|| s.lock_add_network.clone()),
+            error: true,
+        };
+        return Some((notice, way_out));
+    }
+
+    // The transfer and its fee draw on the same coin, and together they do not
+    // fit. The core computed the ceiling; "Edit amount" is its own event.
+    if let Some(issue) = &send.same_asset_fee_issue {
+        let body = fill(
+            &fill(
+                &fill(
+                    &fill(
+                        &fill(&s.same_fee_body, "amount", &issue.transfer_amount),
+                        "fee",
+                        &issue.fee_amount,
+                    ),
+                    "total",
+                    &issue.total,
+                ),
+                "balance",
+                &issue.balance,
+            ),
+            "symbol",
+            &issue.symbol,
+        );
+        let notice = SendNotice {
+            title: Some(fill(&s.same_fee_title, "symbol", &issue.symbol).into()),
+            body: body.into(),
+            detail: Some(
+                fill(
+                    &fill(&s.same_fee_max, "amount", &issue.max_transfer_amount),
+                    "symbol",
+                    &issue.symbol,
+                )
+                .into(),
+            ),
+            action: Some(s.same_fee_edit.clone()),
+            error: true,
+        };
+        return Some((notice, Some(NoticeWayOut::EditAmount)));
+    }
+
+    // The split rows add up to more than the balance.
+    if send.split_over_balance {
+        let notice = SendNotice {
+            title: Some(s.insufficient_title.clone()),
+            body: s.insufficient_body.clone(),
+            detail: None,
+            action: None,
+            error: true,
+        };
+        return Some((notice, None));
+    }
+
+    // On the confirm page the amount itself may have stopped resolving — a
+    // display-currency commit landing under an open page re-denominates the
+    // field, and the slide disarms with nothing said.
+    if confirming && let Some(issue) = &send.confirm_amount_issue {
+        let notice = SendNotice {
+            title: None,
+            body: cannot_convert(issue, s),
+            detail: None,
+            action: Some(s.same_fee_edit.clone()),
+            error: true,
+        };
+        return Some((notice, Some(NoticeWayOut::EditAmount)));
+    }
+
+    // The live amount warning — amber: the person is still typing. And when
+    // there is none, the ⇄ control's own refusal, which the desktop draws no
+    // control for and would otherwise never say.
+    let body = send
+        .amount_warning
+        .as_ref()
+        .map(|warning| amount_warning_text(warning, chain_id, s))
+        .or_else(|| {
+            send.denom_toggle_reason
+                .as_ref()
+                .map(|issue| cannot_convert(issue, s))
+        })?;
+    Some((
+        SendNotice {
+            title: None,
+            body,
+            detail: None,
+            action: None,
+            error: false,
+        },
+        None,
+    ))
+}
+
+/// The groups' member addresses, in the order `contact_pick` draws them —
+/// tapping a group seeds a split with everybody in it.
+#[must_use]
+pub fn contact_group_members(view: &ContactsView) -> Vec<Vec<String>> {
+    view.groups
+        .iter()
+        .map(|group| {
+            group
+                .members
+                .iter()
+                .map(|member| member.address.clone())
+                .collect()
+        })
+        .collect()
+}
+
 /// DSD2L / DSD2bL — recipient and amount.
 #[must_use]
 pub fn send_form(i: &SendInputs<'_>) -> SendForm {
@@ -945,8 +1213,22 @@ pub fn send_form(i: &SendInputs<'_>) -> SendForm {
             )
         }),
         pick_contacts: (!split).then(|| s.from_contacts.clone()),
+        notice: send_notice(i, false),
         fee: send_fee_row(i),
-        cta: s.continue_btn.clone(),
+        // The 15s pre-check is a WAIT, not a refusal: the button says so
+        // rather than going dead (busy ≠ disabled).
+        cta: if send.estimating_gas {
+            s.estimating.clone()
+        } else {
+            s.continue_btn.clone()
+        },
+        cta_state: if send.estimating_gas {
+            CtaState::Busy
+        } else if send.can_continue {
+            CtaState::Enabled
+        } else {
+            CtaState::Disabled
+        },
     }
 }
 
@@ -1012,20 +1294,41 @@ pub fn send_confirm(i: &SendInputs<'_>) -> SendConfirm {
             copyable: false,
         },
     ];
-    // The subline is the fiat figure — or, when the last attempt failed, the
-    // sentence the core chose for it; the confirm page has no other slot.
-    let subline = tx_error_text(send, s)
-        .or_else(|| fiat_line(usd, i.locale))
-        .unwrap_or_default();
+    // The last attempt's error is a NOTICE now, not a subline: several of
+    // these have a way out (edit the amount, fund the relay) and a subline
+    // cannot carry one.
+    let notice = send_notice(i, true).or_else(|| {
+        tx_error_text(send, s).map(|body| SendNotice {
+            title: None,
+            body,
+            detail: None,
+            action: None,
+            error: true,
+        })
+    });
     SendConfirm {
         amount: format!("{} {symbol}", send.confirm_amount)
             .trim()
             .to_owned()
             .into(),
-        subline,
+        subline: fiat_line(usd, i.locale).unwrap_or_default(),
         facts,
         breakdown: Vec::new(),
+        notice,
         cta: s.confirm_send.clone(),
+        // Signing and submitting are waits; `can_confirm` is the core's gate
+        // (fee settled ∧ nothing re-quoting ∧ no ceiling breach ∧ idle).
+        cta_state: if send.sending
+            || matches!(
+                send.tx_status,
+                SendTxStatus::Preparing | SendTxStatus::Signing | SendTxStatus::Submitting
+            ) {
+            CtaState::Busy
+        } else if send.can_confirm {
+            CtaState::Enabled
+        } else {
+            CtaState::Disabled
+        },
     }
 }
 

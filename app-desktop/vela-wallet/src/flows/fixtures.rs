@@ -325,6 +325,34 @@ pub struct FeeRow {
 
 /// DSD2L and DSD2bL. Split mode is `!recipients.is_empty()`: the mode IS the
 /// list of payees, and a flag beside it could disagree with it.
+/// What the core refused, said out loud (spec 032 phase 6).
+///
+/// One shape for every refusal on the send journey — a live amount warning,
+/// the same-asset fee ceiling, a split over balance, an unfulfillable locked
+/// request, and the relay's empty float. `action` is the way out the core
+/// offers (edit the amount, add the network, check the top-up again); a
+/// notice with no action is a statement, not a dead end.
+#[derive(Clone)]
+pub struct SendNotice {
+    pub title: Option<SharedString>,
+    pub body: SharedString,
+    /// A second line the notice needs: the ceiling's "you can send up to X",
+    /// or the top-up address.
+    pub detail: Option<SharedString>,
+    pub action: Option<SharedString>,
+    /// Red rather than amber: the person cannot proceed as things stand.
+    pub error: bool,
+}
+
+/// A CTA's three states — the founder's rule: busy is not disabled, and a
+/// button the core shut is drawn shut rather than left looking live.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CtaState {
+    Enabled,
+    Disabled,
+    Busy,
+}
+
 #[derive(Clone)]
 pub struct SendForm {
     pub token: (TokenMark, SharedString, SharedString, Option<SharedString>),
@@ -337,8 +365,13 @@ pub struct SendForm {
     /// Live only: the pill that opens the address book beside a typed field.
     /// The mock's recipient card opens the picker itself, so it has none.
     pub pick_contacts: Option<SharedString>,
+    /// Live only: what the core refused, and the way out.
+    pub notice: Option<SendNotice>,
     pub fee: FeeRow,
     pub cta: SharedString,
+    /// The core's `can_continue`, plus the pre-check's busy state. The mock's
+    /// button is always armed.
+    pub cta_state: CtaState,
 }
 
 #[derive(Clone)]
@@ -419,7 +452,11 @@ pub struct SendConfirm {
     pub subline: SharedString,
     pub facts: Vec<FactRow>,
     pub breakdown: Vec<BreakdownRow>,
+    /// Live only: why the slide is disarmed, when something disarmed it.
+    pub notice: Option<SendNotice>,
     pub cta: SharedString,
+    /// The core's `can_confirm`, plus signing / submitting.
+    pub cta_state: CtaState,
 }
 
 #[derive(Clone)]
@@ -896,8 +933,10 @@ fn send_form(s: &FlowStrings, split: bool) -> SendForm {
                 "120 USDT · ≈$120.00".into(),
             )),
             pick_contacts: None,
+            notice: None,
             fee,
             cta: s.continue_btn.clone(),
+            cta_state: CtaState::Enabled,
         };
     }
 
@@ -914,8 +953,10 @@ fn send_form(s: &FlowStrings, split: bool) -> SendForm {
         recipient_actions: Vec::new(),
         summary: None,
         pick_contacts: None,
+        notice: None,
         fee,
         cta: s.continue_btn.clone(),
+        cta_state: CtaState::Enabled,
     }
 }
 
@@ -1048,7 +1089,9 @@ fn send_confirm(s: &FlowStrings) -> SendConfirm {
             fact(&s.est_fee, "~0.0021 ETH · ≈$0.55"),
         ],
         breakdown: Vec::new(),
+        notice: None,
         cta: s.confirm_send.clone(),
+        cta_state: CtaState::Enabled,
     }
 }
 

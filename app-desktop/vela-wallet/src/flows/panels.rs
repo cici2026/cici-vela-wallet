@@ -20,9 +20,9 @@ use super::components::{
     status_chip, token_header_card,
 };
 use super::fixtures::{
-    AddToken, AddTokenResult, AssetsPanel, BatchImport, ContactPick, DepositEntry, FeeTokenPick,
-    FlowBody, HistoryGroup, ReceiveList, ReceiveQr, ScanModal, SendConfirm, SendForm, SendPick,
-    SendReceipt, TxDetail,
+    AddToken, AddTokenResult, AssetsPanel, BatchImport, ContactPick, CtaState, DepositEntry,
+    FeeTokenPick, FlowBody, HistoryGroup, ReceiveList, ReceiveQr, ScanModal, SendConfirm, SendForm,
+    SendNotice, SendPick, SendReceipt, TxDetail,
 };
 
 /// One prepared click listener. The page builds these from `cx.listener`
@@ -97,6 +97,11 @@ pub struct PanelActions {
     /// DSD2cL, live: the rate, editable — the shown string IS the applied rate.
     pub batch_rate_field: Option<AddressField>,
     pub batch_rate_reset: Option<Click>,
+    /// DSD2L / DSD3L, live: the way out the core's refusal offers — edit the
+    /// amount, add the network, check the top-up again.
+    pub notice_action: Option<Click>,
+    /// DSD2eL, live: one listener per GROUP row — a whole group seeds a split.
+    pub pick_group_rows: Vec<Click>,
 }
 
 /// An editable field the page owns the state of.
@@ -182,12 +187,18 @@ pub fn render(
             identicons,
             actions.open_scan,
             actions.pick_contact_rows,
+            actions.pick_group_rows,
         ),
         FlowBody::FeeToken(model) => fee_token(model, theme, icons, actions.fee_rows),
         FlowBody::BatchImport(model) => batch_import(model, theme, icons, window, actions),
-        FlowBody::SendConfirm(model) => {
-            send_confirm(model, theme, icons, identicons, actions.advance)
-        }
+        FlowBody::SendConfirm(model) => send_confirm(
+            model,
+            theme,
+            icons,
+            identicons,
+            actions.advance,
+            actions.notice_action,
+        ),
         FlowBody::SendReceipt(model) => send_receipt(model, theme, icons, actions.advance),
         // The page routes this away before it gets here; a column-shaped
         // viewfinder is the thing DS1L exists to avoid.
@@ -696,6 +707,81 @@ fn add_token(
     ))
 }
 
+/// What the core refused, drawn where the person is looking.
+///
+/// Amber while they are still typing, red when nothing can proceed as things
+/// stand. The action is the way out the CORE offered — never a button this
+/// file invented.
+fn notice_card(notice: &SendNotice, theme: &Theme, action: Option<Click>) -> Div {
+    let (tint, border) = if notice.error {
+        (theme.error_soft, theme.error_base)
+    } else {
+        (theme.warning_soft, theme.warning_border)
+    };
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .p(px(12.))
+        .rounded(px(12.))
+        .bg(tint)
+        .border_1()
+        .border_color(border);
+    if let Some(title) = &notice.title {
+        card = card.child(
+            div()
+                .text_size(theme::text_row_title())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(if notice.error {
+                    theme.error_base
+                } else {
+                    theme.warning_base
+                })
+                .child(title.clone()),
+        );
+    }
+    card = card.child(
+        div()
+            .text_size(theme::text_row_sub())
+            .text_color(theme.fg_base)
+            .child(notice.body.clone()),
+    );
+    if let Some(detail) = &notice.detail {
+        card = card.child(
+            div()
+                .text_size(theme::text_row_sub())
+                .text_color(theme.fg_muted)
+                .child(detail.clone()),
+        );
+    }
+    match (&notice.action, action) {
+        (Some(label), action) => card.child(div().flex().child(clickable(
+            "flow-notice-action",
+            action,
+            pill(theme, label.clone()),
+        ))),
+        (None, _) => card,
+    }
+}
+
+/// The panel's CTA in the state the core put it in. A shut button is drawn
+/// shut and answers to nothing; a busy one keeps its accent — busy is not
+/// disabled, and a person who pressed once should see the press took.
+fn cta_button(
+    id: &'static str,
+    theme: &Theme,
+    label: SharedString,
+    state: CtaState,
+    action: Option<Click>,
+) -> Div {
+    let button = accent_button(theme, label);
+    match state {
+        CtaState::Enabled => clickable(id, action, button),
+        CtaState::Busy => clickable(id, None, button.opacity(0.7)),
+        CtaState::Disabled => clickable(id, None, button.opacity(0.4)),
+    }
+}
+
 /// A bordered pill for a secondary action — the recipient-row actions and,
 /// live, the Max chip and the address-book affordance beside a typed field.
 fn pill(theme: &Theme, label: SharedString) -> Div {
@@ -960,15 +1046,20 @@ fn send_form(
         );
     }
 
+    if let Some(notice) = &model.notice {
+        col = col.child(notice_card(notice, theme, actions.notice_action.take()));
+    }
     col.child(clickable(
         "flow-fee-row",
         actions.open_fee_token.take(),
         fee_row(theme, icons, &model.fee),
     ))
-    .child(clickable(
+    .child(cta_button(
         "flow-form-cta",
+        theme,
+        model.cta.clone(),
+        model.cta_state,
         actions.advance.take(),
-        accent_button(theme, model.cta.clone()),
     ))
 }
 
@@ -979,6 +1070,7 @@ fn contact_pick(
     identicons: &mut IdenticonCache,
     open_scan: Option<Click>,
     per_row: Vec<Click>,
+    mut group_rows: Vec<Click>,
 ) -> Div {
     let mut per_row = per_row.into_iter();
     let mut col = column()
@@ -1020,42 +1112,46 @@ fn contact_pick(
                 .child(model.groups_title.clone()),
         );
 
-    for (name, count, first, second) in &model.groups {
-        col = col.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .py(px(8.))
-                // Two overlapping discs stand for "several people" without
-                // drawing any of them — a group has no single face to show.
-                .child(
-                    div()
-                        .flex()
-                        .child(div().w(px(28.)).h(px(28.)).rounded(px(14.)).bg(*first))
-                        .child(
-                            div()
-                                .w(px(28.))
-                                .h(px(28.))
-                                .rounded(px(14.))
-                                .bg(*second)
-                                .ml(px(-10.)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(theme::text_row_title())
-                        .text_color(theme.fg_base)
-                        .child(name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(theme::text_row_sub())
-                        .text_color(theme.fg_subtle)
-                        .child(count.clone()),
-                ),
-        );
+    let mut per_group = std::mem::take(&mut group_rows).into_iter();
+    for (index, (name, count, first, second)) in model.groups.iter().enumerate() {
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .py(px(8.))
+            // Two overlapping discs stand for "several people" without
+            // drawing any of them — a group has no single face to show.
+            .child(
+                div()
+                    .flex()
+                    .child(div().w(px(28.)).h(px(28.)).rounded(px(14.)).bg(*first))
+                    .child(
+                        div()
+                            .w(px(28.))
+                            .h(px(28.))
+                            .rounded(px(14.))
+                            .bg(*second)
+                            .ml(px(-10.)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(theme::text_row_title())
+                    .text_color(theme.fg_base)
+                    .child(name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(theme.fg_subtle)
+                    .child(count.clone()),
+            );
+        col = col.child(clickable(
+            ElementId::from(("flow-group", index)),
+            per_group.next(),
+            row,
+        ));
     }
 
     col = col.child(
@@ -1423,6 +1519,7 @@ fn send_confirm(
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
     advance: Option<Click>,
+    notice_action: Option<Click>,
 ) -> Div {
     let mut col = column().child(
         div()
@@ -1491,11 +1588,16 @@ fn send_confirm(
         col = col.child(list);
     }
 
+    if let Some(notice) = &model.notice {
+        col = col.child(notice_card(notice, theme, notice_action));
+    }
     // Per the SPEC sheet this is the ONE accent CTA in the whole send journey.
-    col.child(clickable(
+    col.child(cta_button(
         "flow-confirm-cta",
+        theme,
+        model.cta.clone(),
+        model.cta_state,
         advance,
-        accent_button(theme, model.cta.clone()),
     ))
 }
 
