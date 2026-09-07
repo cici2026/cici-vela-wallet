@@ -161,6 +161,65 @@ pub fn fee_model(clear: &ClearSigningView, fee: &FeeView, s: &SigningStrings) ->
     }
 }
 
+/// Who is asking, and on which chain.
+///
+/// From the REQUEST, never from the fixture. A sheet that names the mock's
+/// site while a different one is asking for a signature is not a cosmetic
+/// error — it is the one fact the person is being asked to judge, wrong.
+///
+/// The name is the host itself. Deriving a friendly name from a domain is
+/// guessing, and a guess in this position is how a look-alike domain gets to
+/// present itself as the real thing; the drawings' pretty names come from a
+/// dApp identity the request does not carry yet.
+#[must_use]
+pub fn dapp_identity(origin: &str) -> (SharedString, SharedString, SharedString) {
+    let host = origin
+        .split_once("://")
+        .map_or(origin, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(origin);
+    let letter = host
+        .chars()
+        .find(char::is_ascii_alphanumeric)
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().to_string());
+    (
+        SharedString::from(host.to_owned()),
+        SharedString::from(host.to_owned()),
+        SharedString::from(letter),
+    )
+}
+
+/// The words on the slide, as the core graded them.
+///
+/// `Confirm` is never "Approve" — the core's own note says that verb belongs
+/// only to an actual token approval, which is `approval_guard`'s surface. The
+/// mock said "Confirm swap" over a plain transfer because a fixture cannot
+/// know what it is confirming; this does.
+#[must_use]
+pub fn confirm_label(clear: &ClearSigningView, s: &SigningStrings) -> SharedString {
+    use vela_core::app::clear_signing::ClearConfirm;
+    let action = match &clear.confirm {
+        ClearConfirm::Sign => return s.sign_label.clone(),
+        ClearConfirm::Confirm => None,
+        // The intent travels as a canonical English key; the shell localizes
+        // the ones it has words for and shows the neutral verb for the rest,
+        // which is better than showing an English key to somebody reading
+        // Chinese.
+        ClearConfirm::ConfirmIntent { intent } => match intent.as_str() {
+            "send" => Some(s.confirm_send.clone()),
+            "swap" => Some(s.confirm_swap.clone()),
+            "deposit" => Some(s.confirm_deposit.clone()),
+            "withdraw" => Some(s.confirm_withdraw.clone()),
+            _ => None,
+        },
+    };
+    match action {
+        Some(action) => SharedString::from(format!("{} · {action}", s.slide_to_confirm)),
+        None => SharedString::from(format!("{} · {}", s.slide_to_confirm, s.confirm_plain)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +361,34 @@ mod tests {
     fn nothing_decoded_draws_nothing() {
         let host = crate::core_host::CoreHost::<vela_core::app::clear_signing::ClearSigning>::new();
         assert!(blocks(&host.view(), &strings()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    /// The header names the ORIGIN, and does not dress it up.
+    ///
+    /// Deriving a friendly name from a domain is guessing, and a guess here is
+    /// how `uniswap-app.com` gets to present itself as Uniswap. The one fact
+    /// the person is being asked to judge is who is asking, so it is shown
+    /// exactly as the transport reported it.
+    #[test]
+    fn the_header_shows_the_origin_verbatim() {
+        let (name, host, letter) = dapp_identity("https://app.uniswap.org/swap?x=1");
+        assert_eq!(host, "app.uniswap.org");
+        assert_eq!(name, host, "no invented display name");
+        assert_eq!(letter, "A");
+
+        // A look-alike stays a look-alike on screen.
+        let (name, _, _) = dapp_identity("https://uniswap-app.com");
+        assert_eq!(name, "uniswap-app.com");
+
+        // Local pages and odd origins do not panic and do not go blank.
+        let (name, _, letter) = dapp_identity("http://127.0.0.1:8137/");
+        assert_eq!(name, "127.0.0.1:8137");
+        assert_eq!(letter, "1");
+        assert_eq!(dapp_identity("").2, "?");
     }
 }

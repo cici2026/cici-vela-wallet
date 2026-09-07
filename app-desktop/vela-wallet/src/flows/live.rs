@@ -51,7 +51,9 @@ fn tint(chain_id: u32) -> Hsla {
 }
 
 /// A chain's name, from the one place that derives it.
-fn chain_name(chain_id: u32) -> String {
+/// A chain's display name. `pub(crate)` and shared with the signing
+/// sheet: two names for one chain is a badge disagreeing with a fee.
+pub(crate) fn chain_name(chain_id: u32) -> String {
     crate::executor::custom_tokens::network_name(chain_id)
 }
 

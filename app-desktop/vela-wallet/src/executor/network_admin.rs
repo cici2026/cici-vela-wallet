@@ -295,6 +295,18 @@ fn decode_search_index(value: &Value) -> Vec<NetChainIndexEntry> {
         .collect()
 }
 
+/// The chain ids of every network somebody added.
+///
+/// Shared with the signing host, which must tell `sign_request` the same list
+/// the settings screen shows — a request for a chain the settings say is
+/// present, refused as absent, is the wallet disagreeing with itself.
+pub fn read_store_custom_chain_ids() -> Vec<u32> {
+    decode_list::<StoredNetwork, NetCustomNetwork>(storage::KEY_CUSTOM_NETWORKS)
+        .into_iter()
+        .map(|network| network.chain_id)
+        .collect()
+}
+
 fn read_store() -> NetShellResult {
     let endpoints = storage::read_value(storage::KEY_SERVICE_ENDPOINTS)
         .ok()

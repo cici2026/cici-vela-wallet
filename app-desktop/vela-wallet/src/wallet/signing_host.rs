@@ -36,7 +36,7 @@ use vela_core::app::fee_policy::{
     Event as FeeEvent, FeeCall, FeeOperation, FeePolicy, FeeShellResult, FeeTier, FeeView,
 };
 use vela_core::app::sign_request::{
-    Event as SignEvent, SignApproveOpts, SignOperation, SignQuotedFee, SignRequest,
+    Event as SignEvent, SignAccountRef, SignApproveOpts, SignOperation, SignQuotedFee, SignRequest,
     SignShellResult, SignView,
 };
 
@@ -76,6 +76,12 @@ pub struct SigningHost {
     /// Guards the deployment read: a slower one must not quote for a request
     /// that has been superseded.
     fee_seq: u64,
+    /// WHO is asking and on WHAT chain, kept from the request that opened
+    /// this host. The sheet's header is drawn from these — a signing screen
+    /// naming the wrong site is the worst thing it can get wrong, and until
+    /// spec 032 phase 22 it named the MOCK's site on every live request.
+    pub origin: String,
+    pub chain_id: u32,
     ctx: SignContext,
     #[allow(dead_code, reason = "held so the ceremony outlives the request")]
     channel: Arc<CeremonyChannel>,
@@ -101,6 +107,8 @@ impl SigningHost {
         let fee = CoreHost::<FeePolicy>::new();
         let fee_view = fee.view();
         let mut host = Self {
+            origin: request.origin.clone(),
+            chain_id: request.chain_id,
             sign,
             view,
             clear,
@@ -126,6 +134,34 @@ impl SigningHost {
     /// through every descriptor fetch.
     fn begin(&mut self, request: &IncomingRequest, wallet: &str, cx: &mut Context<Self>) {
         let now = now_ms();
+
+        // The machine has to know the world before it can judge a request
+        // against it. Without these two it refuses every transaction with
+        // 4902 — "that chain is not added" — because as far as it knows, none
+        // are. Found by running it: no test could, since the whole point is
+        // what the machine is NOT told.
+        self.dispatch_sign(
+            SignEvent::NetworksChanged {
+                chain_ids: known_chain_ids(),
+            },
+            cx,
+        );
+        self.dispatch_sign(
+            SignEvent::AccountsChanged {
+                accounts: vec![SignAccountRef {
+                    address: wallet.to_owned(),
+                    credential_id: self
+                        .ctx
+                        .keys
+                        .first()
+                        .map(|key| key.credential_id.clone())
+                        .unwrap_or_default(),
+                }],
+                active_index: 0,
+            },
+            cx,
+        );
+
         self.dispatch_sign(
             SignEvent::RequestArrived {
                 id: request.id.clone(),
@@ -465,6 +501,23 @@ impl SigningHost {
         self.guard_view = self.guard.view();
         cx.notify();
     }
+}
+
+/// Every chain this wallet can act on: the built-ins plus whatever was added.
+///
+/// The same list the network settings show, because a request for a chain the
+/// settings say is present must not be refused as absent.
+fn known_chain_ids() -> Vec<u32> {
+    let mut ids: Vec<u32> = vela_core::app::network_admin::BUILTIN_CHAINS
+        .iter()
+        .map(|chain| chain.chain_id)
+        .collect();
+    for custom in crate::executor::network_admin::read_store_custom_chain_ids() {
+        if !ids.contains(&custom) {
+            ids.push(custom);
+        }
+    }
+    ids
 }
 
 /// The first call's `to` / `data` / `value`, for the decoder.

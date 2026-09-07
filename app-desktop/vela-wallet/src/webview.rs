@@ -308,10 +308,6 @@ fn on_request(request: wry::http::Request<String>) {
             .unwrap_or_else(|| "[]".to_owned()),
         origin,
     };
-    eprintln!(
-        "[vela-wallet] browser rpc: {} from {}",
-        incoming.method, incoming.origin
-    );
     let delivered = SINK.with(|slot| {
         slot.borrow().as_ref().map(|sink| {
             sink(incoming);

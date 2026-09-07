@@ -6614,7 +6614,18 @@ impl WalletPage {
             if !blocks.is_empty() {
                 model.blocks = blocks;
             }
+            // WHO is asking, from the request. The mock's Uniswap header on a
+            // live request is the one fact the person is judging, wrong.
+            let (name, dapp_host, letter) = signing_live::dapp_identity(&host.origin);
+            model.dapp_name = name;
+            model.dapp_host = dapp_host;
+            model.dapp_letter = letter;
+            // …and on which chain, from the request too. The fixture's badge
+            // said Ethereum over a Gnosis fee.
+            model.network_name =
+                gpui::SharedString::from(crate::flows::live::chain_name(host.chain_id));
             model.fee = signing_live::fee_model(&host.clear_view, fee, &self.signing);
+            model.confirm_label = signing_live::confirm_label(&host.clear_view, &self.signing);
             model.confirm_enabled =
                 signing_live::confirm_enabled(&host.view, &host.guard_view, fee);
         }
