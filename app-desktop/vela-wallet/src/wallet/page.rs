@@ -277,6 +277,10 @@ impl GalleryTab {
 
 pub struct WalletPage {
     mode: ThemeMode,
+    /// Where the dApp browser opens. The toolbar's address field writes here
+    /// and `webview::navigate` acts on it; the mock's Uniswap host is the
+    /// default so the live browser starts where the drawings say it does.
+    browser_home: String,
     /// Gallery-only appearance override (the VELA_THEME pin still wins at
     /// detect time; this cycles on top for quick eyeballing).
     override_mode: Option<ThemeMode>,
@@ -557,6 +561,9 @@ impl WalletPage {
 
         Self {
             mode: ThemeMode::detect(window),
+            // The host the drawings browse. `https://` because a webview is
+            // not a place to make an exception about transport security.
+            browser_home: format!("https://{}", explore_fixtures::uniswap().host),
             override_mode: None,
             strings,
             contacts,
@@ -6144,16 +6151,77 @@ impl WalletPage {
                         cx.notify();
                     })),
             );
+        // A REAL page, in a real session. The mock keeps drawing for the
+        // gallery and for a window nobody has signed in to, which is the same
+        // fork every other live surface takes — and it is what keeps
+        // `sweep-gallery.sh` from opening a webview per state.
+        #[cfg(not(target_os = "linux"))]
+        let live_browser = browsing && self.identity.is_some();
+        #[cfg(target_os = "linux")]
+        let live_browser = false;
+
+        // The host beside the lock is the WEBVIEW's, never the fixture's: a
+        // label fed from anywhere else is a claim about which origin is loaded,
+        // and that is the one thing browser chrome must not get wrong. Before
+        // the first page — and in the mock — it stays the drawn host.
+        #[cfg(not(target_os = "linux"))]
+        let host = if live_browser {
+            crate::webview::host()
+                .map_or_else(|| explore_fixtures::uniswap().host, SharedString::from)
+        } else {
+            explore_fixtures::uniswap().host
+        };
+        #[cfg(target_os = "linux")]
+        let host = explore_fixtures::uniswap().host;
+
+        // Drawn and inert in the mock; three real listeners in a live session.
+        #[cfg(not(target_os = "linux"))]
+        let nav: Option<explore_components::NavActions> = live_browser.then(|| {
+            [
+                Box::new(|_: &gpui::ClickEvent, _: &mut Window, _: &mut gpui::App| {
+                    crate::webview::back();
+                }) as panels::Click,
+                Box::new(|_: &gpui::ClickEvent, _: &mut Window, _: &mut gpui::App| {
+                    crate::webview::forward();
+                }),
+                Box::new(|_: &gpui::ClickEvent, _: &mut Window, _: &mut gpui::App| {
+                    crate::webview::reload();
+                }),
+            ]
+        });
+        #[cfg(target_os = "linux")]
+        let nav: Option<explore_components::NavActions> = None;
+
         let toolbar = explore_components::toolbar(
             theme,
             &mut self.icons,
             browsing,
-            explore_fixtures::uniswap().host,
+            host,
             self.explore.search_placeholder.clone(),
             trailing,
+            nav,
         );
 
-        let body: gpui::AnyElement = if browsing {
+        let body: gpui::AnyElement = if live_browser {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let home = self.browser_home.clone();
+                gpui::canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, _| {
+                        // Placed from the PAINT pass of the element that owns
+                        // this rectangle, so the webview follows the column
+                        // through a resize and through the signing panel
+                        // opening beside it.
+                        crate::webview::place(bounds, window, &home);
+                    },
+                )
+                .size_full()
+                .into_any_element()
+            }
+            #[cfg(target_os = "linux")]
+            unreachable!("live_browser is false on linux")
+        } else if browsing {
             explore_components::demo_page(&explore_fixtures::demo_page())
                 .child(
                     // The site's own button is what raises a signing request;
@@ -6208,10 +6276,20 @@ impl WalletPage {
         for (i, site) in favorites.iter().enumerate() {
             grid = grid.child(
                 explore_components::site_tile(ElementId::from(("tile", i)), theme, site)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.browsing = true;
-                        cx.notify();
-                    }))
+                    .on_click({
+                        // A favourite opens THAT site. Before this every tile
+                        // set `browsing` and the page drew the same mock, so
+                        // clicking Aave showed Uniswap — which no mock can be
+                        // blamed for once the page is real.
+                        let url = format!("https://{}", site.host);
+                        cx.listener(move |this, _, _, cx| {
+                            this.browsing = true;
+                            this.browser_home = url.clone();
+                            #[cfg(not(target_os = "linux"))]
+                            crate::webview::navigate(&url);
+                            cx.notify();
+                        })
+                    })
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, _, cx| {
@@ -6887,6 +6965,15 @@ impl Render for WalletPage {
         // `appears_transparent` means it is not). Where it lands over content,
         // that content is pushed clear of it below.
         let caption = owns_titlebar(window);
+
+        // The browser is a NATIVE subview: it does not disappear because the
+        // route changed, so every frame that is not drawing the browser column
+        // takes it off the screen. Miss this and a webview floats over the
+        // wallet. `place` turns it back on in the same frame it is drawn.
+        #[cfg(not(target_os = "linux"))]
+        if !(self.section == Section::Explore && self.browsing && self.identity.is_some()) {
+            crate::webview::hide();
+        }
 
         // The column was closed under a live send: its machines go with it.
         if self.panel != PanelId::Flow && self.send_host.is_some() {

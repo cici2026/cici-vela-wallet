@@ -30,6 +30,8 @@ mod signing;
 mod theme;
 mod ui;
 mod wallet;
+#[cfg(not(target_os = "linux"))]
+mod webview;
 mod window_frame;
 
 use gallery::GalleryView;
@@ -210,83 +212,9 @@ fn open_window_with<V: gpui::Render + 'static>(
             }),
             ..Default::default()
         },
-        |window, cx| {
-            let view = build(window, cx);
-            // Dropping a `WebView` removes it from the window, so the probe
-            // has to outlive this closure. A thread local rather than a gpui
-            // global because it is neither `Send` nor `Sync` and lives on the
-            // main thread by construction — and because a probe should be
-            // obviously temporary scaffolding, not a field on the app.
-            #[cfg(not(target_os = "linux"))]
-            if let Some(webview) = attach_webview_probe(window) {
-                WEBVIEW_PROBE.with(|slot| *slot.borrow_mut() = Some(webview));
-            }
-            view
-        },
+        build,
     )
     .expect("failed to open the main window");
-}
-
-#[cfg(not(target_os = "linux"))]
-thread_local! {
-    static WEBVIEW_PROBE: std::cell::RefCell<Option<wry::WebView>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// The dApp browser's engine, proven rather than argued about (spec 032
-/// phase 13).
-///
-/// `VELA_WEBVIEW=1` attaches a real webview to the window this app already
-/// draws, loads a page in it, and lets that page talk back. It answers the one
-/// question a table of engines cannot: does a system webview embed inside a
-/// gpui window at all.
-///
-/// The mechanism is `gpui::Window: HasWindowHandle` meeting wry's
-/// `build_as_child`, over `raw-window-handle` 0.6 — the one version gpui and
-/// wry already agree on. On macOS the result is an `NSView` subview of the
-/// window's content view; on Windows a child `HWND`.
-///
-/// **Composited ABOVE everything gpui draws**, because that is what a native
-/// subview is. Any panel this app puts over the browser — the signing sheet
-/// above all — has to hide or move the webview rather than draw on top of it,
-/// which is what `set_visible` and `set_bounds` are for.
-#[cfg(not(target_os = "linux"))]
-fn attach_webview_probe(window: &gpui::Window) -> Option<wry::WebView> {
-    if std::env::var("VELA_WEBVIEW").as_deref() != Ok("1") {
-        return None;
-    }
-    // A page that reports back, so the probe proves the BRIDGE and not just
-    // that pixels arrived: the injected script is where `window.ethereum`
-    // would be defined, and the ipc handler is the channel a provider answers
-    // over.
-    let webview = wry::WebViewBuilder::new()
-        .with_bounds(wry::Rect {
-            position: wry::dpi::LogicalPosition::new(520.0, 120.0).into(),
-            size: wry::dpi::LogicalSize::new(760.0, 640.0).into(),
-        })
-        .with_initialization_script(
-            "window.__vela = { probe: () => window.ipc.postMessage('vela:probe') };
-             window.addEventListener('DOMContentLoaded', () => window.__vela.probe());",
-        )
-        .with_ipc_handler(|request| {
-            println!("[vela-wallet] webview ipc: {}", request.body());
-        })
-        .with_html(
-            "<html><body style='font:16px -apple-system;padding:24px'>
-             <h2>Vela webview probe</h2><p>If you can read this, a system
-             webview is embedded in the gpui window.</p></body></html>",
-        )
-        .build_as_child(window);
-    match webview {
-        Ok(webview) => {
-            println!("[vela-wallet] webview: attached as a child of the gpui window");
-            Some(webview)
-        }
-        Err(error) => {
-            eprintln!("[vela-wallet] webview: {error}");
-            None
-        }
-    }
 }
 
 fn main() {

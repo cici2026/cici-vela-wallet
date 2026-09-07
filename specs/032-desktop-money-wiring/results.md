@@ -836,10 +836,13 @@ Streaming(Box<dyn FnOnce(&Sink<E>) -> T + Send>)
 
 ### 三个必须先说清楚的代价
 
-1. **合成在 gpui 之上,不在里面。** 原生子视图就是这样。截图里 webview 盖住了
-   下面 gpui 画的引导文案。**签名面板恰恰要盖在浏览器上**,所以面板一开就得
-   `set_visible(false)` 或者把 bounds 挪走,不能指望 gpui 画上去。这是 C 组的
-   头号交互约束,不是细节。
+1. **合成在 gpui 之上,不在里面。** 原生子视图就是这样。
+   **我第一版把这条写成"签名面板要盖在浏览器上"——写错了**,创始人当场纠正:
+   桌面的签名面板是**第三列**(`PanelId::Signing` → `panel_scaffold`,和收款、
+   资产详情同一个脚手架),它挨着浏览器、把浏览器挤窄,不盖在上面。手机版
+   clearsigning 那些图看起来像盖上去,是因为手机只有一列。
+   这条约束真正落在两个地方:**离开浏览器时**(原生子视图不会因为 gpui 换了路由
+   就消失,必须显式藏)、和**居中弹窗**(扫码、设置对话框会被画在 webview 底下)。
 2. **Linux 是另一件事。** wry 在 Linux 上 `os-webview` 拉 gtk + webkit2gtk + soup3,
    而 CI 的 `desktop` job 和 `desktop-linux-packages.yml` 都没装这些;而且
    `build_as_child` 在 Linux **只支持 X11、不支持 Wayland**,还要 `gtk::init` +
@@ -858,6 +861,57 @@ clippy 警告数 **42 → 42**(基线也是 42,用 stash 量过),没有新增。
 导航/前进后退、per-site 权限、把 027 的 `inpage.js`/`protocol.js` 接到
 `with_initialization_script` + `with_ipc_handler` 上,再驱动 `dapp_session`
 `dapp_permissions` `browser_history` 三台机器(3,771 行)。
+
+## Phase 14 — 浏览器成了一列(C 组的壳)
+
+创始人点批"先 A 后 B":先把浏览器做实,B 组的签名请求才有来源。
+
+**真 Uniswap 现在跑在 explore 那一列里**(截图为证:app.uniswap.org 的
+"Swap anytime, anywhere." + 真兑换组件,上面是 Vela 自己的标签条和工具栏,
+左边是侧边栏)。
+
+### 位置跟着列走
+
+webview 的 bounds 由**拥有那块矩形的元素在 paint 阶段**给出(`gpui::canvas`),
+所以窗口缩放、第三列(签名面板)打开挤窄浏览器,它都跟着走。只有 bounds 真的变了
+才跨平台边界调 `set_bounds`——不然一秒六十次。
+
+### 那条约束的正确形状
+
+我 phase 13 把它写成"签名面板要盖在浏览器上",**是错的**,创始人纠正了:
+桌面签名面板是第三列,和收款/资产详情同一个 `panel_scaffold`,挨着而不是压着。
+真正要管的是两处:
+
+1. **离开浏览器**。原生子视图不会因为 gpui 换路由就消失。所以每一帧只要不是在画
+   浏览器列,就 `webview::hide()`——漏了这一句,webview 会浮在钱包上面。
+2. **居中弹窗**(扫码、设置对话框)会被画在 webview 底下。这两个还没处理,记账。
+
+### provider:027 的脚本原样注入
+
+`inpage.js` **一个字没改**地 `include_str!` 进来(434 行,扩展里那份)。扩展是
+MAIN world + isolated world 用 `window.postMessage` 对话,wry 没有 isolated world,
+所以补了**十一行 bridge**:把同样的信封转给 `window.ipc`,答案再用 `window.postMessage`
+送回去。provider 分辨不出区别,这正是重点——第二份 EIP-1193 实现就是第二套 bug。
+
+**origin 由宿主读,不信页面。** 扩展的 content script 存在的理由就是"带两个页面伪造不了的
+事实:哪个标签页、哪个 origin"。这里同样:origin 从 `webview.url()` 读,
+页面在信封里自称的 origin 一律忽略。
+
+**请求现在被拒绝而不是被吊着**:`dapp_session` 三台机器还没接,所以答 4900
+(不是 4001——027 D37:永不结算的 promise 是这条通路最坏的产出,而"干净的拒绝"
+和"提交了但卡住"必须能分辨)。
+
+### 顺手修的真 bug
+
+收藏格子原来**每一个都只是把 `browsing` 置真**,页面画同一张 mock——点 Aave 出 Uniswap。
+现在每个格子带着自己的 host 去 `navigate`。这个 bug 在 mock 时代看不出来,页面一真就是错的。
+
+### 还欠
+
+地址栏是画的静态 host(图就是这么画的,没自作主张改成可编辑);标签条还是 mock;
+逐站点权限、历史、`dapp_session`/`dapp_permissions`/`browser_history` 三台机器(3,771 行)
+都还没接。Linux 依然在 `cfg(not(target_os = "linux"))` 外面——**创始人已定:Linux 要支持,
+但先上 mac + win**。
 
 # 交接:下一个会话从这里开始
 

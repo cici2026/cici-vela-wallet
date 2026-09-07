@@ -117,7 +117,11 @@ pub struct AddressField {
 /// The listener is MOVED in: each affordance is rendered once per pass, and an
 /// action with no listener renders as a plain element rather than as a
 /// cursor-pointer that does nothing.
-fn clickable(id: impl Into<ElementId>, action: Option<Click>, body: impl IntoElement) -> Div {
+pub(crate) fn clickable(
+    id: impl Into<ElementId>,
+    action: Option<Click>,
+    body: impl IntoElement,
+) -> Div {
     // The wrapper stays a plain `Div` so callers can keep composing columns;
     // the identified element lives inside it, because `.id()` changes the type.
     let wrap = div().flex().flex_col();
