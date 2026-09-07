@@ -33,7 +33,7 @@ impl Machine for FeePolicy {
         Event::QuoteExpired
     }
 
-    fn perform(operation: &FeeOperation) -> Answer<FeeShellResult> {
+    fn perform(operation: &FeeOperation) -> Answer<FeeShellResult, Self::Event> {
         match operation {
             FeeOperation::FetchGasPrice { chain_id, want_tip } => {
                 let (chain_id, want_tip) = (*chain_id, *want_tip);

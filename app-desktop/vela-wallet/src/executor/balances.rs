@@ -36,15 +36,22 @@
 //! chain's curated stablecoin list, and ≈$1 is what being on that list means.
 //! The web owns it the same way and says so at length.
 //!
-//! ## Why parallel, and why not streaming
+//! ## Why parallel, and why it streams
 //!
 //! Twelve chains at up to a few seconds each is a minute of serial waiting, so
-//! each chain gets a thread and the answers are joined. The core also supports
-//! *streaming* partial results (`Event::ChainAssetsArrived`) so a home screen
-//! can fill in as chains answer — that needs a way to push events into a
-//! resident from a worker, which this cut does not build.
+//! each chain gets a thread and the answers are joined.
+//!
+//! Joining is not the end of it, though: the core supports *streaming* partial
+//! results (`Event::ChainAssetsArrived`) so the home fills in as chains answer,
+//! and until spec 032 phase 12 this file did not use it — one unreachable RPC
+//! held the hero on its skeleton for that chain's whole timeout while eleven
+//! chains sat answered. [`fetch_all_streaming`] reports each chain from its own
+//! thread; the seam that carries those reports into a resident is
+//! `resident::Answer::Streaming`. The join still happens, because the SETTLE
+//! needs the complete picture.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread;
 
 use serde_json::{Value, json};
@@ -653,13 +660,48 @@ fn inform_token_trust(address: &str, tokens: &[BalanceToken]) {
     }
 }
 
-/// Every chain's balances for one address, fetched in parallel.
+/// Told when one chain's assets land, from that chain's own thread.
+///
+/// `Send + Sync` because twelve threads share one: the fan-out below is real
+/// threads, not a sequence.
+pub type ChainSink = dyn Fn(Vec<BalanceToken>) + Send + Sync;
+
+/// Every chain's balances for one address, fetched in parallel and reported
+/// only once they are all in.
 ///
 /// Returns the tokens found and the chains that could not be reached, which the
 /// core needs separately: the second list is what lets the home say "this chain
 /// is unreachable" instead of adding a silent zero to the total.
+///
+/// For callers that want a total and nothing else — the account switcher, the
+/// tests. The home screen uses [`fetch_all_streaming`].
 #[must_use]
 pub fn fetch_all(address: &str) -> (Vec<BalanceToken>, Vec<u32>) {
+    let silent: Arc<ChainSink> = Arc::new(|_| {});
+    fetch_all_streaming(address, &silent)
+}
+
+/// The same fan-out, saying what it has found as it finds it.
+///
+/// Twelve chains answer at twelve different speeds, and the join loop below
+/// waits for all of them. Before this, the hero showed a skeleton (or the
+/// cached total) until the SLOWEST chain replied — one unreachable RPC and
+/// nothing on the screen moved for its entire timeout, even though eleven
+/// chains had answered in a fraction of a second.
+///
+/// Each chain calls `arrived` with its OWN tokens, which is what the core's
+/// merge expects: a snapshot replaces the chains it names and leaves the rest
+/// alone (`chain_assets_arrived`, "slow chains keep last value"). A chain
+/// holding nothing sends an empty snapshot, which correctly changes nothing.
+///
+/// The settle still happens exactly once, after the join — the core needs the
+/// complete picture to decide about the cache write and the failed set, and no
+/// snapshot may arrive after it.
+#[must_use]
+pub fn fetch_all_streaming(
+    address: &str,
+    arrived: &Arc<ChainSink>,
+) -> (Vec<BalanceToken>, Vec<u32>) {
     // One batched read on Ethereum mainnet, before the fan-out, so twelve
     // threads share it instead of racing to fetch the same five feeds.
     let mainnet_prices = chainlink::prices();
@@ -668,20 +710,19 @@ pub fn fetch_all(address: &str) -> (Vec<BalanceToken>, Vec<u32>) {
     for (chain_id, symbol) in chains() {
         let address = address.to_owned();
         let mainnet_prices = mainnet_prices.clone();
+        let arrived = Arc::clone(arrived);
         handles.push(
             thread::Builder::new()
                 .name(format!("vela-balance-{chain_id}"))
                 .spawn(move || match native_raw(chain_id, &address) {
-                    Some(raw) => (
-                        chain_id,
-                        Some(chain_tokens_for(
-                            chain_id,
-                            &symbol,
-                            &address,
-                            &raw,
-                            &mainnet_prices,
-                        )),
-                    ),
+                    Some(raw) => {
+                        let found =
+                            chain_tokens_for(chain_id, &symbol, &address, &raw, &mainnet_prices);
+                        // Reported from this thread, the moment this chain is
+                        // in — not after the eleven others.
+                        arrived(found.clone());
+                        (chain_id, Some(found))
+                    }
                     None => (chain_id, None),
                 })
                 .ok(),

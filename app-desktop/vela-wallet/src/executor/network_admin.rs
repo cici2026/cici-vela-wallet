@@ -472,7 +472,7 @@ impl Machine for NetworkAdmin {
         Event::Started
     }
 
-    fn perform(operation: &NetOperation) -> Answer<NetShellResult> {
+    fn perform(operation: &NetOperation) -> Answer<NetShellResult, Self::Event> {
         match operation {
             NetOperation::ReadStore => Answer::Now(read_store()),
 
@@ -891,6 +891,16 @@ mod tests {
             let result = match NetworkAdmin::perform(&next.operation) {
                 Answer::Now(result) => result,
                 Answer::Blocking(work) => work(),
+                // The reports a streaming operation makes on its way. Dispatched
+                // BEFORE its result, which is the order the async pump
+                // guarantees and the order `balance_dashboard` depends on.
+                Answer::Streaming(work) => {
+                    let (reports, result) = crate::resident::run_streaming(work);
+                    for report in reports {
+                        pending.extend(host.dispatch(report));
+                    }
+                    result
+                }
                 // A debounce answers instantly here; no test should sit through
                 // a timer it did not come to measure.
                 Answer::After(_, result) => result,

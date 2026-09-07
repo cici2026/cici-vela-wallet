@@ -733,6 +733,76 @@ Apply 之后两行金额 `5000` 和 `173.88` 一位不差。
 > 我在隔离 crate 里 `cd` 过一次,下一条闸门就在**那个目录**跑了 `cargo fmt --all --check`,
 > 报的是隔离 crate 的格式问题。闸门命令自己带上 `cd`,别指望继承。
 
+## Phase 12 — 余额一条一条地到
+
+031 留的第 4 件,也是欠账表里最后一件**纯工时**的事。核心一直支持流式:
+
+```text
+AccountChanged ─► reset ─► ReadBalanceCache ∥ FetchTokens ──► stream:
+    ChainAssetsArrived (merge per chain, slow chains keep last value)
+```
+
+桌面一直没用。`FetchTokens` 是一次 `Answer::Blocking`:十二条链十二个线程一起跑,
+然后 **join 完再一次性回答**。后果是——**一条 RPC 不通,整个英雄区就按它的超时僵着**,
+另外十一条早就答完了,屏幕上却还是骨架(或者昨天的缓存总额)。
+
+### 壳缺一条缝
+
+`Answer` 只有 `Now` / `Blocking` / `After` 三种,都是**答一次**。流式要的是"边做边说",
+所以加了第四种:
+
+```rust
+Streaming(Box<dyn FnOnce(&Sink<E>) -> T + Send>)
+```
+
+`Sink<E>` 可 Clone、可跨线程(十二个线程共用一个),每次 `send` 变成一个**事件**,
+在主线程按顺序 dispatch 进这台机器,**全部在它自己的结果之前**。这条顺序就是全部契约:
+`balance_dashboard` 把每次到达并进 token 列表、只结算一次,**结算之后再来的快照会把
+已经算过的链复活**。
+
+实现上顺序是自然保证的,不是靠小心:排空循环在 sink 被丢弃时结束,而 sink 是在
+`work` 返回时丢的。写了一个不带 gpui 的测试盯着这条(12 个事件按序、然后才是结果),
+外加一条"接收端没了 send 不能炸"——窗口在取余额途中被关掉,十一条链手里还攥着 sink。
+
+`Answer` 从 `Answer<T>` 变成 `Answer<T, E>`,十个 `Machine::perform` 签名跟着改成
+`Answer<XShellResult, Self::Event>`(编译器一个个指出来的)。`wallet/money.rs` 那个
+**屏幕自己拥有的** fee 泵也补了同一条臂——`fee_policy` 今天不流式,但写成 `unreachable!`
+的话,它哪天开始流式就是确认页上的一次 panic,而这不过是资深泵里同样的八行。
+
+### 取数那半边
+
+`fetch_all` 拆成 `fetch_all_streaming(address, &Arc<ChainSink>)`,每条链的线程算完
+**自己那条链的 token 就立刻报**;`fetch_all` 就是传一个什么都不做的 sink,所以账户切换器
+和现有测试一行没动。快照必须是"那条链的",因为核心的合并规则是**按 chain_id 替换、
+其余保留**;空快照(那条链什么都没有)正确地什么也不改。
+
+`FetchAccountAssets` **故意不流式**:它读的是切换器里别人的账户,快照会被并进当前账户。
+核心的文档也是这么写的("never streams")。
+
+结算仍然只有一次:核心要完整图景才能决定写不写缓存、哪些链算失败。
+
+### 证据
+
+**五个**同步测试驱动器(它们自己在测试里跑泵)也补了这条臂,共用一个
+`resident::run_streaming` 而不是各写一遍。第五个只在 `--features dev-fixtures` 下编译,
+所以第一遍闸门才发现它——**闸门要跑两种 feature 配置,不是一种**。真网那条 `#[ignore]` 测试:金标 Safe 上
+**报告不止一份**、**其中一份在结算之前就已经把钱和一个能画的总额交到核心手里**、
+结算后的持仓不少于那一份。
+
+**第一版这条测试写错了,而且是真网跑出来打脸的**:我断言"**第一份**报告就带着钱"。
+金标 Safe 只在 Gnosis 上有 xDAI,**十二条链里十一条正确地报了空快照**,
+先答完的几乎必然是空的那些。断言改成"**存在**一份结算前的报告带着钱"——
+这才是这个功能的主张。多亏跑了真网,不然这条测试会一直是个假的规格。
+
+顺带清了三条自己带进来的警告(`#[must_use]` 落在类型别名上、`try_next` 已弃用、
+测试模块里多余的 `StreamExt`)——第 6 条教训的现场复习:两种配置各只剩
+`BLE_CHANNEL_SUPPORTED` 一个。
+
+**这条测试证明什么、不证明什么**(先写清楚,免得名字比内容大):它证明报告存在、
+每条链报自己那份、第一份在结算之前就有可画的总额。它**不**证明墙钟意义上的"更早"
+——同步驱动器 `run_streaming` 保的是**顺序**,不是并发(它自己的文档就这么写)。
+真正的时间性归 async 泵,而这个仓库没有 gpui 测试夹具能驱动它。**这一层没测。**
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
@@ -772,11 +842,11 @@ cd ../../rust && cargo fmt --all --check \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
 ```
 
-基线(**并入 028、走完 phase 11 之后**):desktop **271 passed(feature on)/ 267(off)· 32 ignored**,
+基线(**并入 028、走完 phase 12 之后**):desktop **273 passed(feature on)/ 269(off)· 33 ignored**,
 vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
 **两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
 桌面数字:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
-phase 8 加 2、9 加 2、10 加 2、11 加 4。
+phase 8 加 2、9 加 2、10 加 2、11 加 4、12 加 2(外加一条 `#[ignore]` 真网)。
 (phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
 
 **动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
@@ -804,7 +874,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
 | 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
 | 5 | `SimulateCalls` | 桌面没有模拟引擎,答 `None` |
-| 6 | 031 留的五件 | **Windows 日界线已交付**(phase 11,算术有测、FFI 交叉编译验过、没在 Windows 上跑过)。其余四件原样:收藏控件(桌面图里没有星标,**缺图**)、设置页新建/登录账户(**要导航决策**)、扫码(桌面没有相机管线,是新功能不是接线)、余额流式(要 worker→resident 事件推送,**纯工时**) |
+| 6 | 031 留的五件 | **两件已交付**:Windows 日界线(phase 11)、**余额流式**(phase 12,`Answer::Streaming` + 逐链上报,真网验过)。剩三件全部有前置:收藏控件(桌面图里没有星标,**缺图**)、设置页新建/登录账户(**要导航决策**)、扫码(桌面没有相机管线,是新功能不是接线) |
 | 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
 | 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
 | 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |

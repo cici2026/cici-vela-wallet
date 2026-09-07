@@ -25,7 +25,7 @@ impl Machine for ReceiveWatch {
         Event::Start
     }
 
-    fn perform(operation: &ReceiveWatchOperation) -> Answer<ReceiveWatchShellResult> {
+    fn perform(operation: &ReceiveWatchOperation) -> Answer<ReceiveWatchShellResult, Self::Event> {
         match operation {
             ReceiveWatchOperation::FetchTokens => Answer::Blocking(Box::new(|| {
                 // The watcher polls; a failure is a beat missed, not an error to

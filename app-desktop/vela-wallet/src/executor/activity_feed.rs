@@ -228,7 +228,7 @@ impl Machine for ActivityFeed {
         }
     }
 
-    fn perform(operation: &FeedOperation) -> Answer<FeedShellResult> {
+    fn perform(operation: &FeedOperation) -> Answer<FeedShellResult, Self::Event> {
         match operation {
             FeedOperation::ReadTxStore { read_id, .. } => {
                 Answer::Now(FeedShellResult::StoreLoaded {

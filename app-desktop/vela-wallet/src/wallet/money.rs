@@ -49,6 +49,8 @@ use vela_core::app::send::{
 };
 use vela_core::app::tx_tracker::{TrackStatus, TxTracker};
 
+use futures::StreamExt as _;
+
 use crate::ceremony::CeremonyChannel;
 use crate::core_host::{CoreHost, Pending};
 use crate::ctap::usb::TouchRequest;
@@ -392,6 +394,27 @@ impl SendHost {
                 Answer::After(delay, result) => {
                     cx.spawn(async move |host, cx| {
                         cx.background_executor().timer(delay).await;
+                        host.update(cx, |host, cx| host.resolve_fee(id, result, cx))
+                            .ok();
+                    })
+                    .detach();
+                }
+                // `fee_policy` streams nothing today. Implemented rather than
+                // left as an `unreachable!`, because the day it does stream
+                // the difference between the two pumps would be a panic on a
+                // confirm screen — and this is the same eight lines the
+                // resident's own pump runs.
+                Answer::Streaming(work) => {
+                    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+                    cx.spawn(async move |host, cx| {
+                        let work = cx
+                            .background_executor()
+                            .spawn(async move { work(&crate::resident::Sink::new(tx)) });
+                        while let Some(event) = rx.next().await {
+                            host.update(cx, |host, cx| host.fee_dispatch(event, cx))
+                                .ok();
+                        }
+                        let result = work.await;
                         host.update(cx, |host, cx| host.resolve_fee(id, result, cx))
                             .ok();
                     })
@@ -861,6 +884,16 @@ mod tests {
                     Answer::Blocking(work) => work(),
                     // The TTL is advisory; a test does not wait thirty seconds.
                     Answer::After(..) => continue,
+                    // `fee_policy` streams nothing today; if it starts, its
+                    // reports belong in the machine before the result, which
+                    // is the one thing this driver must not get wrong.
+                    Answer::Streaming(work) => {
+                        let (reports, result) = crate::resident::run_streaming(work);
+                        for report in reports {
+                            pending.extend(self.fee.dispatch(report));
+                        }
+                        result
+                    }
                 };
                 pending.extend(self.fee.resolve(id, result));
             }

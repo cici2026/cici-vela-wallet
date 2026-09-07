@@ -137,8 +137,20 @@ mod tests {
     /// timer this machine sets is the partial-fetch retry, and a test that
     /// honoured its backoff would spend minutes proving nothing.
     fn settle(address: &str) -> BalanceView {
+        settle_reporting(address).1
+    }
+
+    /// The same drive, keeping what the fetch said ON THE WAY: the view as it
+    /// stood after each per-chain report. Every one of those is a state the
+    /// hero could have drawn before the settle.
+    ///
+    /// Not just the first: an address holds money on the chains it holds money
+    /// on, and eleven empty reports before the one that matters is the normal
+    /// case, not a failure.
+    fn settle_reporting(address: &str) -> (Vec<BalanceView>, BalanceView) {
         use crate::resident::{Answer, Machine};
 
+        let mut per_report: Vec<BalanceView> = Vec::new();
         let mut host = CoreHost::<BalanceDashboard>::new();
         let mut pending = host.dispatch(BalanceEvent::AccountChanged {
             address: address.to_owned(),
@@ -152,10 +164,21 @@ mod tests {
             let result = match BalanceDashboard::perform(&next.operation) {
                 Answer::Now(result) | Answer::After(_, result) => result,
                 Answer::Blocking(work) => work(),
+                // The reports a streaming operation makes on its way. Dispatched
+                // BEFORE its result, which is the order the async pump
+                // guarantees and the order `balance_dashboard` depends on.
+                Answer::Streaming(work) => {
+                    let (streamed, result) = crate::resident::run_streaming(work);
+                    for report in streamed {
+                        pending.extend(host.dispatch(report));
+                        per_report.push(host.view());
+                    }
+                    result
+                }
             };
             pending.extend(host.resolve(next.id, result));
         }
-        host.view()
+        (per_report, host.view())
     }
 
     fn strings() -> WalletStrings {
@@ -556,6 +579,56 @@ mod tests {
     /// the real network and renders the real hero model, so what it proves is
     /// the whole chain — pool routing, the multicall, the price ladder, the
     /// core's total, and the split into the figure the screen draws.
+    /// The fetch reports money before it settles.
+    ///
+    /// The point of the streaming fetch is that twelve chains are read on
+    /// twelve threads and the settle waits for all of them, so an unreachable
+    /// RPC used to hold the screen on its skeleton (or on yesterday's cached
+    /// total) for its entire timeout while eleven chains sat answered and
+    /// unused.
+    ///
+    /// **What this test proves and what it does not.** It proves the reports
+    /// exist, that each chain reports for itself, and that the first one
+    /// already puts a drawable total in the core's hands — before the settle.
+    /// It does NOT prove the wall-clock earliness, because the driver here is
+    /// `run_streaming`, which keeps the ORDER and drops the concurrency (its
+    /// own doc says so). The timing is the async pump's, and this repo has no
+    /// gpui harness to drive it.
+    #[test]
+    #[ignore = "reads every chain for a real address"]
+    fn the_fetch_reports_money_before_it_settles() {
+        crate::executor::storage::tests::with_temp_state("hero-stream", || {
+            crate::executor::chain_tokens::invalidate();
+            crate::executor::chainlink::invalidate();
+            const GOLDEN: &str = "0x88cCA0EeDbF2C4426110bbFc998F048689266894";
+            let (per_report, settled) = settle_reporting(GOLDEN);
+
+            assert!(
+                per_report.len() > 1,
+                "each chain reports for itself: {} report(s)",
+                per_report.len()
+            );
+            // This Safe holds xDAI on Gnosis and nothing anywhere else, so
+            // most reports are correctly empty — the claim is that one of
+            // them, before the settle, already had a total the hero can draw.
+            let funded = per_report
+                .iter()
+                .position(|view| {
+                    !view.tokens.is_empty() && view.display_total_usd.is_some_and(|usd| usd > 0.0)
+                })
+                .unwrap_or_else(|| {
+                    unreachable!("no report carried money before the settle: {per_report:?}")
+                });
+            assert!(
+                funded < per_report.len(),
+                "and it arrived as a report, not as the settle"
+            );
+            // The settle is still the complete picture — streaming adds to
+            // what the screen sees early, it does not replace the settle.
+            assert!(settled.tokens.len() >= per_report[funded].tokens.len());
+        });
+    }
+
     #[test]
     #[ignore = "reads every chain for a real address"]
     fn the_hero_shows_the_golden_safes_own_money() {

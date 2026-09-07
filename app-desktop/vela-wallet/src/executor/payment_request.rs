@@ -35,7 +35,9 @@ impl Machine for PaymentRequest {
         }
     }
 
-    fn perform(operation: &PaymentRequestOperation) -> Answer<PaymentRequestShellResult> {
+    fn perform(
+        operation: &PaymentRequestOperation,
+    ) -> Answer<PaymentRequestShellResult, Self::Event> {
         match operation {
             PaymentRequestOperation::ReadAck { account } => {
                 Answer::Now(PaymentRequestShellResult::AckFlag {

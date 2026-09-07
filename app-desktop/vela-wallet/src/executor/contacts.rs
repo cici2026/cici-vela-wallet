@@ -280,7 +280,7 @@ impl Machine for Contacts {
         }
     }
 
-    fn perform(operation: &ContactOperation) -> Answer<ContactShellResult> {
+    fn perform(operation: &ContactOperation) -> Answer<ContactShellResult, Self::Event> {
         match operation {
             ContactOperation::ReadStore => Answer::Now(ContactShellResult::StoreLoaded {
                 contacts: read_list::<StoredContact, Contact>(storage::KEY_CONTACTS),

@@ -46,7 +46,7 @@ impl Machine for ManageTokens {
         Event::Start
     }
 
-    fn perform(operation: &MtokOperation) -> Answer<MtokShellResult> {
+    fn perform(operation: &MtokOperation) -> Answer<MtokShellResult, Self::Event> {
         match operation {
             MtokOperation::MulticallErc20Meta { chain_id, address } => {
                 let (chain_id, address) = (*chain_id, address.clone());

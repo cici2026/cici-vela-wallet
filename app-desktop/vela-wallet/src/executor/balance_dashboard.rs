@@ -65,7 +65,7 @@ impl Machine for BalanceDashboard {
         }
     }
 
-    fn perform(operation: &BalanceOperation) -> Answer<BalanceShellResult> {
+    fn perform(operation: &BalanceOperation) -> Answer<BalanceShellResult, Self::Event> {
         match operation {
             BalanceOperation::FetchTokens {
                 address,
@@ -78,8 +78,27 @@ impl Machine for BalanceDashboard {
                 // adding the TTL later changes no core rule, because the core
                 // already tells us when it wants one bypassed.
                 let _ = force;
-                Answer::Blocking(Box::new(move || {
-                    let (tokens, failed) = balances::fetch_all(&address);
+                // Streaming, because this is the one operation the core says
+                // streams: "while in flight the shell streams
+                // `Event::ChainAssetsArrived` snapshots; the operation itself
+                // settles exactly once". `FetchAccountAssets` below is the
+                // same fan-out and deliberately does NOT stream — it fills a
+                // switcher row for somebody else's account, and its snapshots
+                // would be merged into the active one.
+                Answer::Streaming(Box::new(move |sink| {
+                    let sink = sink.clone();
+                    let streamed_for = address.clone();
+                    let arrived: std::sync::Arc<balances::ChainSink> =
+                        std::sync::Arc::new(move |tokens| {
+                            // The address rides along so the core can drop a
+                            // stream that belongs to an account the person has
+                            // already switched away from (its invariant ⑤).
+                            sink.send(Event::ChainAssetsArrived {
+                                address: streamed_for.clone(),
+                                tokens,
+                            });
+                        });
+                    let (tokens, failed) = balances::fetch_all_streaming(&address, &arrived);
                     BalanceShellResult::FetchSettled {
                         address,
                         pull,

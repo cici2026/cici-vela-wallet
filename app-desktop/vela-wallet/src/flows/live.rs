@@ -2266,6 +2266,16 @@ mod tests {
                 let result = match BalanceDashboard::perform(&next.operation) {
                     Answer::Now(result) | Answer::After(_, result) => result,
                     Answer::Blocking(work) => work(),
+                    // The reports a streaming operation makes on its way. Dispatched
+                    // BEFORE its result, which is the order the async pump
+                    // guarantees and the order `balance_dashboard` depends on.
+                    Answer::Streaming(work) => {
+                        let (reports, result) = crate::resident::run_streaming(work);
+                        for report in reports {
+                            pending.extend(host.dispatch(report));
+                        }
+                        result
+                    }
                 };
                 pending.extend(host.resolve(next.id, result));
             }

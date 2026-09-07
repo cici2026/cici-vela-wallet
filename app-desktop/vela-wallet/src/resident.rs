@@ -49,6 +49,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crux_core::App as CruxApp;
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Context, Entity, Global};
 
 use vela_core::app::SplitEffect;
@@ -58,8 +59,39 @@ use crate::core_host::CoreHost;
 type Op<A> = <<A as CruxApp>::Effect as SplitEffect>::Op;
 type Out<A> = <Op<A> as crux_core::capability::Operation>::Output;
 
+/// A sink for events a long operation reports on its way.
+///
+/// Cloneable and callable from any thread — the balance fetch calls it from
+/// twelve of them. Each call becomes an event dispatched into this machine on
+/// the MAIN thread, in the order the sink received them, and all of them
+/// before the operation's own result. That ordering is the whole contract:
+/// `balance_dashboard` merges each arrival into its token list and settles
+/// once, so a snapshot landing after the settle would resurrect a chain the
+/// settle had already accounted for.
+pub struct Sink<E>(futures::channel::mpsc::UnboundedSender<E>);
+
+impl<E> Clone for Sink<E> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<E> Sink<E> {
+    /// Wrap a sender. Public so a screen-owned pump (`wallet::money`) can run
+    /// the same streaming path the resident does rather than a second one.
+    pub fn new(tx: futures::channel::mpsc::UnboundedSender<E>) -> Self {
+        Self(tx)
+    }
+
+    /// Report one event. Silently does nothing once the receiver is gone —
+    /// the window closed mid-fetch, which is not a fault.
+    pub fn send(&self, event: E) {
+        let _ = self.0.unbounded_send(event);
+    }
+}
+
 /// How an operation is performed, and therefore where.
-pub enum Answer<T> {
+pub enum Answer<T, E> {
     /// A local read or write. Resolved on this thread, this frame — the
     /// `session.rs` argument, kept for the operations it is actually true of.
     Now(T),
@@ -74,6 +106,31 @@ pub enum Answer<T> {
     /// and that is right for a flow that waits a handful of times, but a search
     /// debounce fires on every keystroke and must not cost a thread each.
     After(Duration, T),
+    /// Blocks, and says what it has found before it is done.
+    ///
+    /// The same thread boundary as [`Answer::Blocking`] — the closure is
+    /// `Send` and the core is not, so it still cannot cross — plus a [`Sink`]
+    /// the work calls as partial results land. Twelve chains answer at twelve
+    /// different speeds, and a hero that shows nothing until the slowest one
+    /// replies is a hero gated by the worst network on the list.
+    Streaming(Box<dyn FnOnce(&Sink<E>) -> T + Send>),
+}
+
+/// Run a streaming answer without an async pump, reports first.
+///
+/// For the synchronous drivers in tests. It keeps the one ordering guarantee
+/// that matters — every report is in hand before the result is used — by
+/// draining after the work has returned and dropped its sink. What it does not
+/// reproduce is the concurrency, which is the point of the real path and not
+/// of a test.
+pub fn run_streaming<T, E>(work: Box<dyn FnOnce(&Sink<E>) -> T + Send>) -> (Vec<E>, T) {
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let result = work(&Sink(tx));
+    let mut reports = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        reports.push(event);
+    }
+    (reports, result)
 }
 
 /// What varies per machine — and deliberately nothing else.
@@ -94,7 +151,7 @@ where
 
     /// Perform one operation. Never fails outward — see `executor::mod`'s
     /// failure contract, which this inherits wholesale.
-    fn perform(operation: &Op<Self>) -> Answer<Out<Self>>;
+    fn perform(operation: &Op<Self>) -> Answer<Out<Self>, Self::Event>;
 }
 
 /// One machine and its latest view.
@@ -163,6 +220,29 @@ where
                     })
                     .detach();
                 }
+                Answer::Streaming(work) => {
+                    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+                    cx.spawn(async move |resident, cx| {
+                        let work = cx
+                            .background_executor()
+                            .spawn(async move { work(&Sink(tx)) });
+                        // Drains until every sender is gone, which happens when
+                        // `work` returns and drops the sink it was handed. So
+                        // this loop cannot outlive the operation, and cannot
+                        // end while a snapshot is still queued — the ordering
+                        // `Sink` promises.
+                        while let Some(event) = rx.next().await {
+                            resident
+                                .update(cx, |resident, cx| resident.dispatch(event, cx))
+                                .ok();
+                        }
+                        let result = work.await;
+                        resident
+                            .update(cx, |resident, cx| resident.resolve(id, result, cx))
+                            .ok();
+                    })
+                    .detach();
+                }
             }
         }
         self.view = self.host.view();
@@ -223,5 +303,54 @@ where
 pub fn drop_all(cx: &mut App) {
     if cx.has_global::<Residents>() {
         cx.global_mut::<Residents>().0.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ordering `Answer::Streaming` promises, without gpui in the way.
+    ///
+    /// This is the same shape the pump runs: the work goes to another thread
+    /// holding the sink, and the drain ends only when that sink is dropped —
+    /// which is when the work returns. So the settle can never overtake a
+    /// snapshot, which for `balance_dashboard` would resurrect a chain the
+    /// settle had already accounted for.
+    #[test]
+    fn every_streamed_event_lands_before_the_result() {
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+        let work: Box<dyn FnOnce(&Sink<u32>) -> &'static str + Send> = Box::new(|sink| {
+            for chain in 0..12 {
+                sink.send(chain);
+            }
+            "settled"
+        });
+
+        let (seen, result) = futures::executor::block_on(async move {
+            let work = std::thread::spawn(move || work(&Sink(tx)));
+            let mut seen = Vec::new();
+            while let Some(event) = rx.next().await {
+                seen.push(event);
+            }
+            let result = work
+                .join()
+                .unwrap_or_else(|_| unreachable!("the work panicked"));
+            (seen, result)
+        });
+
+        assert_eq!(seen, (0..12).collect::<Vec<_>>(), "in order, none dropped");
+        assert_eq!(result, "settled");
+    }
+
+    /// The window closed mid-fetch. Eleven chains still have a sink to call
+    /// and calling it must not take the process down with them.
+    #[test]
+    fn a_sink_whose_receiver_is_gone_swallows_the_report() {
+        let (tx, rx) = futures::channel::mpsc::unbounded::<u32>();
+        drop(rx);
+        let sink = Sink(tx);
+        sink.send(1);
+        sink.clone().send(2);
     }
 }

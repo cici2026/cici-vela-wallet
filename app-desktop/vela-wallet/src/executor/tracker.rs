@@ -174,7 +174,7 @@ impl Machine for TxTracker {
         Event::AppResumed
     }
 
-    fn perform(operation: &TrackOperation) -> Answer<TrackShellResult> {
+    fn perform(operation: &TrackOperation) -> Answer<TrackShellResult, Self::Event> {
         let now_ms = crate::executor::now_ms;
         match operation {
             TrackOperation::PollReceipt {

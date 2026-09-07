@@ -119,7 +119,7 @@ impl Machine for DisplayCurrency {
         Event::Refresh
     }
 
-    fn perform(operation: &CurrencyOperation) -> Answer<CurrencyShellResult> {
+    fn perform(operation: &CurrencyOperation) -> Answer<CurrencyShellResult, Self::Event> {
         match operation {
             // Absent ALWAYS means "the user never chose" — including when the
             // read failed, which is why this cannot surface an error.
@@ -195,6 +195,16 @@ mod tests {
                 // performs blocking work inline. A test that uses it is a live
                 // test and is marked so.
                 Answer::Blocking(work) => work(),
+                // The reports a streaming operation makes on its way. Dispatched
+                // BEFORE its result, which is the order the async pump
+                // guarantees and the order `balance_dashboard` depends on.
+                Answer::Streaming(work) => {
+                    let (reports, result) = crate::resident::run_streaming(work);
+                    for report in reports {
+                        pending.extend(host.dispatch(report));
+                    }
+                    result
+                }
                 Answer::After(_, result) => result,
             };
             pending.extend(host.resolve(next.id, result));
