@@ -208,6 +208,22 @@ uuid = "1"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 pcsc = "2.9"
 
+# The web engine for the dApp browser (spec 032 phase 13 spike).
+#
+# NOT on Linux, deliberately and temporarily: wry's `os-webview` there pulls
+# gtk + webkit2gtk + soup3, which the CI `desktop` job and
+# desktop-linux-packages.yml do not install — adding it unconditionally turns
+# the Linux build red before anything is drawn. wry's child webview is also
+# X11-only on Linux and needs `gtk::init` plus a GTK loop pumped alongside
+# gpui's, while gpui prefers Wayland when it is there. So Linux is a separate
+# decision, recorded rather than smuggled in.
+#
+# It brings objc2 0.6 alongside the 0.5 this crate pins to match gpui. They
+# coexist because nothing objc2-typed crosses between them: wry takes a
+# `raw-window-handle` 0.6 handle, which is the ONE version both sides already
+# agree on (gpui pins 0.6 too — see the note by `raw-window-handle` below).
+wry = "0.56"
+
 # The CTAP 2.3 BLE-only data channel (spec 019 T174): once a BLE-capable
 # authenticator advertises an L2CAP PSM, the platform connects a CoC directly —
 # no tunnel server, no relay, no GFW. btleplug has NO L2CAP, so the connection

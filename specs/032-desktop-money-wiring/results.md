@@ -803,6 +803,62 @@ Streaming(Box<dyn FnOnce(&Sink<E>) -> T + Send>)
 ——同步驱动器 `run_streaming` 保的是**顺序**,不是并发(它自己的文档就这么写)。
 真正的时间性归 async 泵,而这个仓库没有 gpui 测试夹具能驱动它。**这一层没测。**
 
+## Phase 13 — 桌面的 web 引擎:选型,和一次跑通的探针
+
+创始人问"接哪家、你会不会接"。没有列表格,直接接了一个跑起来。
+
+### 决定性的事实(都是查出来的,不是记得的)
+
+| 事实 | 出处 |
+|---|---|
+| `gpui::Window` **实现 `HasWindowHandle`** | `crates/gpui/src/window.rs:6390` |
+| macOS 交出来的是 **`AppKitWindowHandle`(NSView)** | `gpui_macos/src/window.rs:1918-1921` |
+| Windows 交出来的是 **`Win32WindowHandle`(HWND)** | `gpui_windows/src/window.rs:581` |
+| gpui 钉 `raw-window-handle = "0.6"` | Zed 根 `Cargo.toml:758` |
+| wry 0.56.1 也钉 `raw-window-handle = "0.6"` | wry `Cargo.toml:152` |
+| `build_as_child<W: HasWindowHandle>` | wry `src/lib.rs:1571` |
+
+**两边在同一个版本的 `raw-window-handle` 上碰头**,所以句柄类型是同一个类型
+——这正是本仓库 Cargo.toml 里那条"两个 rwh 版本会变成两个类型"的警告说的事,
+这次是它成立的一面。
+
+### 探针:`VELA_WEBVIEW=1`
+
+`main.rs` 在开窗时把一个真 webview 挂成子视图,注入一段脚本,脚本回调 IPC。跑出来两行:
+
+```
+[vela-wallet] webview: attached as a child of the gpui window
+[vela-wallet] webview ipc: vela:probe
+```
+
+第二行才是重点:**注入的脚本在页面里执行了,并且通过 IPC 通道说回来了**——
+`window.ethereum` 要的那条缝是通的,不只是"画出了像素"。截图确认页面可见。
+
+### 三个必须先说清楚的代价
+
+1. **合成在 gpui 之上,不在里面。** 原生子视图就是这样。截图里 webview 盖住了
+   下面 gpui 画的引导文案。**签名面板恰恰要盖在浏览器上**,所以面板一开就得
+   `set_visible(false)` 或者把 bounds 挪走,不能指望 gpui 画上去。这是 C 组的
+   头号交互约束,不是细节。
+2. **Linux 是另一件事。** wry 在 Linux 上 `os-webview` 拉 gtk + webkit2gtk + soup3,
+   而 CI 的 `desktop` job 和 `desktop-linux-packages.yml` 都没装这些;而且
+   `build_as_child` 在 Linux **只支持 X11、不支持 Wayland**,还要 `gtk::init` +
+   在 gpui 的循环旁边推 GTK 的循环,而 gpui 有 Wayland 就走 Wayland。
+   所以本刀把 wry 放在 `[target.'cfg(not(target_os = "linux"))'.dependencies]`——
+   **不是忘了 Linux,是把它记成一个单独的决定**:桌面浏览器先只上 macOS + Windows,
+   Linux 明说"暂不支持",还是为 Linux 单开一个顶层窗口(要 GTK 双循环,脆)。
+3. **objc2 会有两份。** wry 要 0.6.4,本 crate 为了跟 gpui 一致钉 0.5。两份能共存,
+   因为跨过去的只有一个 rwh 裸指针,没有 objc2 类型。编译时间会长一点。
+
+clippy 警告数 **42 → 42**(基线也是 42,用 stash 量过),没有新增。
+
+### 没做的
+
+探针就是探针:固定 bounds、一段内联 HTML。真正的 C 组还要按列的布局跟随 bounds、
+导航/前进后退、per-site 权限、把 027 的 `inpage.js`/`protocol.js` 接到
+`with_initialization_script` + `with_ipc_handler` 上,再驱动 `dapp_session`
+`dapp_permissions` `browser_history` 三台机器(3,771 行)。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
