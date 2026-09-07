@@ -62,6 +62,17 @@ pub struct SigningHost {
     pub clear_view: ClearSigningView,
     guard: CoreHost<ApprovalGuard>,
     pub guard_view: GuardView,
+    /// The fourth view the sheet reads — and the one machine of the four that
+    /// is NOT running yet.
+    ///
+    /// A pristine `fee_policy` answers `confirm_fee_ready: false`, so the
+    /// slide stays shut while this is unwired. That is the right failure —
+    /// arming a confirm over a price nobody obtained is the specific thing
+    /// the three-way AND exists to prevent — but it is a HELD view rather
+    /// than one rebuilt per frame, so the day the session lands there is one
+    /// place to attach it, and only one (this cut's second lesson: the fee
+    /// session must be one session).
+    pub fee_view: vela_core::app::fee_policy::FeeView,
     ctx: SignContext,
     #[allow(dead_code, reason = "held so the ceremony outlives the request")]
     channel: Arc<CeremonyChannel>,
@@ -84,6 +95,7 @@ impl SigningHost {
         // The cores' own pristine views rather than a `Default` they do not
         // have: the shell must never invent a starting shape for a machine.
         let (view, clear_view, guard_view) = (sign.view(), clear.view(), guard.view());
+        let fee_view = CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
         let mut host = Self {
             sign,
             view,
@@ -91,6 +103,7 @@ impl SigningHost {
             clear_view,
             guard,
             guard_view,
+            fee_view,
             ctx,
             channel,
             closed: false,

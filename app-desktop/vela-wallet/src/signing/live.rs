@@ -1,0 +1,306 @@
+//! The signing sheet, built from what four machines decided.
+//!
+//! The **sibling** of `fixtures.rs`, never its replacement: both produce a
+//! `SigningModel`, and the panel picks which one feeds it. That is what keeps
+//! the 33 drawn scenarios reviewable after real requests arrive, and what
+//! makes "the gallery is unchanged" something a diff can prove.
+//!
+//! Nothing here decides. The intent sentence, the risk grade, which fields
+//! exist and whether a confirm may fire are `clear_signing`'s,
+//! `approval_guard`'s, `fee_policy`'s and `sign_request`'s answers; this maps
+//! them onto blocks and picks the words the corpus already has.
+
+use gpui::SharedString;
+
+use vela_core::app::approval_guard::GuardView;
+use vela_core::app::clear_signing::{ClearRisk, ClearSignField, ClearSignResult, ClearSigningView};
+use vela_core::app::fee_policy::FeeView;
+use vela_core::app::sign_request::SignView;
+
+use crate::signing::fixtures::{Block, FeeModel};
+use crate::signing::{SigningStrings, Tone};
+
+/// The core's risk grade in the drawn vocabulary.
+fn tone_of(risk: ClearRisk) -> Tone {
+    match risk {
+        ClearRisk::Safe => Tone::Success,
+        ClearRisk::Normal => Tone::Neutral,
+        ClearRisk::Caution => Tone::Caution,
+        ClearRisk::Danger => Tone::Danger,
+    }
+}
+
+/// May the slide fire?
+///
+/// **Three machines, ANDed**, and the core's own doc says so: `SignView`'s
+/// `confirm_gate_open` is "this machine's own approval gate" and "the shell
+/// must AND it with `GuardView.confirm_allowed` and
+/// `FeeView.confirm_fee_ready`". Taking any one of them alone arms a slide
+/// over an unpriced fee, or over an unlimited approval nobody capped — each
+/// of which is a signature the person did not agree to.
+#[must_use]
+pub fn confirm_enabled(sign: &SignView, guard: &GuardView, fee: &FeeView) -> bool {
+    sign.confirm_gate_open && guard.confirm_allowed && fee.confirm_fee_ready
+}
+
+/// The blocks a resolved request draws, in the order they are read.
+///
+/// Intent first — what this DOES — then what is wrong with it, then the
+/// detail. A warning under the fields is a warning after the decision.
+#[must_use]
+pub fn blocks(clear: &ClearSigningView, s: &SigningStrings) -> Vec<Block> {
+    let Some(result) = clear.result.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = vec![Block::Intent {
+        text: SharedString::from(result.intent.clone()),
+        tone: tone_of(result.risk),
+    }];
+    out.extend(warnings(result, s));
+    let rows: Vec<crate::signing::fixtures::Row> = result
+        .fields
+        .iter()
+        // `detail` fields are the Advanced section's, not the summary's.
+        // Promoting them here would bury the decision in parameters.
+        .filter(|field| !field.detail)
+        .map(|field| row_of(field, s))
+        .collect();
+    if !rows.is_empty() {
+        out.push(Block::Rows(rows));
+    }
+    out
+}
+
+/// What is wrong with this request, from the core's flags alone.
+///
+/// Ordered worst-first, because a sheet is read from the top and the burn is
+/// the one that cannot be undone.
+fn warnings(result: &ClearSignResult, s: &SigningStrings) -> Vec<Block> {
+    let mut out = Vec::new();
+    if result.to_own_token {
+        // Sending a token to its own contract burns it irreversibly.
+        out.push(Block::Warning {
+            tone: Tone::Danger,
+            text: s.warn_token_to_contract.clone(),
+        });
+    }
+    if result.best_effort {
+        // Recovered from the 4-byte database and decoded generically: the
+        // shape is a guess that parsed, not a descriptor anybody published.
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: s.warn_best_effort.clone(),
+        });
+    }
+    if result.partial {
+        // The descriptor declared more fields than resolved. Saying nothing
+        // would present an incomplete reading as a complete one.
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: s.warn_verified_abi.clone(),
+        });
+    }
+    if result.fields.iter().any(|field| field.unverified) {
+        // An amount rendered with decimals nobody verified is an amount at a
+        // magnitude nobody verified.
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: s.warn_unverified_amount.clone(),
+        });
+    }
+    if result.fields.iter().any(|field| field.expired) {
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: s.warn_expired.clone(),
+        });
+    }
+    out
+}
+
+/// One decoded field as a row, keeping the core's flags as the tone.
+fn row_of(field: &ClearSignField, s: &SigningStrings) -> crate::signing::fixtures::Row {
+    let _ = s;
+    let tone = if field.warning {
+        Tone::Danger
+    } else if field.unverified || field.expired {
+        Tone::Caution
+    } else {
+        Tone::Neutral
+    };
+    (
+        SharedString::from(field.label.clone()),
+        SharedString::from(field.value.clone()),
+        tone,
+        // Addresses and raw values read as monospace; a decoded amount does
+        // not. The core says which is which by carrying an address.
+        field.address.is_some(),
+    )
+}
+
+/// The fee row, or the line that says there is no fee.
+///
+/// An off-chain signature costs nothing, and saying "network fee: 0" would
+/// invite the reader to look for one.
+#[must_use]
+pub fn fee_model(clear: &ClearSigningView, fee: &FeeView, s: &SigningStrings) -> FeeModel {
+    let off_chain = clear.result.as_ref().is_some_and(|result| {
+        result.sign_type != vela_core::app::clear_signing::ClearSignType::Transaction
+    });
+    if off_chain {
+        return FeeModel::OffChain(s.ok_no_network_fee.clone());
+    }
+    // The send screen's formatter, not a second one: two answers about what a
+    // transaction costs, on two screens pricing the same operation, is how
+    // they start disagreeing. An unpriced fee renders as its "—" rather than
+    // vanishing — a row that is absent reads as "free", and the confirm gate
+    // is shut for the same reason.
+    FeeModel::OnChain {
+        label: s.fee_label.clone(),
+        value: SharedString::from(crate::flows::live::fee_text(fee.fee.as_ref())),
+        selector: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use vela_core::app::clear_signing::{ClearFieldRole, ClearSignType};
+
+    fn strings() -> SigningStrings {
+        SigningStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    fn field(label: &str, value: &str) -> ClearSignField {
+        ClearSignField {
+            label: label.to_owned(),
+            value: value.to_owned(),
+            format: String::new(),
+            token_address: None,
+            warning: false,
+            unverified: false,
+            role: ClearFieldRole::Generic,
+            detail: false,
+            expired: false,
+            address: None,
+            usd_value: None,
+        }
+    }
+
+    fn result(fields: Vec<ClearSignField>) -> ClearSignResult {
+        ClearSignResult {
+            intent: "Send 1 ETH".to_owned(),
+            contract_name: None,
+            owner: None,
+            fields,
+            risk: ClearRisk::Normal,
+            contract_address: None,
+            verified: true,
+            sign_type: ClearSignType::Transaction,
+            partial: false,
+            best_effort: false,
+            to_own_token: false,
+        }
+    }
+
+    fn view(result: ClearSignResult) -> ClearSigningView {
+        let mut host =
+            crate::core_host::CoreHost::<vela_core::app::clear_signing::ClearSigning>::new();
+        let _ = host.dispatch(vela_core::app::clear_signing::Event::Cleared);
+        ClearSigningView {
+            resolved: true,
+            result: Some(result),
+            ..host.view()
+        }
+    }
+
+    /// The slide is three machines' answer, ANDed.
+    ///
+    /// The core's own doc says so, and each one alone is a different way to
+    /// arm a signature nobody agreed to: without the fee's, over a price
+    /// nobody has; without the guard's, over an unlimited approval nobody
+    /// capped.
+    #[test]
+    fn the_confirm_needs_all_three_machines() {
+        let mut sign =
+            crate::core_host::CoreHost::<vela_core::app::sign_request::SignRequest>::new().view();
+        let mut guard =
+            crate::core_host::CoreHost::<vela_core::app::approval_guard::ApprovalGuard>::new()
+                .view();
+        let mut fee =
+            crate::core_host::CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
+
+        sign.confirm_gate_open = true;
+        guard.confirm_allowed = true;
+        fee.confirm_fee_ready = true;
+        assert!(confirm_enabled(&sign, &guard, &fee));
+
+        for drop_one in 0..3 {
+            let (mut s, mut g, mut f) = (sign.clone(), guard.clone(), fee.clone());
+            match drop_one {
+                0 => s.confirm_gate_open = false,
+                1 => g.confirm_allowed = false,
+                _ => f.confirm_fee_ready = false,
+            }
+            assert!(
+                !confirm_enabled(&s, &g, &f),
+                "any one machine withholding shuts the slide ({drop_one})"
+            );
+        }
+    }
+
+    /// The detail fields belong to Advanced, not to the summary.
+    ///
+    /// Promoting them would bury the decision — what this DOES — under the
+    /// parameters it does it with.
+    #[test]
+    fn advanced_fields_stay_out_of_the_summary() {
+        let mut detail = field("calldata", "0xabcd");
+        detail.detail = true;
+        let blocks = blocks(
+            &view(result(vec![field("To", "0xbbb"), detail])),
+            &strings(),
+        );
+        let rows = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Rows(rows) => Some(rows),
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("a decoded request has rows"));
+        assert_eq!(rows.len(), 1, "only the summary field: {rows:?}");
+        assert_eq!(rows[0].0, "To");
+    }
+
+    /// Every flag the core raises reaches the screen, worst first.
+    #[test]
+    fn the_cores_flags_each_become_a_warning() {
+        let s = strings();
+        let mut burn = result(vec![field("To", "0xbbb")]);
+        burn.to_own_token = true;
+        burn.best_effort = true;
+        let blocks = blocks(&view(burn), &s);
+        let warnings: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Warning { tone, text } => Some((*tone, text.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        // The irreversible one is read first.
+        assert_eq!(
+            warnings[0],
+            (Tone::Danger, s.warn_token_to_contract.clone())
+        );
+        assert_eq!(warnings[1].0, Tone::Caution);
+    }
+
+    /// An unresolved request draws no blocks — never an empty intent that
+    /// would read as "this does nothing".
+    #[test]
+    fn nothing_decoded_draws_nothing() {
+        let host = crate::core_host::CoreHost::<vela_core::app::clear_signing::ClearSigning>::new();
+        assert!(blocks(&host.view(), &strings()).is_empty());
+    }
+}

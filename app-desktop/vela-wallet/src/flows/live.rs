@@ -695,7 +695,12 @@ fn fiat_line(usd: Option<f64>, locale: &str) -> Option<SharedString> {
 /// A settled estimate as one line: the fee coin's amount. `—` while there is
 /// no quote — the drawn row shows the label alone rather than a number nobody
 /// has agreed to yet.
-fn fee_text(fee: Option<&FeeEstimateView>) -> String {
+/// A fee estimate as the words a screen shows.
+///
+/// `pub(crate)` and shared with the signing sheet: two formatters would be two
+/// answers about what a transaction costs, on two screens that price the same
+/// operation.
+pub(crate) fn fee_text(fee: Option<&FeeEstimateView>) -> String {
     let Some(fee) = fee else {
         return "—".to_owned();
     };

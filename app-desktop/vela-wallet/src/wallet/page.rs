@@ -60,6 +60,7 @@ use crate::settings::model::NetworkRowModel;
 use crate::signing::SigningStrings;
 use crate::signing::components as signing_components;
 use crate::signing::fixtures as signing_fixtures;
+use crate::signing::live as signing_live;
 use crate::theme::{
     self, CONTACTS_BODY_PAD_TOP, CONTACTS_BUTTON_H, CONTACTS_HEADER_H, CONTACTS_HERO_AVATAR,
     CONTACTS_RAIL_LABEL_H, CONTACTS_RAIL_ROW_H, CONTACTS_RAIL_W, GALLERY_BAR_H, SETTINGS_DIALOG_W,
@@ -6600,8 +6601,25 @@ impl WalletPage {
     }
 
     /// DE4 / DCS1–8's third column — the signing request itself.
-    fn signing_body(&mut self, theme: &Theme) -> Div {
-        let model = signing_fixtures::build(self.signing_state, &self.signing);
+    fn signing_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        // The live sheet when a request is open, the mock otherwise — the same
+        // fork every other surface takes, and what keeps the 33 drawn
+        // scenarios reviewable after real requests arrive.
+        let mut model = signing_fixtures::build(self.signing_state, &self.signing);
+        #[cfg(not(target_os = "linux"))]
+        if let Some(host) = self.signing_host.as_ref() {
+            let host = host.read(cx);
+            let fee = &host.fee_view;
+            let blocks = signing_live::blocks(&host.clear_view, &self.signing);
+            if !blocks.is_empty() {
+                model.blocks = blocks;
+            }
+            model.fee = signing_live::fee_model(&host.clear_view, fee, &self.signing);
+            model.confirm_enabled =
+                signing_live::confirm_enabled(&host.view, &host.guard_view, fee);
+        }
+        #[cfg(target_os = "linux")]
+        let _ = cx;
         let mut column = div()
             .flex()
             .flex_col()
@@ -6701,7 +6719,7 @@ impl WalletPage {
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
             PanelId::Signing => {
-                let body = self.signing_body(theme);
+                let body = self.signing_body(theme, cx);
                 let title = self.signing.panel_title.clone();
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
