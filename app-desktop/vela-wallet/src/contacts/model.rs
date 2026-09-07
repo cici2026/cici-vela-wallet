@@ -37,13 +37,8 @@ pub fn shorten(address: &str) -> SharedString {
     ))
 }
 
-/// The A–Z section a name sorts under. Anything that is not an ASCII letter
-/// files under `#`, which is what the mocks draw for a numeric or symbol name.
-#[must_use]
-pub fn section_of(name: &str) -> SharedString {
-    name.chars()
-        .next()
-        .filter(char::is_ascii_alphabetic)
-        .map(|c| SharedString::from(c.to_uppercase().to_string()))
-        .unwrap_or_else(|| SharedString::from("#"))
-}
+// The A–Z rule used to live here, ASCII-only: 阿豪 filed under `#`. It went to
+// the core in spec 028 (`app/contacts_initials.rs`, a per-codepoint pinyin
+// initial table: 阿豪 → A, 妈妈 → M, an address → `#`), because the same person
+// must not file under a different letter on two clients. The shell now reads
+// `ContactsView.sections`.

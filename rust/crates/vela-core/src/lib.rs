@@ -50,7 +50,9 @@ pub mod safe;
 pub mod types;
 /// The Safe ERC-4337 user operation — calldata, initCode, the SafeOp hash,
 /// the WebAuthn signature envelope, the v0.7 wire shape. Pure assembly; the
-/// reads and the submit belong to a shell. See `specs/032-desktop-money-wiring/`.
+/// reads and the submit belong to a shell. Written for the desktop in spec
+/// 032; on the web (spec 028 Phase 8) it is the second implementation the
+/// shell's TypeScript assembly is checked against before a passkey signs.
 pub mod user_op;
 pub mod webauthn;
 

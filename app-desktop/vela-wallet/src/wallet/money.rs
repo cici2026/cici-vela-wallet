@@ -1143,6 +1143,11 @@ mod tests {
                     // Never answer the 15s race first, or every estimate is a
                     // timeout; every other operation answers its empty twin.
                     SendOperation::StartTimer { .. } => continue,
+                    // 028 warms the relay quote from the FORM, with no call to
+                    // price yet (`tx: None, batch: None`). This test is about
+                    // what the core refuses while somebody types, so the warm
+                    // quote is left outstanding exactly as the 15s race is.
+                    SendOperation::EstimateFee { .. } => continue,
                     SendOperation::ResolveIdentity { .. } => {
                         SendShellResult::IdentityResolved { identity: None }
                     }

@@ -536,6 +536,69 @@ test result: ok. 1 passed … finished in 88.86s
 `AddToken.notice`(真缺陷,已修)和 `user_op.rs` 测试里的 `to_hex`(feature 关掉时没人用,
 已按 feature 门住)。现在两种 feature 配置下都确实只剩 `BLE_CHANNEL_SUPPORTED` 一个。
 
+## Phase 8 — 028 并进来,桌面那份分叉删掉
+
+创始人 2026-09-07 点批:**就在这棵树上并**。`origin/main` = `61568f22`(PR #186)。
+
+**冲突五处,四处是生成物**:`.specify/feature.json`(取本侧)、`rust/pkg-web/*` 与
+`public/vela_core_bg.*.wasm`(两边都重建过 wasm)。按交接第 5 步重建入库:
+`node rust/scripts/build-web.mjs` → 新指纹 `1b6c8ce4be03`,**3,725,860 字节**
+(本分支原 3,630,664——028 的新事件与拼音表在里面);`verify-web.mjs` 46,513 例全绿,
+`gen-onboarding-types.mjs --check` 25 个类型现行。唯一手并的是
+`vela-core/src/lib.rs` 的一句文档注释:取 main 的措辞,因为它把两个壳都点了名。
+
+**一个意外的好消息**:`user_op.rs` 在 main 里已经和本分支**逐字节相同**——028 Phase 8
+把它当作 web 那份 TypeScript 装配的第二实现来对照。所以本 stack 在 `rust/` 下真正独有的
+只剩 `dev_fixtures.rs` 和那个 feature。
+
+**六步的结果**:
+
+| # | 事 | 结果 |
+|---|---|---|
+| 1 | `contacts/live.rs` 测试字面量 | 补了三个字段——但**不是填 `Vec::new()`**:那样每行都会归到 `#`,测试照过、什么也没证。改成调核心的 `section_contacts` 现算 |
+| 2 | 导入/导出改派核心事件 | 已改。`ImportFile`/`ImportAcknowledged`/`ExportRequested`/`ExportTaken`,**`executor/contact_io.rs` 565 行连测试一起删** |
+| 3 | `add_group_members` 等三个新事件 | 桌面根本没有成员选择器,无处可核对;记为将来的能力 |
+| 4 | `send.rs` 两条 | 都不用改:Dsd2e 的"选中 + 关闭"双发本来就是按"哪个核心都画同一个屏"写的,新核心下第二发是空操作;`prefilled_recipient` 进 `recipient` 现在是核心自己做 |
+| 5 | `pkg-web` 冲突 | 见上,重建入库 |
+| 6 | 分组字母归核心 | 已改,见下 |
+
+**第 2 条是这次并树真正的理由。** 坏文件(非法 JSON、没有地址列的 CSV、空表)在 web 上被
+**拒绝**,在桌面上原来是"成功导入 0 条"——从外面看和一本空通讯录一模一样。现在壳只负责
+读字节和它自己的失败(文件读不出),**关于这些字节的一切判断都归核心**;拒绝优先于报告,
+因为被拒的文件什么也没写,"新增 0、跳过 0"会把它描述成一次成功的空导入。
+
+**第 6 条改了行为,不只是搬家。** 桌面原来的 `section_of` 只认 ASCII:阿豪归 `#`。核心的
+`contacts_initials.rs` 逐码点拼音首字母:阿豪 → A。**同一个人在两端归到不同字母下**,
+这种事没人会报但人人会注意到。顺带修掉桌面独有的一个 bug:原来按**连续段**分组,书序里
+不相邻的两个 A 会变成两个 A 段;核心的目录不会。
+
+### 并完之后的两个数字,和一条藏了很久的假绿
+
+**desktop 263(feature on)/ 259(off)· vela-core 1,282**(并树前 267/263 · 1,264)。
+桌面**少了 4**。原因说清楚:
+删掉的 `executor/contact_io.rs` 带走了它自己的 **6 个测试**,本刀新增 2 个,净 −4。
+那 6 个测的规则没有消失,是搬到了核心:`rust/crates/vela-core/tests/app_contacts.rs`
+有 **57 个测试**,四种拒绝(`MalformedJson` / `NoAddressColumn` / `Empty` / `UnknownGroup`)
+都在里面。SC-306 写的是"两个 crate 的测试数严格增加":核心侧 +18(1,264 → 1,282)是增的,
+桌面侧是减的,**因为删的是一份重复实现**——如实记在这里,而不是让它看起来像退步。
+
+闸门全绿:两端 fmt clean、clippy `-D warnings` 无话、gallery 36 态全渲染、
+Windows 通过类型检查、`verify-web` 46,513 例。
+
+**028 的暖报价撞上了 phase 6 的测试驱动。** `every_refusal_the_core_makes_reaches_the_screen`
+的 pump 有个 `unreachable!` 兜底,新核心从**表单**就发一次 `EstimateFee`(`tx: None,
+batch: None`——028 phase 10 的"选中就暖一次报价"),于是当场炸。处理同 15 秒竞速:
+挂着不答。这条和 028 web 会话记的"FIFO 驱动遇上新计时器操作"是同一个坑的两端。
+
+**闸门命令本身会瞒报。** 交接里(以及本文件上面)那条
+`cargo test 2>&1 | tail -3 && …`,`&&` 接的是 **`tail` 的退出码**,永远是 0——
+上面那次真实的测试失败,后台任务报的是 **exit 0**,我是靠读输出才发现的。
+以后跑闸门要么加 `set -o pipefail`,要么别把 `cargo test` 接进管道再用 `&&` 串。
+
+老测试 `sectioning_groups_without_reordering` 断言的正是那条桌面规则(字母按书序)。
+它被**改写而不是删掉**:字母是目录(A–Z 然后 `#`),字母**之内**仍是书序(收藏优先、
+最近其次)——后半句一直是对的。新增 2 个测试(拼音首字母、一个字母一段)。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

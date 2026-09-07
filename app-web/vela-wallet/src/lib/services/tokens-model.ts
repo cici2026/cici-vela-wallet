@@ -89,10 +89,48 @@ export function isAddress(value: string): boolean {
 	return /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+/**
+ * A chain's logo on the chain-data endpoint — read at call time, so a person
+ * who pointed 服务端点 elsewhere gets that host's logos too. Every drawn mark
+ * that carries one falls back to its letter and colour when this 404s.
+ */
+export function chainLogoURL(chainId: number): string {
+	return `${getEthereumDataURL()}/chainlogos/eip155-${chainId}.png`;
+}
+
 /** A native coin's logo — the COIN's chain, not the chain it sits on. */
 export function nativeLogoURLs(chainId: number, symbol: string): string[] {
-	const logoChain = nativeCoinLogoChainId(symbol, chainId);
-	return [`${getEthereumDataURL()}/chainlogos/eip155-${logoChain}.png`];
+	return [chainLogoURL(nativeCoinLogoChainId(symbol, chainId))];
+}
+
+/**
+ * The chain a held token's badge names, or `null` when the badge would show
+ * the same logo as the token — ETH on Ethereum, BNB on BNB Chain. The
+ * `tokenBadgeChainId` rule above, for the core's `BalanceToken` shape.
+ */
+export function balanceTokenBadgeChainId(token: {
+	chain_id: number;
+	symbol: string;
+	token_address: string | null;
+}): number | null {
+	if (
+		token.token_address === null &&
+		nativeCoinLogoChainId(token.symbol, token.chain_id) === token.chain_id
+	) {
+		return null;
+	}
+	return token.chain_id;
+}
+
+/** A held token's logo candidates: the coin's chain, or the contract's entry. */
+export function balanceTokenLogoURLs(token: {
+	chain_id: number;
+	symbol: string;
+	token_address: string | null;
+}): string[] {
+	return token.token_address === null
+		? nativeLogoURLs(token.chain_id, token.symbol)
+		: tokenLogoURLsByAddress(token.chain_id, token.token_address);
 }
 
 /**
@@ -107,4 +145,17 @@ export function tokenLogoURLsByAddress(chainId: number, tokenAddress: string): s
 	const urls = [`${base}/${cs}/logo.png`];
 	if (lc !== cs) urls.push(`${base}/${lc}/logo.png`);
 	return urls;
+}
+
+/**
+ * Candidate logo URLs in priority order (Expo `models/types.ts:160`). For an
+ * ERC-20 the checksummed address is tried first, then lowercase, so an
+ * inconsistently-cased data server still resolves.
+ */
+export function tokenLogoURLs(token: APIToken): string[] {
+	if (token.logo && token.logo.length > 0) return [token.logo];
+	const chainId = tokenChainId(token);
+	if (isNativeToken(token)) return nativeLogoURLs(chainId, token.symbol);
+	if (token.tokenAddress) return tokenLogoURLsByAddress(chainId, token.tokenAddress);
+	return [];
 }

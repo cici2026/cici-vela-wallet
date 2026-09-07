@@ -9,6 +9,7 @@
 		"gen:tokens": "node scripts/gen-tokens.mjs",
 		"sync:wasm": "node scripts/sync-wasm.mjs",
 		"build": "node scripts/gen-tokens.mjs --check && node scripts/sync-wasm.mjs && wrangler types && vite build",
+		"build:extension": "node extension/build.mjs",
 		"preview": "wrangler dev .svelte-kit/cloudflare/_worker.js --port 4173",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "node scripts/gen-tokens.mjs --check && node scripts/sync-wasm.mjs --check && node ../../rust/scripts/gen-core-types.mjs wallet-state session --check && wrangler types && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -27,10 +28,13 @@
 		"@fontsource/plus-jakarta-sans": "^5.3.0",
 		"@playwright/test": "^1.60.0",
 		"@sveltejs/adapter-cloudflare": "^7.2.8",
+		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.63.0",
 		"@sveltejs/vite-plugin-svelte": "^7.1.2",
 		"@types/node": "^22",
+		"@types/qrcode": "^1.5.6",
 		"@vitest/browser-playwright": "^4.1.8",
+		"esbuild": "^0.28.2",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-svelte": "^3.19.0",
@@ -47,5 +51,13 @@
 		"vitest": "^4.1.8",
 		"vitest-browser-svelte": "^2.1.1",
 		"wrangler": "^4.97.0"
+	},
+	"dependencies": {
+		"@noble/curves": "1.9.7",
+		"@noble/hashes": "1.8.0",
+		"@undecaf/zbar-wasm": "^0.11.0",
+		"jsqr": "^1.4.0",
+		"qrcode": "^1.5.4",
+		"xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
 	}
 }

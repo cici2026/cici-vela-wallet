@@ -51,7 +51,22 @@ describe('literal audit — product UI references tokens, never raw values', () 
 	 * not ours to express in our tokens — the day it becomes a real WebView,
 	 * those values leave with it.
 	 */
-	const LITERAL_WHITELIST = new Set(['BrandMark.svelte', 'DemoPage.svelte', 'chains.ts']);
+	const LITERAL_WHITELIST = new Set([
+		'BrandMark.svelte',
+		'AppIcon.svelte',
+		// spec 028 Phase 9 (T488): the same brand asset as data, and the receive
+		// share IMAGE — a render product composed as an SVG string with the app's
+		// faces embedded (`@font-face` needs `font-family:`). Its surfaces still
+		// read the live tokens at save time; only the asset's fills are values.
+		'brand-mark.ts',
+		'share-image.ts',
+		'DemoPage.svelte',
+		'chains.ts',
+		// spec 026: the parallel-space badge is deliberately NOT product chrome.
+		// Its violet exists to look foreign — a design token would make a test
+		// wallet look native, which is the exact confusion the badge prevents.
+		'ParallelSpaceBadge.svelte'
+	]);
 
 	const collect = (dir: string): string[] =>
 		readdirSync(dir).flatMap((name) => {
@@ -81,6 +96,20 @@ describe('literal audit — product UI references tokens, never raw values', () 
 		...collect(join(APP_ROOT, 'src/lib/services')),
 		...collect(join(APP_ROOT, 'src/lib/settings')),
 		...collect(join(APP_ROOT, 'src/lib/session')),
+		// spec 026 T203: the money layer and the dev harness. `dev` is audited
+		// too — a fixture is allowed to look alien, but only on purpose and only
+		// where it is written down (see the whitelist).
+		...collect(join(APP_ROOT, 'src/lib/dev')),
+		// spec 027 T303: the packaged-extension layer. It holds no visuals today
+		// — which is the point of auditing it, since a colour appearing there
+		// would be a category error. The extension's own page scripts are plain
+		// `.js` and fall outside this collector entirely; that is acceptable only
+		// while they draw nothing (recorded in results.md).
+		...collect(join(APP_ROOT, 'src/lib/extension')),
+		// spec 027 T303/T320: the dApp layer. The request window is the one place
+		// a stranger's site gets to put words on this wallet's screen, so a colour
+		// literal drifting in here would be exactly the wrong kind of surprise.
+		...collect(join(APP_ROOT, 'src/lib/dapp')),
 		...collect(join(APP_ROOT, 'src/routes')),
 		join(APP_ROOT, 'src/app.css')
 	].filter(
@@ -128,6 +157,7 @@ describe('literal audit — product UI references tokens, never raw values', () 
 
 	it('no box-shadow or font-family literals (vars only)', () => {
 		for (const path of sources) {
+			if (LITERAL_WHITELIST.has(path.split('/').at(-1)!)) continue;
 			// examine whole declarations — they may span lines (prettier wraps values)
 			const declarations = readFileSync(path, 'utf8').split(';');
 			for (const decl of declarations) {

@@ -11,9 +11,10 @@
  * owns what happens next.
  */
 
+import { isPackagedApp } from '$lib/extension/page-url';
 import type { FailureKind } from '../generated/FailureKind';
 
-/** The native relying party. Web resolves per-hostname; see `relyingPartyId`. */
+/** The native relying party, shared by the extension. See `relyingPartyId`. */
 const RELYING_PARTY_NATIVE = 'getvela.app';
 
 /**
@@ -65,6 +66,21 @@ export function relyingPartyId(): string {
 	const proxied = (window as unknown as { __VELA_WEBAUTHN_PROXY_RPID__?: string })
 		.__VELA_WEBAUTHN_PROXY_RPID__;
 	if (proxied) return proxied;
+
+	// An extension page's origin is `chrome-extension://<id>`, which has NO
+	// registrable domain of its own — so the hostname below is the extension id,
+	// and taking it is the one mistake here that never announces itself: the
+	// ceremony succeeds, a perfectly valid passkey is minted under a relying
+	// party nothing else in the world shares, and since the address is derived
+	// from the keys (spec 019 invariant ②) the person lands in a DIFFERENT,
+	// empty wallet — no error, no warning, just somebody else's money missing.
+	// Chrome permits an extension to claim a relying party it holds host
+	// permission for and no other; `extension/manifest.json`'s
+	// `https://getvela.app/*` entry is what unlocks this line, and
+	// `$lib/extension/package.test.ts` guards that the entry stays. Measured in
+	// spec 027 D31, down to the assertion's rpIdHash being sha256("getvela.app")
+	// whatever origin called for it — one passkey, one address, two doorways.
+	if (isPackagedApp()) return RELYING_PARTY_NATIVE;
 
 	const host = window.location.hostname;
 	if (host === 'localhost' || host === '127.0.0.1' || /^\d+\.\d+\.\d+\.\d+$/.test(host)) {
@@ -195,6 +211,80 @@ export async function authenticate(): Promise<Assertion> {
  */
 let pendingSign: AbortController | null = null;
 
+/**
+ * The parallel space's seam (spec 026 D18): a substitute signer installed by
+ * the dev harness behind the RUNTIME dev gate, so every ceremony — sign,
+ * signWithAny — is covered by one substitution. Production paths never install
+ * one; without an override every call below reaches `navigator.credentials`.
+ */
+export interface PasskeyOverride {
+	sign(challengeHex: string, credentialIds: string[] | null): Promise<Assertion>;
+}
+let override: PasskeyOverride | null = null;
+export function setPasskeyOverride(next: PasskeyOverride | null): void {
+	override = next;
+}
+export function hasPasskeyOverride(): boolean {
+	return override !== null;
+}
+
+/** Abort the pending ceremony, if any (the core's `cancel_passkey_sign`). */
+export function cancelSign(): void {
+	pendingSign?.abort();
+	pendingSign = null;
+}
+
+/**
+ * Sign with ANY of a wallet's founding credentials — the provider picks. A
+ * multi-key wallet passes every key so the person is never told the one
+ * credential they hold "was not found" (Expo `webSign` semantics).
+ */
+export async function signWithAny(
+	challengeHex: string,
+	credentials: { id: string; transports?: string }[]
+): Promise<Assertion> {
+	if (override)
+		return override.sign(
+			challengeHex,
+			credentials.map((c) => c.id)
+		);
+	assertSupported();
+	pendingSign?.abort();
+	const controller = new AbortController();
+	pendingSign = controller;
+	try {
+		const credential = (await navigator.credentials.get({
+			publicKey: {
+				challenge: hexToBytes(challengeHex) as BufferSource,
+				rpId: relyingPartyId(),
+				userVerification: 'required',
+				...(credentials.length > 0
+					? {
+							allowCredentials: credentials.map((c) => {
+								const hints = (c.transports ?? '')
+									.split(',')
+									.map((value) => value.trim())
+									.filter(Boolean) as AuthenticatorTransport[];
+								return {
+									type: 'public-key' as const,
+									id: hexToBytes(c.id) as BufferSource,
+									...(hints.length > 0 ? { transports: hints } : {})
+								};
+							})
+						}
+					: {})
+			},
+			signal: controller.signal
+		})) as PublicKeyCredential | null;
+		if (!credential) throw new PasskeyError('other', 'No credential returned');
+		return parseAssertion(credential);
+	} catch (error) {
+		throw classify(error);
+	} finally {
+		if (pendingSign === controller) pendingSign = null;
+	}
+}
+
 export async function sign(
 	challengeHex: string,
 	credentialId: string,
@@ -211,6 +301,7 @@ export async function sign(
 	 */
 	transports = ''
 ): Promise<Assertion> {
+	if (override) return override.sign(challengeHex, [credentialId]);
 	assertSupported();
 	pendingSign?.abort();
 	const controller = new AbortController();

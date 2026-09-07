@@ -1,16 +1,18 @@
-//! Reading and writing an address-book backup.
+//! The address book as a FILE — how it is written out and how one is read
+//! back in (spec 028 US5, FR-408).
 //!
-//! **Ported from** `src/services/contact-io.ts` @ `c513c4c6` (FR-006), the
-//! serialize and parse halves only. The import POLICY — existing-wins, the
-//! counts, which groups get created — is the core's (`Event::ImportParsed`),
-//! and none of it is re-decided here.
+//! Lifted into the core from the desktop shell's `executor/contact_io.rs`
+//! (031), itself a port of Expo's `src/services/contact-io.ts` @ `c513c4c6`.
+//! It moves here because four shells now speak this format — web, desktop,
+//! Android, iOS — and a backup written on any one of them must open on every
+//! other. A rule about which column is the address, or whether `"name": ""`
+//! means "no name", cannot be allowed to drift per platform: the moment it
+//! does, somebody's export stops importing on their other device.
 //!
-//! ## The format is the point
-//!
-//! A backup written on the phone has to open on the desktop and vice versa, so
-//! `version`, `exportedAt`, `contacts` and `groups` keep their spelling, and the
-//! CSV keeps its column order. Inventing a desktop format would make export a
-//! feature that only talks to itself.
+//! What lives here is FORMAT: JSON-vs-CSV sniffing, quoting, line endings,
+//! which column is which. What it yields is already-parsed rows; the import
+//! POLICY — existing-wins, the counts, which groups are created — is
+//! `contacts.rs`'s `apply_import`, and none of it is re-decided here.
 //!
 //! ## The CSV heuristics are not tidiness
 //!
@@ -20,38 +22,63 @@
 //! column 0 held the NAME, every row failed the address test, every row was
 //! dropped silently, and the import reported "0 added, 0 already existed".
 //! Nothing imported, nothing explained, nothing to try differently. So when the
-//! header does not say where the address is, **the data does**.
+//! header does not say where the address is, **the data does** — and a file
+//! that plainly held rows and yielded no address at all is REFUSED with a
+//! reason, never "succeeded" with zero of everything (D50: refuse before any
+//! write).
 
-use serde_json::{Map, Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Map, Value};
 
-use vela_core::app::contacts::{Contact, ContactGroupView, ContactImportEntry, ContactImportGroup};
+#[cfg(feature = "bindings")]
+use ts_rs::TS;
+
+use super::contacts::{
+    is_address, Contact, ContactFileFormat, ContactGroup, ContactImportEntry, ContactImportGroup,
+};
 
 /// The backup document's version. Not ours to bump alone: every client reads
 /// these bytes.
-const BACKUP_VERSION: u64 = 1;
+pub const BACKUP_VERSION: u64 = 1;
 
 /// What a file yielded, before the core rules on any of it.
-#[derive(Debug, Default, PartialEq, Eq)]
-pub struct Parsed {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ParsedContactsFile {
     pub contacts: Vec<ContactImportEntry>,
     pub groups: Vec<ContactImportGroup>,
 }
 
-/// A CSV that plainly held contact rows and yielded no address at all.
+/// Why an import file was refused — before anything was written (D50).
 ///
-/// Distinct from an empty parse on purpose: a file we cannot read must SAY so
-/// rather than succeed with zero of everything, which is indistinguishable from
-/// an empty address book.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Unreadable;
+/// Each variant is something a person can act on differently: pick a JSON or
+/// CSV file, add an address column, choose a file that is not empty. A refusal
+/// is distinct from an empty parse on purpose: "0 added" is indistinguishable
+/// from an empty address book, and the file's mistake would be erased before
+/// anyone saw it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[cfg_attr(feature = "bindings", derive(TS))]
+pub enum ContactImportFailure {
+    /// Named `.json` (or shaped like it) and not parseable as a JSON object.
+    MalformedJson,
+    /// A CSV that plainly held contact rows and yielded no address anywhere.
+    NoAddressColumn,
+    /// No rows at all.
+    Empty,
+    /// "Import into this group" named a group that no longer exists.
+    UnknownGroup,
+}
 
 // ---------------------------------------------------------------------------
 // Serialize
 // ---------------------------------------------------------------------------
 
-/// The JSON backup, pretty-printed as the other clients write it.
+/// The JSON backup, pretty-printed as every client writes it:
+/// `{version, exportedAt, contacts: [{address, name?, note?, favorite?}],
+/// groups: [{name, color?, members: [address]}]}`. Group members are
+/// ADDRESSES, not ids, so an import maps them by name (ids are per-device).
 #[must_use]
-pub fn to_json(contacts: &[Contact], groups: &[ContactGroupView], exported_at: &str) -> String {
+pub fn to_json(contacts: &[Contact], groups: &[ContactGroup], exported_at: &str) -> String {
     let backup = json!({
         "version": BACKUP_VERSION,
         "exportedAt": exported_at,
@@ -64,16 +91,7 @@ pub fn to_json(contacts: &[Contact], groups: &[ContactGroupView], exported_at: &
                 if let Some(color) = group.color.as_ref().filter(|c| !c.is_empty()) {
                     object.insert("color".to_owned(), json!(color));
                 }
-                object.insert(
-                    "members".to_owned(),
-                    json!(
-                        group
-                            .members
-                            .iter()
-                            .map(|member| member.address.clone())
-                            .collect::<Vec<_>>()
-                    ),
-                );
+                object.insert("members".to_owned(), json!(group.members));
                 Value::Object(object)
             })
             .collect::<Vec<_>>(),
@@ -98,20 +116,16 @@ fn exported_contact(contact: &Contact) -> Value {
     Value::Object(object)
 }
 
-/// The CSV backup: `address,name,note,favorite,groups`, groups `;`-joined.
+/// The CSV backup: `address,name,note,favorite,groups`, groups `;`-joined per
+/// row. `\n` line endings, quoted only where a cell needs it.
 #[must_use]
-pub fn to_csv(contacts: &[Contact], groups: &[ContactGroupView]) -> String {
+pub fn to_csv(contacts: &[Contact], groups: &[ContactGroup]) -> String {
     let mut lines = vec!["address,name,note,favorite,groups".to_owned()];
     for contact in contacts {
-        let memberships: Vec<String> = groups
+        let memberships: Vec<&str> = groups
             .iter()
-            .filter(|group| {
-                group
-                    .members
-                    .iter()
-                    .any(|member| member.address == contact.address)
-            })
-            .map(|group| group.name.clone())
+            .filter(|group| group.members.contains(&contact.address))
+            .map(|group| group.name.as_str())
             .collect();
         lines.push(
             [
@@ -139,31 +153,102 @@ fn csv_cell(value: &str) -> String {
     }
 }
 
+/// The MIME type a shell hands the file out under.
+#[must_use]
+pub fn mime_for(format: ContactFileFormat) -> &'static str {
+    match format {
+        ContactFileFormat::Json => "application/json",
+        ContactFileFormat::Csv => "text/csv",
+    }
+}
+
+/// `vela-contacts[-<group>][-<yyyy-mm-dd>].<ext>`.
+///
+/// The date is read off the ISO stamp the shell supplied (the core has no
+/// clock); a stamp that does not start `yyyy-mm-dd` contributes nothing rather
+/// than a garbled suffix. A group's name is slugged to what every filesystem
+/// accepts — alphanumerics of any script survive (家人 stays 家人), everything
+/// else becomes one dash — and a name that slugs to nothing is called `group`.
+#[must_use]
+pub fn export_filename(
+    group_name: Option<&str>,
+    format: ContactFileFormat,
+    exported_at_iso: &str,
+) -> String {
+    let mut name = String::from("vela-contacts");
+    if let Some(group) = group_name {
+        let slug = slug(group);
+        name.push('-');
+        name.push_str(if slug.is_empty() { "group" } else { &slug });
+    }
+    if let Some(date) = iso_date_prefix(exported_at_iso) {
+        name.push('-');
+        name.push_str(date);
+    }
+    name.push('.');
+    name.push_str(match format {
+        ContactFileFormat::Json => "json",
+        ContactFileFormat::Csv => "csv",
+    });
+    name
+}
+
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for ch in text.trim().chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+        if out.chars().count() >= 32 {
+            break;
+        }
+    }
+    out.trim_end_matches('-').to_owned()
+}
+
+fn iso_date_prefix(iso: &str) -> Option<&str> {
+    let head = iso.get(..10)?;
+    let bytes = head.as_bytes();
+    let digits_at = |range: std::ops::Range<usize>| bytes[range].iter().all(u8::is_ascii_digit);
+    (digits_at(0..4) && bytes[4] == b'-' && digits_at(5..7) && bytes[7] == b'-' && digits_at(8..10))
+        .then_some(head)
+}
+
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
 /// JSON or CSV, detected by extension then by shape.
-pub fn parse(content: &str, filename: Option<&str>) -> Result<Parsed, Unreadable> {
+pub fn parse(
+    content: &str,
+    filename: Option<&str>,
+) -> Result<ParsedContactsFile, ContactImportFailure> {
     // A BOM in front of `{` is still JSON, and a BOM in front of a header is
     // still a header.
     let trimmed = content.trim_start_matches('\u{feff}').trim();
     let looks_json = filename.is_some_and(|name| name.to_lowercase().ends_with(".json"))
         || trimmed.starts_with('{');
     if looks_json {
-        Ok(parse_json(trimmed))
+        parse_json(trimmed)
     } else {
         parse_csv(trimmed)
     }
 }
 
-fn parse_json(text: &str) -> Parsed {
-    // Unparseable JSON yields NOTHING rather than an error: the core reports
-    // "0 added" and the person tries another file, which is the same outcome as
-    // an empty backup and needs no second failure mode.
-    let Ok(data) = serde_json::from_str::<Value>(text) else {
-        return Parsed::default();
-    };
+/// `{contacts: [...], groups: [...]}` — both optional (an object with neither
+/// is an empty backup, as it always was). Anything that is not a JSON object is
+/// refused: a person who picked the wrong file must hear so, not "0 added".
+fn parse_json(text: &str) -> Result<ParsedContactsFile, ContactImportFailure> {
+    let data =
+        serde_json::from_str::<Value>(text).map_err(|_| ContactImportFailure::MalformedJson)?;
+    if !data.is_object() {
+        return Err(ContactImportFailure::MalformedJson);
+    }
     let contacts = data
         .get("contacts")
         .and_then(Value::as_array)
@@ -194,7 +279,7 @@ fn parse_json(text: &str) -> Parsed {
                 .collect()
         })
         .unwrap_or_default();
-    Parsed { contacts, groups }
+    Ok(ParsedContactsFile { contacts, groups })
 }
 
 fn imported_contact(value: &Value) -> Option<ContactImportEntry> {
@@ -219,8 +304,10 @@ fn imported_contact(value: &Value) -> Option<ContactImportEntry> {
     })
 }
 
-/// Split one CSV line, honouring quotes and doubled quotes.
-fn split_csv_line(line: &str) -> Vec<String> {
+/// Split one CSV line, honouring quotes and doubled quotes
+/// (`recipient-table.ts::splitCsvLine`, comma delimiter).
+#[must_use]
+pub fn split_csv_line(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_quotes = false;
@@ -249,14 +336,6 @@ fn split_csv_line(line: &str) -> Vec<String> {
     out
 }
 
-/// Is this an EVM address? The one question the CSV heuristics turn on.
-fn is_address(value: &str) -> bool {
-    let stripped = value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"));
-    stripped.is_some_and(|body| body.len() == 40 && body.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
 /// Which column holds the address: the header's word if it says so, else the
 /// first column that actually contains one.
 fn address_column(header: Option<&[String]>, rows: &[Vec<String>]) -> Option<usize> {
@@ -283,7 +362,7 @@ struct Columns {
 fn index_columns(header: Option<&[String]>, address: usize, named_address: bool) -> Columns {
     let find = |header: &[String], word: &str| header.iter().position(|h| h.to_lowercase() == word);
     // The first column that is NOT the address one — the de-facto label.
-    let first_other = if address == 0 { 1 } else { 0 };
+    let first_other = usize::from(address == 0);
 
     match header {
         // The file speaks our vocabulary: take every column it names and infer
@@ -324,13 +403,13 @@ fn index_columns(header: Option<&[String]>, address: usize, named_address: bool)
     }
 }
 
-fn parse_csv(text: &str) -> Result<Parsed, Unreadable> {
+fn parse_csv(text: &str) -> Result<ParsedContactsFile, ContactImportFailure> {
     let lines: Vec<&str> = text
         .split(['\n', '\r'])
         .filter(|line| !line.trim().is_empty())
         .collect();
     let Some(first_line) = lines.first() else {
-        return Ok(Parsed::default());
+        return Err(ContactImportFailure::Empty);
     };
     let first: Vec<String> = split_csv_line(first_line)
         .into_iter()
@@ -377,8 +456,8 @@ fn parse_csv(text: &str) -> Result<Parsed, Unreadable> {
         attempted += 1;
 
         // A malformed row is carried through, NOT dropped: "is this an address"
-        // is the core's question and it counts the answer. Swallowing bad rows
-        // here made `invalid` structurally zero on this path.
+        // is `apply_import`'s question and it counts the answer. Swallowing bad
+        // rows here made `invalid` structurally zero on this path.
         contacts.push(ContactImportEntry {
             address: address.clone(),
             name: cell(columns.name).map(str::to_owned),
@@ -405,9 +484,12 @@ fn parse_csv(text: &str) -> Result<Parsed, Unreadable> {
 
     // Rows that plainly meant to be contacts, and not one address among them.
     if attempted > 0 && valid == 0 {
-        return Err(Unreadable);
+        return Err(ContactImportFailure::NoAddressColumn);
     }
-    Ok(Parsed {
+    if attempted == 0 {
+        return Err(ContactImportFailure::Empty);
+    }
+    Ok(ParsedContactsFile {
         contacts,
         groups: group_map
             .into_iter()
@@ -418,148 +500,4 @@ fn parse_csv(text: &str) -> Result<Parsed, Unreadable> {
             })
             .collect(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use vela_core::app::contacts::{ContactKind, ContactSource};
-
-    fn contact(address: &str, name: Option<&str>, favorite: bool) -> Contact {
-        Contact {
-            address: address.to_owned(),
-            name: name.map(str::to_owned),
-            resolved_name: None,
-            resolved_source: None,
-            kind: ContactKind::Eoa,
-            favorite,
-            note: None,
-            tx_count: 0,
-            last_used_ms: 0.0,
-            first_seen_ms: 0.0,
-            source: ContactSource::Manual,
-        }
-    }
-
-    const ALICE: &str = "0xAaAa000000000000000000000000000000000001";
-    const BOB: &str = "0xbBbB000000000000000000000000000000000002";
-
-    /// A backup written here reads back here, whole.
-    #[test]
-    fn a_json_backup_round_trips() {
-        let contacts = vec![
-            contact(ALICE, Some("Alice"), true),
-            contact(BOB, None, false),
-        ];
-        let groups = vec![ContactGroupView {
-            id: "g1".to_owned(),
-            name: "Family".to_owned(),
-            color: Some("#ff0000".to_owned()),
-            members: vec![contact(ALICE, Some("Alice"), true)],
-        }];
-
-        let text = to_json(&contacts, &groups, "2026-09-05T00:00:00.000Z");
-        // The bytes every other client reads.
-        assert!(text.contains("\"version\": 1"));
-        assert!(text.contains("\"exportedAt\""));
-        // An absent name is OMITTED — `"name": ""` re-imports an empty name.
-        assert!(!text.contains("\"name\": \"\""));
-
-        let parsed = parse(&text, Some("book.json"))
-            .unwrap_or_else(|_| unreachable!("our own file is readable"));
-        assert_eq!(parsed.contacts.len(), 2);
-        assert_eq!(parsed.contacts[0].address, ALICE);
-        assert_eq!(parsed.contacts[0].name.as_deref(), Some("Alice"));
-        assert_eq!(parsed.contacts[0].favorite, Some(true));
-        assert_eq!(parsed.contacts[1].name, None);
-        assert_eq!(parsed.groups.len(), 1);
-        assert_eq!(parsed.groups[0].name, "Family");
-        assert_eq!(parsed.groups[0].color.as_deref(), Some("#ff0000"));
-        assert_eq!(parsed.groups[0].members, vec![ALICE.to_owned()]);
-    }
-
-    /// The CSV round trip, including a cell that needs quoting.
-    #[test]
-    fn a_csv_backup_round_trips_and_quotes_what_it_must() {
-        let mut alice = contact(ALICE, Some("Alice, the one"), true);
-        alice.note = Some("said \"hi\"".to_owned());
-        let groups = vec![ContactGroupView {
-            id: "g1".to_owned(),
-            name: "Family".to_owned(),
-            color: None,
-            members: vec![alice.clone()],
-        }];
-
-        let text = to_csv(&[alice], &groups);
-        assert!(text.starts_with("address,name,note,favorite,groups"));
-        assert!(text.contains("\"Alice, the one\""), "{text}");
-        assert!(text.contains("\"said \"\"hi\"\"\""), "{text}");
-
-        let parsed =
-            parse(&text, Some("book.csv")).unwrap_or_else(|_| unreachable!("our own file"));
-        assert_eq!(parsed.contacts.len(), 1);
-        assert_eq!(parsed.contacts[0].name.as_deref(), Some("Alice, the one"));
-        assert_eq!(parsed.contacts[0].note.as_deref(), Some("said \"hi\""));
-        assert_eq!(parsed.contacts[0].favorite, Some(true));
-        assert_eq!(parsed.groups[0].members, vec![ALICE.to_lowercase()]);
-    }
-
-    /// A foreign header that does not say "address" — the data says where it is.
-    ///
-    /// Falling back to column 0 here is what made an import report "0 added, 0
-    /// already existed": nothing imported, nothing explained.
-    #[test]
-    fn a_foreign_header_is_read_from_the_data_not_from_column_zero() {
-        let csv = format!("label,wallet\nAlice,{ALICE}\nBob,{BOB}\n");
-        let parsed =
-            parse(&csv, Some("theirs.csv")).unwrap_or_else(|_| unreachable!("it has addresses"));
-        assert_eq!(parsed.contacts.len(), 2);
-        assert_eq!(parsed.contacts[0].address, ALICE);
-        // The label beside it is the one unambiguous extra.
-        assert_eq!(parsed.contacts[0].name.as_deref(), Some("Alice"));
-    }
-
-    /// A malformed row is CARRIED, so the core can count it as invalid.
-    #[test]
-    fn a_bad_address_reaches_the_core_rather_than_being_swallowed() {
-        let csv = format!("address,name\n{ALICE},Alice\nnot-an-address,Nobody\n");
-        let parsed = parse(&csv, Some("book.csv")).unwrap_or_else(|_| unreachable!("one is valid"));
-        assert_eq!(
-            parsed.contacts.len(),
-            2,
-            "the bad row is the core's to judge"
-        );
-        assert_eq!(parsed.contacts[1].address, "not-an-address");
-    }
-
-    /// A file that plainly held contacts and yielded no address SAYS so.
-    #[test]
-    fn an_unreadable_csv_is_an_error_not_an_empty_success() {
-        let csv = "name,email\nAlice,a@example.com\nBob,b@example.com\n";
-        assert_eq!(parse(csv, Some("theirs.csv")), Err(Unreadable));
-
-        // An empty file is not unreadable — it is empty.
-        assert_eq!(parse("", Some("empty.csv")), Ok(Parsed::default()));
-        // And unparseable JSON yields nothing rather than a second failure mode.
-        assert_eq!(parse("{ not json", Some("x.json")), Ok(Parsed::default()));
-    }
-
-    /// A headerless file in our own order, and one whose address is elsewhere.
-    #[test]
-    fn a_headerless_file_is_positional_only_when_the_address_is_where_it_should_be() {
-        let ours = format!("{ALICE},Alice,a note,true,Family\n");
-        let parsed = parse(&ours, None).unwrap_or_else(|_| unreachable!("valid"));
-        assert_eq!(parsed.contacts[0].name.as_deref(), Some("Alice"));
-        assert_eq!(parsed.contacts[0].note.as_deref(), Some("a note"));
-        assert_eq!(parsed.contacts[0].favorite, Some(true));
-        assert_eq!(parsed.groups[0].name, "Family");
-
-        // Address in column 1: the file has told us nothing about columns 2+,
-        // so only the label beside it is taken.
-        let theirs = format!("Alice,{ALICE},something,else\n");
-        let parsed = parse(&theirs, None).unwrap_or_else(|_| unreachable!("valid"));
-        assert_eq!(parsed.contacts[0].address, ALICE);
-        assert_eq!(parsed.contacts[0].name.as_deref(), Some("Alice"));
-        assert_eq!(parsed.contacts[0].note, None, "column 2 means nothing here");
-    }
 }

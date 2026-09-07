@@ -30,6 +30,22 @@
 		ondenom?: () => void;
 		onmax?: (index: number) => void;
 		onaddRecipient?: () => void;
+		/**
+		 * The split rows, typed into (spec 028 Phase 10): a patch to one row,
+		 * and the book opened for one row. Absent, the cards are the drawn ones.
+		 */
+		onrecipientRow?: (index: number, patch: { address?: string; amount?: string }) => void;
+		onpickRecipientRow?: (index: number) => void;
+		/**
+		 * The primary action (spec 026). Absent, the CTA is the drawn button it
+		 * has always been — the gallery renders a picture, not a dead promise.
+		 */
+		oncontinue?: () => void;
+		/** Present ⇒ the amount and the address can be typed here. */
+		onamount?: (value: string) => void;
+		onrecipient?: (value: string) => void;
+		/** The core's gate: `can_continue`. Absent leaves the button armed. */
+		ctaDisabled?: boolean;
 	}
 
 	let {
@@ -41,7 +57,13 @@
 		onfee,
 		ondenom,
 		onmax,
-		onaddRecipient
+		onaddRecipient,
+		onrecipientRow,
+		onpickRecipientRow,
+		oncontinue,
+		onamount,
+		onrecipient,
+		ctaDisabled = false
 	}: Props = $props();
 </script>
 
@@ -63,6 +85,9 @@
 							ticker: row.symbol,
 							chain: row.balanceLabel,
 							badgeColor: row.mark.badgeColor,
+							logoUrls: row.mark.logoUrls,
+							badgeLogoUrl: row.mark.badgeLogoUrl,
+							badgeHidden: row.mark.badgeHidden,
 							balance: row.amount,
 							fiat: { kind: 'none' },
 							masked: false
@@ -83,6 +108,7 @@
 			fiat={model.amount.fiat}
 			denomLabel={model.amount.denomLabel}
 			{ondenom}
+			oninput={onamount}
 		/>
 	{/if}
 
@@ -90,12 +116,14 @@
 		<RecipientField
 			label={model.recipient.label}
 			lines={model.recipient.lines}
+			address={model.recipient.address}
 			identiconSvg={model.recipient.identiconSvg}
 			pickLabel={model.recipient.pickLabel}
 			scanLabel={model.recipient.scanLabel}
 			note={model.recipient.note}
 			onpick={onpickRecipient}
 			{onscan}
+			oninput={onrecipient}
 		/>
 	{/if}
 
@@ -108,9 +136,15 @@
 
 	{#if model.recipients !== undefined}
 		<ul class="recipients">
-			{#each model.recipients as recipient, i (recipient.ordinal)}
+			{#each model.recipients as recipient, i (recipient.id ?? recipient.ordinal)}
 				<li>
-					<RecipientCard {recipient} onremove={() => onremoveRecipient?.(i)} />
+					<RecipientCard
+						{recipient}
+						symbol={model.token?.symbol}
+						onremove={() => onremoveRecipient?.(i)}
+						oninput={onrecipientRow ? (patch) => onrecipientRow(i, patch) : undefined}
+						onpick={onpickRecipientRow ? () => onpickRecipientRow(i) : undefined}
+					/>
 				</li>
 			{/each}
 		</ul>
@@ -130,7 +164,9 @@
 	<FeeRow fee={model.fee} onopen={onfee} />
 
 	<div class="cta">
-		<Button variant="primary" shape="rounded">{model.cta}</Button>
+		<Button variant="primary" shape="rounded" onclick={oncontinue} disabled={ctaDisabled}>
+			{model.cta}
+		</Button>
 	</div>
 </div>
 

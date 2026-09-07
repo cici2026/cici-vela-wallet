@@ -75,7 +75,8 @@ use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::batch_import::{BatchUnit, Event as BatchEvent};
 use vela_core::app::contacts::{
-    ContactGroupInput, ContactSaveInput, Contacts, Event as ContactEvent,
+    ContactExportScope, ContactFileFormat, ContactGroupInput, ContactSaveInput, Contacts,
+    Event as ContactEvent,
 };
 use vela_core::app::display_currency::DisplayCurrency;
 use vela_core::app::fee_policy::Event as FeeEvent;
@@ -6623,54 +6624,55 @@ impl WalletPage {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            let name = path
+            let filename = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned());
+            // Reading the bytes is the shell's job, and its own way to fail.
+            // Everything ABOUT those bytes — is this JSON, does this CSV have
+            // an address column, is it empty — belongs to the core (028 moved
+            // it into `app/contacts_io.rs`), because a file the web refuses
+            // must not import as "0 contacts added" here.
             let Ok(content) = std::fs::read_to_string(&path) else {
+                page.update(cx, |this, cx| {
+                    this.import_result = Some((
+                        this.contacts.import_fail_title.clone(),
+                        this.contacts.import_fail_body.clone(),
+                    ));
+                    cx.notify();
+                })
+                .ok();
                 return;
-            };
-            // A file we cannot read must say so rather than succeed with zero
-            // of everything — but the desktop has no toast yet, so it stays a
-            // no-op with the reason on the log rather than a silent success
-            // dressed as a result.
-            // A file we cannot read must SAY so rather than succeed with zero
-            // of everything, which from the outside is indistinguishable from
-            // an empty address book.
-            let parsed = match crate::executor::contact_io::parse(&content, name.as_deref()) {
-                Ok(parsed) => parsed,
-                Err(_) => {
-                    page.update(cx, |this, cx| {
-                        this.import_result = Some((
-                            this.contacts.import_fail_title.clone(),
-                            this.contacts.import_fail_body.clone(),
-                        ));
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
             };
             let now_ms = crate::executor::now_ms();
             page.update(cx, |this, cx| {
-                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                let view = resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
                     resident.dispatch(
-                        ContactEvent::ImportParsed {
-                            contacts: parsed.contacts,
-                            groups: parsed.groups,
+                        ContactEvent::ImportFile {
+                            content,
+                            filename,
+                            // 导入到本组 has no file path of its own yet; the
+                            // header's import is the whole book.
+                            into_group: None,
                             now_ms,
                         },
                         cx,
                     );
+                    resident.view()
                 });
-                // The COUNTS are the core's — it applied existing-wins and
-                // knows what actually happened. An import that reports nothing
-                // is a feature that looks broken.
-                let report = resident::resident::<Contacts>(cx)
-                    .read(cx)
-                    .view()
-                    .last_import;
-                if let Some(report) = report {
-                    this.import_result = Some((
+                // A refusal and a report are mutually exclusive, and the
+                // refusal comes FIRST — a file that was rejected wrote
+                // nothing, and "added 0, skipped 0" would describe that as a
+                // successful import of an empty address book.
+                let refused = (
+                    this.contacts.import_fail_title.clone(),
+                    this.contacts.import_fail_body.clone(),
+                );
+                this.import_result = Some(match (view.import_failure, view.last_import) {
+                    (Some(_), _) => refused,
+                    // The COUNTS are the core's — it applied existing-wins and
+                    // knows what actually happened. An import that reports
+                    // nothing is a feature that looks broken.
+                    (None, Some(report)) => (
                         this.contacts.import_done_title.clone(),
                         SharedString::from(crate::wallet::fill(
                             &crate::wallet::fill(
@@ -6681,8 +6683,18 @@ impl WalletPage {
                             "skipped",
                             &report.skipped.to_string(),
                         )),
-                    ));
-                }
+                    ),
+                    // Neither: `ImportFile` fails closed until the ledger is
+                    // loaded, so nothing was read and nothing was written.
+                    // Drawing no dialog here would be this whole sweep's own
+                    // defect committed on the way out of it.
+                    (None, None) => refused,
+                });
+                // The words are on this screen now; the core's one-shot line
+                // must not survive into the next import.
+                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(ContactEvent::ImportAcknowledged, cx);
+                });
                 cx.notify();
             })
             .ok();
@@ -6694,32 +6706,54 @@ impl WalletPage {
     ///
     /// The extension decides the format, because that is the choice the save
     /// dialog already asked them to make — a `.csv` that contains JSON is a
-    /// file nothing opens.
+    /// file nothing opens. The BYTES are the core's: one serializer, so a
+    /// backup taken on the desktop restores on the web.
     fn export_contacts(cx: &mut Context<Self>) {
-        let view = resident::resident::<Contacts>(cx).read(cx).view();
-        let contacts = view.contacts.clone();
-        let groups = view.groups.clone();
-        let now_iso = crate::executor::now_iso();
         // The save dialog opens where a person keeps their files, not where
         // this app keeps its state. `.` would open wherever the binary was
         // launched from, which on a double-click is nowhere useful.
         let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
         let target = cx.prompt_for_new_path(&directory, Some("vela-contacts.json"));
-        cx.spawn(async move |_, _| {
+        cx.spawn(async move |page, cx| {
             let Ok(Ok(Some(path))) = target.await else {
                 return;
             };
-            let csv = path
+            let format = if path
                 .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"));
-            let content = if csv {
-                crate::executor::contact_io::to_csv(&contacts, &groups)
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("csv"))
+            {
+                ContactFileFormat::Csv
             } else {
-                crate::executor::contact_io::to_json(&contacts, &groups, &now_iso)
+                ContactFileFormat::Json
             };
-            if let Err(error) = std::fs::write(&path, content) {
-                eprintln!("[vela-wallet] contacts export: {}: {error}", path.display());
-            }
+            let exported_at_iso = crate::executor::now_iso();
+            page.update(cx, |_, cx| {
+                let file = resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(
+                        ContactEvent::ExportRequested {
+                            scope: ContactExportScope::All,
+                            format,
+                            exported_at_iso,
+                        },
+                        cx,
+                    );
+                    resident.view().export
+                });
+                let Some(file) = file else {
+                    // The core produced nothing to hand over. Never write an
+                    // empty file over the path somebody chose.
+                    return;
+                };
+                if let Err(error) = std::fs::write(&path, &file.content) {
+                    eprintln!("[vela-wallet] contacts export: {}: {error}", path.display());
+                    // The one-shot stays in the view: nothing was handed over.
+                    return;
+                }
+                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(ContactEvent::ExportTaken, cx);
+                });
+            })
+            .ok();
         })
         .detach();
     }

@@ -11,12 +11,14 @@
 //! row shows, and which letter it files under — and then groups the rows the
 //! core already ordered.
 
+use std::collections::HashMap;
+
 use gpui::SharedString;
 
 use vela_core::app::contacts::{Contact, ContactsView};
 
 use crate::contacts::fixtures::ContactDetailModel;
-use crate::contacts::model::{ContactRowModel, section_of, shorten};
+use crate::contacts::model::{ContactRowModel, shorten};
 
 /// The name a row shows: the person's own label, else a resolved identity, else
 /// the shortened address.
@@ -50,9 +52,22 @@ pub fn group_members(
     index: usize,
 ) -> Option<(SharedString, Vec<ContactRowModel>)> {
     let group = view.groups.get(index)?;
+    // A group's rows carry the same letter the directory filed each member
+    // under — the core's, looked up, not re-derived per list.
+    let letters = letters(view);
     Some((
         SharedString::from(group.name.clone()),
-        group.members.iter().map(row).collect(),
+        group
+            .members
+            .iter()
+            .map(|contact| {
+                let letter = letters
+                    .get(&contact.address.to_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| SharedString::from(UNFILED));
+                row(contact, letter)
+            })
+            .collect(),
     ))
 }
 
@@ -146,38 +161,80 @@ pub fn groups(view: &ContactsView) -> Vec<(SharedString, SharedString, u32)> {
 /// One row per contact, in the core's order.
 #[must_use]
 pub fn rows(view: &ContactsView) -> Vec<ContactRowModel> {
-    view.contacts.iter().map(row).collect()
+    let letters = letters(view);
+    view.contacts
+        .iter()
+        .map(|contact| {
+            let letter = letters
+                .get(&contact.address.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| SharedString::from(UNFILED));
+            row(contact, letter)
+        })
+        .collect()
 }
 
-/// One contact as a row. The name precedence is `display_name`'s, and the
-/// section is derived from the name that will actually be drawn — deriving it
-/// from a different string is how a row files under a letter it does not show.
-fn row(contact: &Contact) -> ContactRowModel {
-    let name = display_name(contact);
+/// The letter the CORE filed each address under.
+///
+/// Spec 028 moved the A–Z rule into `app/contacts_initials.rs` — a per-codepoint
+/// pinyin initial table, so 阿豪 files under A rather than the `#` this shell's
+/// own ASCII test produced. Two clients disagreeing about which letter one
+/// person lives under is the kind of divergence nobody reports and everybody
+/// notices.
+fn letters(view: &ContactsView) -> HashMap<String, SharedString> {
+    let mut out = HashMap::new();
+    for section in &view.sections {
+        let letter = SharedString::from(section.letter.clone());
+        for address in &section.addresses {
+            out.insert(address.to_lowercase(), letter.clone());
+        }
+    }
+    out
+}
+
+/// A contact the core did not file. Not reachable through the core's own view
+/// (it sections every contact it lists), so this is the shape of a
+/// disagreement between the two lists, drawn rather than panicked on.
+const UNFILED: &str = "#";
+
+/// One contact as a row. The name precedence is `display_name`'s; the letter
+/// is the core's, never re-derived here.
+fn row(contact: &Contact, letter: SharedString) -> ContactRowModel {
     ContactRowModel {
-        section: section_of(&name),
-        name,
+        section: letter,
+        name: display_name(contact),
         address_display: shorten(&contact.address),
         address_full: SharedString::from(contact.address.clone()),
     }
 }
 
-/// The roster, grouped into the A–Z sections the screen draws.
+/// The roster as the screen draws it — the core's directory, looked up.
 ///
-/// Grouping only — **not** sorting. Re-sorting here would silently override the
-/// core's favourites-first, most-recent-next ordering, which is a product rule
-/// it owns and tests. Consecutive rows sharing a letter become one section, so
-/// the core's order survives intact.
+/// Neither grouping nor sorting is decided here any more. `ContactsView.sections`
+/// arrives already lettered (A–Z then `#`) with the book's own order inside each
+/// letter, so this only resolves each address back to the contact it names.
+/// The run-length grouping this used to do also had a bug the core does not:
+/// two non-adjacent contacts under one letter became two sections.
 #[must_use]
 pub fn sections(view: &ContactsView) -> Vec<(SharedString, Vec<ContactRowModel>)> {
-    let mut out: Vec<(SharedString, Vec<ContactRowModel>)> = Vec::new();
-    for row in rows(view) {
-        match out.last_mut() {
-            Some((letter, rows)) if *letter == row.section => rows.push(row),
-            _ => out.push((row.section.clone(), vec![row])),
-        }
-    }
-    out
+    let by_address: HashMap<String, &Contact> = view
+        .contacts
+        .iter()
+        .map(|contact| (contact.address.to_lowercase(), contact))
+        .collect();
+    view.sections
+        .iter()
+        .map(|section| {
+            let letter = SharedString::from(section.letter.clone());
+            let rows = section
+                .addresses
+                .iter()
+                .filter_map(|address| by_address.get(&address.to_lowercase()).copied())
+                .map(|contact| row(contact, letter.clone()))
+                .collect();
+            (letter, rows)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -201,14 +258,68 @@ mod tests {
         }
     }
 
+    /// A view whose directory is built by the CORE's rule, not by an empty
+    /// `Vec` — an empty `sections` would file every row under `#` and leave
+    /// these tests passing while proving nothing about the letters.
     fn view(contacts: Vec<Contact>) -> ContactsView {
         ContactsView {
             loaded: true,
+            sections: vela_core::app::contacts::section_contacts(&contacts),
             contacts,
             groups: Vec::new(),
             last_import: None,
+            import_failure: None,
+            export: None,
             recipient: None,
         }
+    }
+
+    /// The letter now comes from spec 028's per-codepoint table, so a Chinese
+    /// name files under its pinyin initial. This shell's own rule filed 阿豪
+    /// under `#`, which is the same person in a different place on two
+    /// clients.
+    #[test]
+    fn a_chinese_name_files_under_its_pinyin_initial() {
+        let view = view(vec![contact(
+            "0xaaaa000000000000000000000000000000000001",
+            Some("阿豪"),
+            None,
+        )]);
+        assert_eq!(rows(&view)[0].section, SharedString::from("A"));
+        assert_eq!(sections(&view)[0].0, SharedString::from("A"));
+    }
+
+    /// The run-length grouping this file used to do produced TWO `A` sections
+    /// when the book's order interleaved them. The core's directory does not.
+    #[test]
+    fn one_letter_is_one_section_however_the_book_is_ordered() {
+        let view = view(vec![
+            contact(
+                "0xaaaa000000000000000000000000000000000001",
+                Some("Ada"),
+                None,
+            ),
+            contact(
+                "0xbbbb000000000000000000000000000000000002",
+                Some("Bo"),
+                None,
+            ),
+            contact(
+                "0xcccc000000000000000000000000000000000003",
+                Some("Amy"),
+                None,
+            ),
+        ]);
+        let letters: Vec<_> = sections(&view).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            letters,
+            vec![SharedString::from("A"), SharedString::from("B")]
+        );
+        assert_eq!(
+            sections(&view)[0].1.len(),
+            2,
+            "Ada and Amy share their letter"
+        );
     }
 
     #[test]
@@ -360,24 +471,31 @@ mod tests {
         assert!(groups(&view(Vec::new())).is_empty());
     }
 
-    /// The core sorts favourites first, then most recent. Grouping must not
-    /// quietly re-sort that away.
+    /// Two rules, and 028 moved the line between them.
+    ///
+    /// The LETTERS are a directory: A–Z then `#`, so `Ada` heads the list even
+    /// though the book puts the Zs first. Inside a letter the book's own order
+    /// — favourites first, then most recent — must survive untouched; that is
+    /// the core's product rule and re-sorting it here would silently override
+    /// it. This test asserted the old shell rule (letters in book order) and
+    /// is updated, not deleted: half of it was always right.
     #[test]
-    fn sectioning_groups_without_reordering() {
+    fn the_letters_are_a_directory_and_the_book_orders_within_one() {
         let rows = view(vec![
             contact("0x1", Some("Zoe"), None),
             contact("0x2", Some("Zack"), None),
             contact("0x3", Some("Ada"), None),
         ]);
         let sections = sections(&rows);
+        assert_eq!(sections.len(), 2);
         assert_eq!(
-            sections.len(),
-            2,
-            "two runs of letters, not two sorted buckets"
+            sections[0].0,
+            SharedString::from("A"),
+            "A–Z, not book order"
         );
-        assert_eq!(sections[0].0, SharedString::from("Z"));
+        assert_eq!(sections[1].0, SharedString::from("Z"));
         assert_eq!(
-            sections[0]
+            sections[1]
                 .1
                 .iter()
                 .map(|r| r.name.to_string())
@@ -385,7 +503,6 @@ mod tests {
             vec!["Zoe", "Zack"],
             "the core's order inside a letter must survive"
         );
-        assert_eq!(sections[1].0, SharedString::from("A"));
     }
 
     /// A name that is not a letter files under `#`, as the mocks draw.

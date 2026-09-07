@@ -15,24 +15,56 @@
 	interface Props {
 		label: string;
 		lines: [string, string];
+		/** The whole address, when there is one: the artwork opens the viewer on it. */
+		address?: string;
 		identiconSvg: string;
 		pickLabel: string;
 		scanLabel?: string;
 		note?: string;
 		onpick?: () => void;
 		onscan?: () => void;
+		/**
+		 * Present ⇒ the address can be typed or pasted here (spec 026). Absent,
+		 * the field stays the two drawn lines the gallery renders.
+		 */
+		oninput?: (value: string) => void;
+		placeholder?: string;
 	}
 
-	let { label, lines, identiconSvg, pickLabel, scanLabel, note, onpick, onscan }: Props = $props();
+	let {
+		label,
+		lines,
+		address,
+		identiconSvg,
+		pickLabel,
+		scanLabel,
+		note,
+		onpick,
+		onscan,
+		oninput,
+		placeholder
+	}: Props = $props();
 </script>
 
 <div class="block">
 	<span class="label">{label}</span>
-	<div class="field">
-		<Identicon svg={identiconSvg} size="row" />
-		<span class="address">
-			{#each lines as line, i (i)}<span class="line">{line}</span>{/each}
-		</span>
+	<div class="field" data-field>
+		<Identicon svg={identiconSvg} size="row" {address} />
+		{#if oninput}
+			<input
+				class="address entry"
+				spellcheck="false"
+				autocomplete="off"
+				aria-label={label}
+				placeholder={placeholder ?? ''}
+				value={lines.join('')}
+				oninput={(event) => oninput(event.currentTarget.value)}
+			/>
+		{:else}
+			<span class="address">
+				{#each lines as line, i (i)}<span class="line">{line}</span>{/each}
+			</span>
+		{/if}
 		<button type="button" aria-label={pickLabel} onclick={onpick}>
 			<Icon icon={UTILITY_ICONS['user-round']} size="md" />
 		</button>
@@ -55,6 +87,17 @@
 	.label {
 		font-size: calc(var(--text-sm) * var(--text-scale, 1));
 		color: var(--color-fg-subtle);
+	}
+
+	.entry {
+		border: none;
+		background: none;
+		padding: 0;
+		min-width: 0;
+	}
+
+	.entry:focus {
+		outline: none;
 	}
 
 	.field {
