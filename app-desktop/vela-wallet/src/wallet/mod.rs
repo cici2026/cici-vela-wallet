@@ -9,6 +9,18 @@ pub mod fixtures;
 pub mod live;
 pub mod money;
 pub mod page;
+/// The signing panel's four machines as one journey.
+///
+/// Unwired until the browser's ipc handler can reach the page to open one —
+/// the last hop, and the one that needs a gpui handle inside a wry callback.
+/// Marked rather than left to make the warning count meaningless, and **taken
+/// off when that hop lands**: an allow marks callees live too (spec 032
+/// lesson 1).
+#[allow(
+    dead_code,
+    reason = "opened by the browser's request hop, spec 032 phase 19"
+)]
+pub mod signing_host;
 
 use gpui::SharedString;
 

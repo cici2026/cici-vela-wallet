@@ -251,6 +251,33 @@ fn on_request(request: wry::http::Request<String>) {
     deliver(&answer.to_string());
 }
 
+/// Answer a request the signing panel decided.
+///
+/// The envelope the provider is waiting on: its own `id`, and either a result
+/// or an error. The CODE comes from the core — 4001 for a decline, 4900 for
+/// stuck-but-submitted — because a wallet that picked its own code here could
+/// report a refusal as a failure, and a dApp treats those differently.
+#[allow(
+    dead_code,
+    reason = "called by the signing host once phase 19 opens one"
+)]
+pub fn respond(id: &str, payload: &vela_core::app::sign_request::SignResponsePayload) {
+    use vela_core::app::sign_request::SignResponsePayload;
+    let answer = match payload {
+        SignResponsePayload::Ok { result } => serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "result": result,
+        }),
+        SignResponsePayload::Err { code, message, .. } => serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "error": { "code": code, "message": message },
+        }),
+    };
+    deliver(&answer.to_string());
+}
+
 fn deliver(json: &str) {
     with_view(|view| {
         let script = format!(
