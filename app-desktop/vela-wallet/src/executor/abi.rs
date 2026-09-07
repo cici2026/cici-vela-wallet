@@ -44,6 +44,7 @@ mod sel {
     pub const QUOTE_V3: &str = "c6a5026a"; // quoteExactInputSingle((address,address,uint256,uint24,uint160))
     pub const GET_AMOUNTS_OUT: &str = "5509a1ac"; // getAmountsOut(uint256,(address,address,bool,address)[])
     pub const LATEST_ROUND_DATA: &str = "feaf968c"; // latestRoundData()
+    pub const ALLOWANCE: &str = "dd62ed3e"; // allowance(address,address)
 }
 
 /// One entry of an `aggregate3` batch. `allow_failure` is always true on the
@@ -271,6 +272,17 @@ pub fn dec_aggregate3(hex: &str) -> Vec<McResult> {
 #[must_use]
 pub fn enc_balance_of(address: &str) -> String {
     format!("0x{}{}", sel::BALANCE_OF, addr(address))
+}
+
+/// `allowance(owner, spender)` — what the spender may ALREADY move.
+///
+/// `increaseAllowance` is an increment, not a replacement, so the sheet cannot
+/// say what the approval will come to without this: the resulting total is
+/// existing + increment, and showing only the increment understates what the
+/// person is agreeing to.
+#[must_use]
+pub fn enc_allowance(owner: &str, spender: &str) -> String {
+    format!("0x{}{}{}", sel::ALLOWANCE, addr(owner), addr(spender))
 }
 
 /// `decimals()`.

@@ -913,6 +913,36 @@ MAIN world + isolated world 用 `window.postMessage` 对话,wry 没有 isolated 
 都还没接。Linux 依然在 `cfg(not(target_os = "linux"))` 外面——**创始人已定:Linux 要支持,
 但先上 mac + win**。
 
+## Phase 15 — B 组开工:第一台机器(approval_guard)
+
+签名面板三台机器,9,362 行核心。**这是多刀的活,不是一刀**。本 phase 落第一台,
+把模式立住。
+
+`approval_guard` 只问三个 `eth_call`,但三个都是关于同一件事:**人到底同意让合约动多少**。
+
+| 操作 | 为什么它关钱 |
+|---|---|
+| `ReadTokenMetadata` | 没有 decimals,授权额度就渲染在错误的数量级上。`1000000` 是一千个还是一个,只由这一个调用决定 |
+| `ReadErc20Allowance` | `increaseAllowance` 是**加**不是**换**。结果总额 = 已有 + 增量;只显示增量就低估了人正在同意的东西 |
+| `ReadErc20Balance` | 「永不无限额」要给人一个能填的数,自己的余额是他能推理的那个(issue #86) |
+
+核心把失败分了级,壳不能抹平:`None` 元数据是"整批读失败",而某个代币**不在**列表里
+是"这个解析不出来"——两者的兜底不同。批次回来长度不对时我返回 `None` 而不是空列表,
+就是这条。
+
+**新增 `abi::enc_allowance`**(`allowance(address,address)`,选择器 `dd62ed3e`)。
+
+### 一个只有真网能抓到的错
+
+第一版 `eth_call` 写成 `pool::call(...).ok()?.as_str()`——**`pool::call` 答的是整个
+JSON-RPC 信封,不是 result**。把信封当字符串读,一个完全正常的调用会静静地答 `None`,
+于是三个好读变成"整批失败"。真网测试当场炸出来;离线测试永远看不到,因为它根本不发请求。
+房子里现成的写法(`manage_tokens::eth_call`)是 `.get("result")`,照抄就对——
+**这就是"先看隔壁怎么写"比"自己想当然"便宜的地方**。
+
+两个测试:一条离线(**没有代币要读 ≠ 读失败**,必须答 `Some(vec![])` 且不发请求),
+一条 `#[ignore]` 真网(Gnosis 上的 USDC.e:符号有、6 位小数、余额读得到)。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
