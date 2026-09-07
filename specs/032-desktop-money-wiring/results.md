@@ -309,8 +309,9 @@ pump of both machines, the same performs as the host minus the thread):
 | `Continue` | stage **Confirm**; fee **0.010 xDAI** native, quoted (not a local fallback), recipient `0xee2c…f0dd`; treasury none; no alert; **`can_confirm: true`** |
 
 That fee is the very figure 026's web sweep signed on the same Safe
-(0.001 sent + 0.010 in-band). The slide is behind `VELA_LIVE_SEND=1` and was
-NOT pulled: it spends dust, and that is the founder's call (SC-303).
+(0.001 sent + 0.010 in-band). The slide was behind `VELA_LIVE_SEND=1` — it
+spends dust, and that was the founder's call. **They made it on 2026-09-07;
+the slide is pulled, and SC-303 is proven.** See below.
 
 **Recorded, not done**:
 - `AddNetwork` from a locked request answers the ported `catch` (`Error`);
@@ -456,6 +457,31 @@ are typed in the batch importer or not at all).
 1 pre-existing warning · gallery sweep every state rendered · the live spine
 still reaches Confirm with the relay's real 0.010 xDAI quote.
 
+## SC-303 — the dust moved
+
+创始人 2026-09-07 点头,滑块拉了。
+
+```
+after continue: stage=Confirm fee=("10000000000000000", Native, "0xee2cca98…f0dd")
+                fee_busy=false treasury=None alerts=[] can_confirm=true
+relay: submitting sender=0x88cCA0…6894 nonce=…04 initCode=no callData=452B signature=429B
+after slide: user_op_hash=Some("0x4d1cf38350afc661b18caa4c9862ffcef2d2a579ac1e4f6e3cec24d4e529849c")
+test result: ok. 1 passed … finished in 88.86s
+```
+
+**链上核对(不看 `tx_status`——见第 3 条教训,那个字段签完名就翻)**:
+
+| 查什么 | 屏幕说 | 链上 |
+|---|---|---|
+| 金标 Safe 余额差 | 0.001 + 0.010 = **0.011** | 0.75897 → **0.74797**,差 **0.011000**,逐位对上 |
+| 收款方 fixture #1 `0x031d…772b` | +0.001 | 1.01599999… xDAI(收到) |
+| 中继收费地址 `0xee2c…f0dd` | 0.010 | 0.078896… xDAI(收到) |
+| **`receipt.status`** | — | **`0x1`**,`eth_getUserOperationReceipt` 的 `success: true` |
+| 上链交易 | — | `0x98c8f65c6a9fa77906113022974ef2af2f74049c61ef718aa00fad0cfe9adfc9`,区块 48120671 |
+
+**SC-303:达标。** 桌面从真持仓、真报价、固定密钥集签名、真中继提交,到链上收据状态,
+整条链路走通,数字和屏幕一致。
+
 ## Phase 7 — the same sweep, on somebody else's screen
 
 交接表里的第 9 条:加网络向导。**不是本刀画的界面**,但是本刀 phase 6 那个毛病的同一株
@@ -518,7 +544,8 @@ still reaches Confirm with the relay's real 0.010 xDAI quote.
 
 ## 一句话状态
 
-**桌面能发钱,只差最后一推**:金标 Safe 真网走到确认页(真持仓、真报价 0.010 xDAI、
+**桌面发过钱了**(SC-303 达标,2026-09-07:`0x98c8f65c…dfc9`,`receipt.status=0x1`,
+Safe 少了 0.011000 逐位对上)。以下是那一推之前的状态,留作背景:**桌面能发钱,只差最后一推**:金标 Safe 真网走到确认页(真持仓、真报价 0.010 xDAI、
 滑块已武装),`SlideConfirm` 藏在 `VELA_LIVE_SEND=1` 后面没拉——花真钱是创始人的决定
 (SC-303)。固定密钥集签名者在 vela-core(`dev-fixtures`),4337 UserOp 装配在 vela-core
 (`user_op.rs`,与 EIP-712 哈希器和 alloy ABI 编码器交叉验证),中继/链读/提交主干、
@@ -552,7 +579,7 @@ vela-core **1,264**,fmt clean,gallery 36 态全渲染,**两种 feature 配置下
 要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。本刀两次都是
 wasm 3,630,664 字节不变、只有指纹改名。
 
-## SC-303:那一推怎么拉
+## SC-303:那一推怎么拉(**已拉,2026-09-07**;命令留着,复跑还会再花一次 dust)
 
 ```bash
 env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPACE=1 \
