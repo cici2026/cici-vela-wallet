@@ -1074,6 +1074,69 @@ web 的签名单读**四个视图**(`sign` / `clear` / `guard` / `fee`),所以�
 模块挂 `#[allow(dead_code, reason = "opened by the browser's request hop, phase 19")]`,
 和 phase 17 同一个规矩:**接上时必须摘**,因为 allow 会连带把被调用者标活。
 
+## Phase 19 — 最后一跳,和一个"什么都不报"的失败
+
+浏览器的 ipc handler 现在够得到 page,dApp 的请求真的走进机器了。全程实测:
+
+```
+browser rpc: eth_chainId from http://127.0.0.1:8137/
+browser answer: {"dir":"res","id":"…:1","error":{"code":4900,…}}
+browser rpc: eth_accounts …
+browser answer: {"dir":"res","id":"…:2",…}
+```
+
+页面 → provider → bridge → ipc → sink → page → 判决 → deliver → provider → promise 结算,
+id 逐个对上。
+
+### 这一跳为什么要延后一拍
+
+wry 从平台回调里调 ipc handler,而 `AsyncApp::update` 会 **borrow 那个 app cell**;
+在另一次 borrow 里面同步这么干,在钱包里就是一次 panic。所以 sink 走
+`AsyncApp::spawn` 落到前台执行器,活儿在下一个 runloop 轮次里做。
+
+### 谁决定开不开那一列
+
+**核心。** 我第一版写成"来请求就 `panel = Signing`"——那会让页面只是问一句
+"现在是哪条链"就给人推一张签名单。改成:开完机器看 `SignSurface`,
+`Hidden` 就什么都不显示。dApp 发的大多数东西人根本不该看见。
+
+### 那个什么都不报的失败
+
+接完第一版,**一个请求都没到**。原因:`inpage.js` 第 29 行是
+`import { CHANNEL, … } from './lib/protocol.js'` —— 它是 **ES 模块**,
+而 initialization script 是 classic。原样注入就是**语法错误**:
+文件根本没跑、`window.ethereum` 从来没出现、于是每一个请求都"静静地从未发生"。
+**没有任何东西报告这件事**:宿主收不到错误,页面只是没有钱包。
+
+修法是把 `protocol.js` 去掉 `export` 前缀、`inpage.js` 去掉那一行 `import`,
+拼进一个 IIFE。**磁盘上两个文件一个字节都没动**,两个模块关键字是在 Rust 里去掉的。
+没选"自定义协议 + 动态 `import()`"是因为**严格 CSP 的 dApp 可以拒绝它**,
+而"在某些站点能用"的 provider 比哪儿都不能用更糟。
+
+两条测试盯着这里:注入的脚本里**不许再有 import/export**(哪个文件再长出一个就大声失败),
+以及**它还得是真的那个 provider**(channel 常量、EIP-6963 公告、两个文件的长度)
+——一个悄悄拼出空字符串的实现能完美通过前一条。
+
+### 读方法暂时被拒绝,不是被回答
+
+`sign_request` 只管**签名方法**;`eth_chainId` / `eth_accounts` 是读和权限,
+归 `dapp_session` / `dapp_permissions`(C 组,没接)。所以 page 按方法分流:
+签名的进机器,其余**答 4900**。
+
+**不是 4001**:人没有拒绝,而一个把"拒绝"读出来的 dApp 会告诉他们"你拒绝了某件
+你从没看见的事"。也**没有让壳自己回答**读方法——那是壳替核心做决定。
+
+### allow 摘掉了
+
+phase 17/18 挂的两个 `allow(dead_code)` 都拿掉了,警告数仍是 **42**——
+这就是接线是真的的证明:allow 一摘,编译器在这三个执行器和宿主里找不出一个死项
+(第 1 条教训说的正是 allow 会连带把被调用者标活)。
+
+### 还欠
+
+签名列现在开得起来,但**画的还是 fixture**:核心视图 → 已画好的 block 渲染器
+那个 live 构造器还没写。C 组三台机器(读、权限、历史)没接,读方法因此被拒。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

@@ -329,6 +329,14 @@ pub struct WalletPage {
     /// open and discarded with it — a second send starts from a fresh
     /// machine, never a resumed one.
     send_host: Option<gpui::Entity<SendHost>>,
+    /// The signing journey's four machines, born with a dApp request and gone
+    /// when the core hides the sheet. `None` means the panel draws its mock,
+    /// which is what the gallery and an unsigned-in window get.
+    #[cfg(not(target_os = "linux"))]
+    signing_host: Option<gpui::Entity<crate::wallet::signing_host::SigningHost>>,
+    /// The request sink is installed once per page, not once per frame.
+    #[cfg(not(target_os = "linux"))]
+    dapp_requests_armed: bool,
     send_amount_focus: gpui::FocusHandle,
     send_recipient_focus: gpui::FocusHandle,
     /// DSD2cL, live: the rate field's focus.
@@ -583,6 +591,10 @@ impl WalletPage {
             asset_detail: None,
             add_token_focus: cx.focus_handle(),
             send_host: None,
+            #[cfg(not(target_os = "linux"))]
+            signing_host: None,
+            #[cfg(not(target_os = "linux"))]
+            dapp_requests_armed: false,
             send_amount_focus: cx.focus_handle(),
             send_recipient_focus: cx.focus_handle(),
             send_rate_focus: cx.focus_handle(),
@@ -6206,6 +6218,7 @@ impl WalletPage {
             #[cfg(not(target_os = "linux"))]
             {
                 let home = self.browser_home.clone();
+                self.arm_dapp_requests(cx);
                 gpui::canvas(
                     |_, _, _| (),
                     move |bounds, (), window, _| {
@@ -6251,6 +6264,117 @@ impl WalletPage {
             .child(strip)
             .child(toolbar)
             .child(body)
+    }
+
+    /// Point the browser's requests at this page.
+    ///
+    /// Installed once, and re-installing is harmless — the sink replaces
+    /// itself, which is what a page rebuilt after a route change needs.
+    ///
+    /// The hop is DEFERRED on purpose. wry calls its ipc handler from a
+    /// platform callback, and `AsyncApp::update` borrows the app cell; doing
+    /// that synchronously inside another borrow is a panic in a wallet. So the
+    /// sink spawns onto the foreground executor and the work lands on the next
+    /// run-loop turn instead.
+    #[cfg(not(target_os = "linux"))]
+    fn arm_dapp_requests(&mut self, cx: &mut Context<Self>) {
+        if self.dapp_requests_armed {
+            return;
+        }
+        self.dapp_requests_armed = true;
+        let page = cx.entity().downgrade();
+        let async_cx = cx.to_async();
+        crate::webview::on_request_to(Box::new(move |incoming| {
+            let page = page.clone();
+            async_cx
+                .spawn(async move |cx| {
+                    page.update(cx, |page, cx| page.open_signing(incoming, cx))
+                        .ok();
+                })
+                .detach();
+        }));
+    }
+
+    /// The methods the signing panel owns.
+    ///
+    /// Everything else a dApp sends — `eth_chainId`, `eth_accounts`,
+    /// `wallet_switchEthereumChain` — is a READ or a permission, and belongs
+    /// to `dapp_session` / `dapp_permissions`, which are the C group and not
+    /// wired. `sign_request` does not handle them and would leave them
+    /// unanswered, so they are refused here instead: a provider promise that
+    /// never settles is the worst thing this transport can produce (spec 027
+    /// D37), and the wallet answering them itself would be a shell deciding
+    /// what a core owns.
+    #[cfg(not(target_os = "linux"))]
+    fn is_signing_method(method: &str) -> bool {
+        matches!(
+            method,
+            "eth_sendTransaction"
+                | "wallet_sendCalls"
+                | "personal_sign"
+                | "eth_sign"
+                | "eth_signTypedData"
+                | "eth_signTypedData_v3"
+                | "eth_signTypedData_v4"
+        )
+    }
+
+    /// A dApp asked for something. The four machines are born here.
+    #[cfg(not(target_os = "linux"))]
+    fn open_signing(&mut self, incoming: crate::webview::Incoming, cx: &mut Context<Self>) {
+        if !Self::is_signing_method(&incoming.method) {
+            crate::webview::refuse_unsupported(&incoming.id, &incoming.method);
+            return;
+        }
+        let Some(account) = money::active_account() else {
+            // No account, no signature. Refused rather than dropped.
+            crate::webview::refuse_unsupported(&incoming.id, &incoming.method);
+            return;
+        };
+        let request = crate::wallet::signing_host::IncomingRequest {
+            id: incoming.id,
+            method: incoming.method,
+            params_json: incoming.params_json,
+            origin: incoming.origin,
+            // One browser, one transport. The id is what will pick between
+            // transports when there is more than one, and it must be stable
+            // for the life of this one.
+            transport_id: "browser".to_owned(),
+            chain_id: self.receive_chain,
+        };
+        let window_handle = self.window_handle;
+        let host = cx.new(|cx| {
+            crate::wallet::signing_host::SigningHost::open(&account, request, window_handle, cx)
+        });
+        cx.observe(&host, |page, host, cx| {
+            // WHETHER there is a column is the core's answer, not this
+            // file's. Most of what a dApp sends — `eth_chainId`,
+            // `eth_accounts` — is answered without a person ever seeing it,
+            // and a panel that opened for every request would put a signing
+            // sheet in front of somebody for a page merely asking which chain
+            // it is on.
+            if host.read(cx).closed {
+                // The request is over: the column goes, and so do its
+                // machines — a decoded intent must never outlive the request
+                // it decoded.
+                page.signing_host = None;
+                if page.panel == PanelId::Signing {
+                    page.panel = PanelId::None;
+                }
+            } else {
+                page.panel = PanelId::Signing;
+            }
+            cx.notify();
+        })
+        .detach();
+        // The same question, once, for a request the core answers before any
+        // observation fires.
+        if host.read(cx).closed {
+            return;
+        }
+        self.signing_host = Some(host);
+        self.panel = PanelId::Signing;
+        cx.notify();
     }
 
     /// DE1/DE2's start page.

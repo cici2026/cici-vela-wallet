@@ -43,6 +43,41 @@ use gpui::{Bounds, Pixels, Window};
 /// a second set of bugs — and this one has an extension's worth of use behind
 /// it.
 const INPAGE_JS: &str = include_str!("../../../app-web/vela-wallet/extension/inpage.js");
+/// The provider's own constants — `inpage.js` imports these.
+const PROTOCOL_JS: &str = include_str!("../../../app-web/vela-wallet/extension/lib/protocol.js");
+
+/// The provider as ONE classic script.
+///
+/// `inpage.js` is an ES module: it opens with
+/// `import { CHANNEL, … } from './lib/protocol.js'`. An initialization script
+/// is classic, so injecting it verbatim is a syntax error — the file never
+/// runs, `window.ethereum` never appears, and **every request silently never
+/// happens**. That is exactly how it failed the first time this was wired,
+/// and nothing said so: no error reached the host, the page simply had no
+/// wallet in it.
+///
+/// Concatenating is the CSP-proof fix. Serving the module over a custom
+/// protocol and pulling it in with a dynamic `import()` would keep both files
+/// untouched, but a dApp with a strict Content-Security-Policy can refuse
+/// that, and a provider that works on some sites and not others is worse than
+/// one that works everywhere.
+///
+/// Both files stay byte-identical on disk; the two module keywords are removed
+/// HERE, and the test below fails if either file grows another one.
+fn provider_script() -> String {
+    let constants: String = PROTOCOL_JS
+        .lines()
+        .map(|line| line.strip_prefix("export ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provider: String = INPAGE_JS
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("import "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    // One scope, so the constants reach the provider and nothing on the page.
+    format!("(() => {{\n{constants}\n{provider}\n}})();")
+}
 
 /// The content script's half, in eleven lines.
 ///
@@ -68,6 +103,32 @@ const BRIDGE_JS: &str = r#"
   };
 })();
 "#;
+
+/// One EIP-1193 request, with the two facts the page cannot forge attached by
+/// this side of the boundary.
+pub struct Incoming {
+    pub id: String,
+    pub method: String,
+    pub params_json: String,
+    /// From the WEBVIEW's own URL, never from the envelope.
+    pub origin: String,
+}
+
+/// Where a request goes once it has an origin.
+///
+/// Installed by the page, because only the page knows which window and which
+/// column should answer. Not `Send`: it runs on the main thread, where the
+/// webview's callback already is.
+type RequestSink = Box<dyn Fn(Incoming)>;
+
+thread_local! {
+    static SINK: RefCell<Option<RequestSink>> = const { RefCell::new(None) };
+}
+
+/// Hand requests to the page. Called once, when the page builds the browser.
+pub fn on_request_to(sink: RequestSink) {
+    SINK.with(|slot| *slot.borrow_mut() = Some(sink));
+}
 
 /// The one browser. A `WebView` is neither `Send` nor `Sync` and belongs to the
 /// window it was built as a child of, so it lives on the main thread with the
@@ -195,7 +256,7 @@ fn with_view(act: impl FnOnce(&wry::WebView)) {
 
 fn build(window: &Window, home: &str) -> Option<wry::WebView> {
     let built = wry::WebViewBuilder::new()
-        .with_initialization_script(INPAGE_JS)
+        .with_initialization_script(provider_script())
         .with_initialization_script(BRIDGE_JS)
         .with_ipc_handler(on_request)
         .with_url(home)
@@ -217,14 +278,16 @@ fn build(window: &Window, home: &str) -> Option<wry::WebView> {
 
 /// One EIP-1193 request from a page.
 ///
-/// Not answered yet — `dapp_session`, `dapp_permissions` and `browser_history`
-/// are the next cut. What matters is that it ANSWERS: a provider promise that
-/// never settles is the worst outcome this transport can produce (spec 027
-/// D37), so an unwired desktop refuses with 4900 rather than leaving a dApp
-/// spinning forever.
+/// The ORIGIN is read here, from the webview, and the envelope's own idea of
+/// who it is is ignored — the rule the extension's content script exists to
+/// enforce, and the reason this function and not the page attaches it.
+///
+/// A request with no sink installed is REFUSED rather than dropped: a
+/// provider promise that never settles is the worst outcome this transport
+/// can produce (spec 027 D37), and 4900 keeps "we could not answer" distinct
+/// from the 4001 that would claim the person declined.
 fn on_request(request: wry::http::Request<String>) {
-    let body = request.body();
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) else {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(request.body()) else {
         return;
     };
     let (Some(id), Some(method)) = (
@@ -233,34 +296,43 @@ fn on_request(request: wry::http::Request<String>) {
     ) else {
         return;
     };
-    // The ORIGIN is read here, from the webview, never from the envelope.
-    let origin = BROWSER.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .and_then(|browser| browser.view.url().ok())
-    });
-    println!(
-        "[vela-wallet] browser rpc: {method} from {}",
-        origin.as_deref().unwrap_or("<unknown origin>")
+    let origin = BROWSER
+        .with(|slot| slot.borrow().as_ref().and_then(|b| b.view.url().ok()))
+        .unwrap_or_default();
+    let incoming = Incoming {
+        id: id.to_owned(),
+        method: method.to_owned(),
+        params_json: parsed
+            .get("params")
+            .map(std::string::ToString::to_string)
+            .unwrap_or_else(|| "[]".to_owned()),
+        origin,
+    };
+    eprintln!(
+        "[vela-wallet] browser rpc: {} from {}",
+        incoming.method, incoming.origin
     );
-    let answer = serde_json::json!({
-        "dir": "res",
-        "id": id,
-        "error": { "code": 4900, "message": "Vela's desktop browser cannot answer requests yet" },
+    let delivered = SINK.with(|slot| {
+        slot.borrow().as_ref().map(|sink| {
+            sink(incoming);
+        })
     });
-    deliver(&answer.to_string());
+    if delivered.is_none() {
+        let answer = serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "error": { "code": 4900, "message": "Vela cannot answer this request yet" },
+        });
+        deliver(&answer.to_string());
+    }
 }
 
 /// Answer a request the signing panel decided.
 ///
 /// The envelope the provider is waiting on: its own `id`, and either a result
-/// or an error. The CODE comes from the core — 4001 for a decline, 4900 for
-/// stuck-but-submitted — because a wallet that picked its own code here could
-/// report a refusal as a failure, and a dApp treats those differently.
-#[allow(
-    dead_code,
-    reason = "called by the signing host once phase 19 opens one"
-)]
+/// or an error. The CODE is the core's — 4001 for a decline, 4900 for
+/// stuck-but-submitted — because a shell that picked its own could report a
+/// refusal as a failure, and a dApp treats those differently.
 pub fn respond(id: &str, payload: &vela_core::app::sign_request::SignResponsePayload) {
     use vela_core::app::sign_request::SignResponsePayload;
     let answer = match payload {
@@ -278,6 +350,23 @@ pub fn respond(id: &str, payload: &vela_core::app::sign_request::SignResponsePay
     deliver(&answer.to_string());
 }
 
+/// A request this wallet cannot answer yet.
+///
+/// 4900 and not 4001: the person did not decline, and a dApp that reads a
+/// decline where there was none will tell them they refused something they
+/// never saw.
+pub fn refuse_unsupported(id: &str, method: &str) {
+    let answer = serde_json::json!({
+        "dir": "res",
+        "id": id,
+        "error": {
+            "code": 4900,
+            "message": format!("Vela's desktop cannot answer {method} yet"),
+        },
+    });
+    deliver(&answer.to_string());
+}
+
 fn deliver(json: &str) {
     with_view(|view| {
         let script = format!(
@@ -286,4 +375,52 @@ fn deliver(json: &str) {
         );
         let _ = view.evaluate_script(&script);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The provider must be a CLASSIC script by the time it is injected.
+    ///
+    /// `inpage.js` is an ES module and an initialization script is not, so
+    /// injecting it verbatim is a syntax error — the file never runs,
+    /// `window.ethereum` never appears, and every request silently never
+    /// happens. Nothing reports that: no error reaches the host, the page
+    /// simply has no wallet in it. It is how this failed the first time, and
+    /// this test is what makes it fail loudly the next time either file grows
+    /// another module keyword.
+    #[test]
+    fn the_injected_provider_carries_no_module_syntax() {
+        let script = provider_script();
+        for (n, line) in script.lines().enumerate() {
+            let line = line.trim_start();
+            assert!(
+                !line.starts_with("import ") && !line.starts_with("export "),
+                "line {} is still module syntax: {line}",
+                n + 1
+            );
+        }
+    }
+
+    /// …and that it is still the real provider, not an empty scope. A
+    /// concatenation that silently produced nothing would pass the test above
+    /// perfectly.
+    #[test]
+    fn the_injected_provider_is_the_real_one() {
+        let script = provider_script();
+        assert!(
+            script.contains("'vela-1193'"),
+            "the channel constant came across from protocol.js"
+        );
+        assert!(
+            script.contains("eip6963:announceProvider"),
+            "and the announcement came across from inpage.js"
+        );
+        assert!(
+            script.len() > 10_000,
+            "both files, not one: {}",
+            script.len()
+        );
+    }
 }
