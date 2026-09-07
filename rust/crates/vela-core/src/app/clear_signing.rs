@@ -114,6 +114,10 @@ pub const DECIMALS_WARM_TIMEOUT_MS: u32 = 4_000;
 
 const SUPPORTS_INTERFACE_SELECTOR: &str = "0x01ffc9a7";
 const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
+/// `symbol()` — asked for the same reason `decimals()` is: without it an
+/// amount is rendered beside a contract address, and nobody can read what
+/// they are sending.
+const ERC20_SYMBOL_SELECTOR: &str = "0x95d89b41";
 /// ERC-165 interface ids (local-descriptors.ts `INTERFACE_IDS`).
 const IFACE_ERC721: &str = "80ac58cd";
 const IFACE_ERC1155: &str = "d9b67a26";
@@ -387,6 +391,9 @@ pub enum ClearProbe {
     SupportsErc721,
     SupportsErc1155,
     Decimals,
+    /// `symbol()`. Additive on purpose: every shell answers `RpcEthCall` by
+    /// echoing the probe back, so none of them needed a line to serve this.
+    Symbol,
 }
 
 /// What the shell observed. Raw on purpose: revert-vs-unreachable and
@@ -975,6 +982,13 @@ pub struct Model {
     token_standard_cache: BTreeMap<String, TokenStandard>,
     /// `${chain}:${addr}` → on-chain `decimals()`. Valid answers only (0–36).
     decimals_cache: BTreeMap<String, u32>,
+    /// Token symbols learned from the chain, keyed like the decimals cache.
+    ///
+    /// `KNOWN_TOKENS` is nineteen addresses with no chain id in them, so it
+    /// answers for almost nothing outside Ethereum mainnet. Everything else
+    /// used to render as `0x2a22…` beside its amount — on every shell, since
+    /// they all run this machine.
+    symbol_cache: BTreeMap<String, String>,
     erc165_scratch: BTreeMap<String, Erc165Scratch>,
     /// Bumped per request; a result carrying an older attempt is dropped
     /// (after its cache facts are absorbed).
@@ -1297,6 +1311,21 @@ fn absorb_cache_facts(model: &mut Model, result: &ClearShellResult) {
         } => {
             let verdict = interpret_supports(result.as_deref(), *rpc_error);
             record_supports(model, *chain_id, to, verdict, false);
+        }
+        ClearShellResult::RpcAnswer {
+            probe: ClearProbe::Symbol,
+            chain_id,
+            to,
+            result,
+            rpc_error: _,
+        } => {
+            // Same rule the decimals cache follows: only a real word teaches
+            // it. A revert, an empty answer or a token that returns something
+            // unreadable leaves the fallback in place rather than caching a
+            // guess about what somebody is sending.
+            if let Some(symbol) = result.as_deref().and_then(decode_abi_string) {
+                model.symbol_cache.insert(std_key(*chain_id, to), symbol);
+            }
         }
         ClearShellResult::RpcAnswer {
             probe: ClearProbe::Decimals,
@@ -1976,11 +2005,25 @@ fn begin_warm(
     let chain_id = run.req.chain_id();
     let mut ops: Vec<ClearOperation> = pending
         .iter()
-        .map(|addr| ClearOperation::RpcEthCall {
-            chain_id,
-            to: addr.clone(),
-            data: ERC20_DECIMALS_SELECTOR.to_owned(),
-            probe: ClearProbe::Decimals,
+        .flat_map(|addr| {
+            [
+                ClearOperation::RpcEthCall {
+                    chain_id,
+                    to: addr.clone(),
+                    data: ERC20_DECIMALS_SELECTOR.to_owned(),
+                    probe: ClearProbe::Decimals,
+                },
+                // Asked alongside, never gating. The warm step still finishes
+                // on the DECIMALS answers alone: a slow symbol must not hold
+                // the sheet, and its absence only costs the fallback that was
+                // there before this probe existed.
+                ClearOperation::RpcEthCall {
+                    chain_id,
+                    to: addr.clone(),
+                    data: ERC20_SYMBOL_SELECTOR.to_owned(),
+                    probe: ClearProbe::Symbol,
+                },
+            ]
         })
         .collect();
     ops.push(ClearOperation::Timer {
@@ -2987,9 +3030,19 @@ fn format_token_amount(
         guess_token_decimals(model, run.req.chain_id(), token_addr.as_deref());
     let verified = decimals_verified && !token_invalid;
     let display = format_token_value(&amount, decimals, &run.locale);
+    // The static table first (it is the TS's and stays authoritative for the
+    // nineteen it holds), then what the chain itself answered, then the
+    // address. Only the last of those leaves somebody reading a contract
+    // address where a symbol belongs.
     let symbol = match &token_addr {
         Some(addr) => known_token_symbol(addr)
             .map(str::to_owned)
+            .or_else(|| {
+                model
+                    .symbol_cache
+                    .get(&std_key(run.req.chain_id(), addr))
+                    .cloned()
+            })
             .unwrap_or_else(|| format!("{}...", take_chars(addr, 0, 6))),
         None => "tokens".to_owned(),
     };
@@ -4495,6 +4548,54 @@ fn dec_to_f64(dec: &str) -> f64 {
 
 /// A JSON-RPC result word as a small uint (for `decimals()`): oversized or
 /// malformed answers are `None`, exactly as the `BigInt` try/catch skipped.
+/// An ABI `string` return — what `symbol()` answers.
+///
+/// Two layouts, because ERC-20 predates the convention: the usual
+/// `[offset][length][data]`, and the **bytes32** a legacy token (MKR and its
+/// generation) returns as one fixed word. A declared length that does not fit
+/// the payload is read as the second shape rather than trusted — an
+/// out-of-range length is exactly what a bytes32 answer looks like to an
+/// offset reader.
+///
+/// UTF-8 or nothing: a multibyte symbol (`USD₮0`) must survive, and a lossy
+/// replacement is worse than the address fallback, because mojibake beside an
+/// amount reads as a real symbol somebody has never heard of.
+fn decode_abi_string(hex: &str) -> Option<String> {
+    let data = hex.strip_prefix("0x").unwrap_or(hex);
+    if data.len() < 64 {
+        return None;
+    }
+    // A single word with no header: bytes32.
+    if data.len() < 128 {
+        return utf8_from_hex(data.get(..64)?);
+    }
+    let length = usize::from_str_radix(data.get(64..128)?.trim_start_matches('0'), 16).ok()?;
+    let end = length.checked_mul(2).and_then(|len| len.checked_add(128));
+    match end {
+        Some(end) if length > 0 && length <= 4096 && end <= data.len() => {
+            utf8_from_hex(data.get(128..end)?)
+        }
+        // Not offset-encoded after all — read the head as bytes32.
+        _ => utf8_from_hex(data.get(..64)?),
+    }
+}
+
+/// Hex bytes as UTF-8, stopping at the first NUL: a bytes32 answer is
+/// zero-padded and the terminator is not part of the symbol.
+fn utf8_from_hex(hex: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for i in 0..hex.len() / 2 {
+        let byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+        if byte == 0 {
+            break;
+        }
+        bytes.push(byte);
+    }
+    let text = String::from_utf8(bytes).ok()?;
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
 fn quantity_as_small_uint(word: &str) -> Option<u32> {
     let body = word.strip_prefix("0x")?;
     if body.is_empty() || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -4837,5 +4938,58 @@ mod to_own_token_tests {
             vec![field(ClearFieldRole::Recipient, None)]
         )));
         assert!(!to_own_token(&result(Some(LOWER), vec![])));
+    }
+}
+
+#[cfg(test)]
+mod symbol_probe_tests {
+    use super::{decode_abi_string, ClearProbe};
+
+    /// The two shapes `symbol()` answers in.
+    ///
+    /// ERC-20 predates the string convention, so a legacy token returns one
+    /// fixed word instead of an offset. Reading a bytes32 answer as an offset
+    /// produces either nothing or garbage, and garbage beside an amount reads
+    /// as a real symbol nobody has heard of.
+    #[test]
+    fn a_symbol_decodes_from_either_layout() {
+        // Dynamic: offset(0x20), length(4), "USDC" padded.
+        let dynamic = "0x\
+            0000000000000000000000000000000000000000000000000000000000000020\
+            0000000000000000000000000000000000000000000000000000000000000004\
+            5553444300000000000000000000000000000000000000000000000000000000";
+        assert_eq!(decode_abi_string(dynamic).as_deref(), Some("USDC"));
+
+        // bytes32, the MKR generation: one word, zero-padded.
+        let fixed = "0x4d4b520000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(decode_abi_string(fixed).as_deref(), Some("MKR"));
+    }
+
+    /// A multibyte symbol survives; anything unreadable answers `None` so the
+    /// address fallback stands rather than mojibake.
+    #[test]
+    fn only_real_utf8_teaches_the_cache() {
+        // "USD₮0" — three-byte ₮ inside a dynamic string.
+        let multi = "0x\
+            0000000000000000000000000000000000000000000000000000000000000020\
+            0000000000000000000000000000000000000000000000000000000000000007\
+            555344e282ae30000000000000000000000000000000000000000000000000000";
+        assert_eq!(decode_abi_string(multi).as_deref(), Some("USD₮0"));
+
+        // A revert, an empty answer, and a word that is not UTF-8.
+        assert_eq!(decode_abi_string("0x"), None);
+        assert_eq!(decode_abi_string(""), None);
+        let invalid = "0xfffe000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(decode_abi_string(invalid), None);
+        // All zeroes is a padded empty string, not the symbol "".
+        let empty = "0x0000000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(decode_abi_string(empty), None);
+    }
+
+    /// The probe is a distinct question, so an answer to it can never be read
+    /// as an answer to the decimals one.
+    #[test]
+    fn the_symbol_probe_is_its_own_question() {
+        assert_ne!(ClearProbe::Symbol, ClearProbe::Decimals);
     }
 }

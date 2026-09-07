@@ -690,6 +690,15 @@ fn erc165_unreachable_is_never_cached_as_a_verdict() {
         result: None,
         rpc_error: false,
     });
+    // The symbol probe rides beside the decimals one (spec 032 phase 23).
+    // This token has none to give, so the address fallback stands.
+    sut.resolve(Res::RpcAnswer {
+        probe: ClearProbe::Symbol,
+        chain_id: 1,
+        to: UNKNOWN_TOKEN.to_owned(),
+        result: None,
+        rpc_error: false,
+    });
     assert_eq!(sut.view().result.expect("approve").intent, "Approve");
     sut.resolve(Res::TimedOut { token }); // stale 3s timer
     sut.resolve(Res::TimedOut { token: warm_token }); // stale 4s timer
@@ -791,7 +800,11 @@ fn erc165_timeout_renders_erc20_without_caching() {
     let ops = sut.resolve(Res::TimedOut { token });
     // ERC-20 fallback → decimals warm for the unknown token.
     let warm_token = timer_token(&ops);
-    sut.drop_oldest(); // decimals call never answers either
+    // Neither warm call answers: the decimals probe and the symbol probe that
+    // now rides beside it (spec 032 phase 23). Dropping one would hand the
+    // timer's answer to the other.
+    sut.drop_oldest();
+    sut.drop_oldest();
     sut.resolve(Res::TimedOut { token: warm_token });
     let result = sut
         .view()
@@ -849,6 +862,22 @@ fn unknown_token_decimals_are_never_assumed_silently() {
         result: None,
         rpc_error: false,
     });
+
+    // The symbol probe rides beside the decimals one (spec 032 phase 23).
+
+    // This token has none to give, so the address fallback stands.
+
+    sut.resolve(Res::RpcAnswer {
+        probe: ClearProbe::Symbol,
+
+        chain_id: 1,
+
+        to: UNKNOWN_TOKEN.to_owned(),
+
+        result: None,
+
+        rpc_error: false,
+    });
     assert!(ops.is_empty());
     let result = sut.view().result.expect("transfer result");
     let amount = &result.fields[0];
@@ -882,6 +911,15 @@ fn onchain_decimals_resolve_scale_and_cache() {
         chain_id: 1,
         to: UNKNOWN_TOKEN.to_owned(),
         result: Some(format!("0x{}", pad("8"))),
+        rpc_error: false,
+    });
+    // The symbol probe rides beside the decimals one (spec 032 phase 23).
+    // This token has none to give, so the address fallback stands.
+    sut.resolve(Res::RpcAnswer {
+        probe: ClearProbe::Symbol,
+        chain_id: 1,
+        to: UNKNOWN_TOKEN.to_owned(),
+        result: None,
         rpc_error: false,
     });
     assert!(ops.is_empty());
@@ -928,6 +966,17 @@ fn decimals_timeout_shows_safe_fallback_and_late_answer_caches() {
             chain_id: 1,
             to: UNKNOWN_TOKEN.to_owned(),
             result: Some(format!("0x{}", pad("8"))),
+            rpc_error: false,
+        })
+        .is_empty());
+    // Its symbol twin, in issue order — this driver answers the queue from the
+    // front, so skipping one hands the NEXT answer to the wrong question.
+    assert!(sut
+        .resolve(Res::RpcAnswer {
+            probe: ClearProbe::Symbol,
+            chain_id: 1,
+            to: UNKNOWN_TOKEN.to_owned(),
+            result: None,
             rpc_error: false,
         })
         .is_empty());
