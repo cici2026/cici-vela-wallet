@@ -459,7 +459,7 @@ still reaches Confirm with the relay's real 0.010 xDAI quote.
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
-工作区 `/Volumes/data/production/vela-wallet-native`,五个 phase,六个提交。
+工作区 `/Volumes/data/production/vela-wallet-native`,六个 phase(1–5 加自查的 6/6b),十一个提交。
 
 ## 一句话状态
 
@@ -467,7 +467,12 @@ still reaches Confirm with the relay's real 0.010 xDAI quote.
 滑块已武装),`SlideConfirm` 藏在 `VELA_LIVE_SEND=1` 后面没拉——花真钱是创始人的决定
 (SC-303)。固定密钥集签名者在 vela-core(`dev-fixtures`),4337 UserOp 装配在 vela-core
 (`user_op.rs`,与 EIP-712 哈希器和 alloy ABI 编码器交叉验证),中继/链读/提交主干、
-fee_policy 与 tx_tracker 常驻、send 宿主与七块屏(含批量导入)全接。**A 组五个 phase 全完。**
+fee_policy 与 tx_tracker 常驻、send 宿主与七块屏(含批量导入)全接。**A 组全完。**
+
+phase 6/6b 是**对我自己 phase 4/5 的自查**:那两刀写的 live 构造器把核心十六个判断
+字段全丢了(余额不够时按钮不动、屏幕不说)。现在一个 `SendNotice` 承载全部拒绝、CTA
+三态、手续费币种按不变量⑧不可选、文件读不出与代币存不进都会说话——新增语料键 **0**
+个。方法(第二条 grep)写在本文件末尾的「每次接手仍要跑」里,普查判定表在 phase 6b。
 
 ## 立刻可跑的闸门
 
@@ -517,7 +522,7 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 | 9 | 设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id` | phase 6b 的普查抓到的同类:向导失败了屏幕不说。不是本刀的界面,但是同一个毛病 |
 | 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |
 
-## 本刀最值得记的四件事
+## 本刀最值得记的五件事
 
 1. **`#[allow(dead_code)]` 会把被调用者也标成活的。** 给 `user_op::submit` 加一个
    allow,`chain.rs` 里十个"never used"一起消失。接线前用它压警告,接线后记得删。
@@ -529,6 +534,12 @@ env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPA
 4. **gpui 细节两条**:`AsyncApp::update` 直接返回值(不是 Result),`Entity::update`
    在 AsyncApp 上返回 `()`;`cargo test` 只吃一个过滤词,第二个会被静默丢弃(我以为跑了
    两组测试,其实一组都没跑)。
+5. **接完线要再自查一遍:界面是不是把核心的判断丢了。** phase 4/5 我把七块屏接活了,
+   phase 6 一查,`SendView` 十六个判断字段一个没读——最糟的是余额不够时按钮不动、屏幕
+   不说,而移植的门偏偏是**按下才拒绝**,那句警告是中间唯一的东西。同类还有手续费币种
+   `insufficient`(画成可选=选了必失败)、`file_error`、`save_error`。**语料通常已经有词**
+   (这十六处新增键 0 个)。判定要逐条看核心意图:`failed_chain_ids` 未读是对的,因为核心
+   给了 `banner_chain_ids`(减去会自愈的限流)。
 
 ## 028 合并后要立刻做的(web 会话 2026-09-05 预警,commit `6cec4ddf`,尚未在 origin/main)
 
