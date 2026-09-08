@@ -145,3 +145,39 @@ mod tests {
         assert!(recent_group(&[entry("a.example", "A")], &strings).is_some());
     }
 }
+
+#[cfg(test)]
+mod menu_tests {
+    use super::super::ExploreStrings;
+    use super::super::fixtures::site_menu;
+
+    /// The site menu's ORDER is a contract with the page.
+    ///
+    /// `page.rs` arms three of these six by position — refresh, disconnect,
+    /// close — because that is how the menu component takes its actions. An
+    /// item inserted into the drawing would slide every action below it onto
+    /// the wrong row, and "Add to favourites" would start revoking a site's
+    /// access. Nothing crashes; it would just quietly do the wrong thing, so
+    /// the order is pinned here rather than trusted.
+    #[test]
+    fn the_site_menu_keeps_the_order_the_page_arms() {
+        let s = ExploreStrings::resolve(&crate::loc::Loc::from_env());
+        let labels: Vec<String> = site_menu(&s)
+            .items
+            .iter()
+            .map(|item| item.label.to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                s.refresh.to_string(),
+                s.site_menu.to_string(),
+                s.add_to_favorites.to_string(),
+                s.open_in_new_tab.to_string(),
+                s.disconnect.to_string(),
+                s.close.to_string(),
+            ],
+            "the site menu was reordered; page.rs arms items 0, 4 and 5 by position"
+        );
+    }
+}

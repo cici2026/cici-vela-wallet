@@ -7735,9 +7735,54 @@ impl WalletPage {
                     },
                 )) as contacts_components::MenuAction),
             ],
-            // The site and tile menus belong to a browser this client does not
-            // have.
-            ContactsMenu::Site | ContactsMenu::Tile => Vec::new(),
+            // The site menu, in the order it is drawn: refresh, share, add to
+            // favourites, open in a new tab, disconnect, close.
+            //
+            // Three of the six have a machine (or a webview) behind them; the
+            // other three are favourites and tabs, which nothing in
+            // `vela-core` owns yet. `None` leaves an item drawn and inert
+            // rather than armed and lying — the same rule the allowance chips
+            // follow.
+            ContactsMenu::Site => vec![
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.menu = None;
+                    #[cfg(not(target_os = "linux"))]
+                    crate::webview::reload();
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+                None,
+                None,
+                None,
+                // Disconnect is the CORE's: `None` means "the origin in front
+                // of us", which owes the page a disconnect event, and a named
+                // one would be revoked silently.
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.menu = None;
+                    #[cfg(not(target_os = "linux"))]
+                    if let Some(host) = this.browser_host.clone() {
+                        host.update(cx, |host, cx| {
+                            host.dispatch(
+                                vela_core::app::dapp_permissions::Event::RevokeRequested {
+                                    origin: None,
+                                },
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+                // Close leaves the browser. The permissions machine hears
+                // `BrowserClosed` from the same place it always did — the
+                // frame that stops drawing the column.
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    this.menu = None;
+                    this.browsing = false;
+                    this.panel = PanelId::None;
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+            ],
+            // Favourites: rename, move to a group, remove. No core owns them.
+            ContactsMenu::Tile => Vec::new(),
         }
     }
 

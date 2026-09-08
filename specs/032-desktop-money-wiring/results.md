@@ -1889,6 +1889,51 @@ phase 30 建的东西一直没在真请求上见过。这一刀只做一件事:�
 
 desktop **323 / 319**(无新增测试:这一刀是跑,不是写),fmt clean。
 
+## Phase 33 — 创始人裁决:WalletPair 不接;顺手把站点菜单接活
+
+### 裁决(2026-09-08):`dapp_session` 桌面不做
+
+原话:"wallet pair 不用接呀 直接用 dapp browser inject 就行呀"。
+
+于是 **C 组在桌面上就齐了**:`dapp_permissions`(phase 27)+ `browser_history`
+(phase 28),`dapp_session`(1,959 行,X25519 + 中继传输)**记为判定不做,不是欠账**。
+理由成立:桌面自己有内置浏览器并注入 provider,远程配对是给"钱包在手机、dApp 在另一台
+机器的浏览器里"准备的,桌面没有这个形状。
+
+### 那条注释已经过时了,而它挡着三个能接的东西
+
+`menu_actions` 里写着"the site and tile menus belong to a browser this client
+does not have"——**这个客户端现在有浏览器了**(phase 13/14/27)。
+工具栏那个 ⋯ 菜单画了六项,一项都不能点。
+
+现在六项里**三项接活**:
+
+| 项 | 谁答 |
+|---|---|
+| Refresh | webview |
+| Add to favorites / Open in new tab / 分享 | 没有核心,**保持画着但不响应** |
+| Disconnect | `dapp_permissions::RevokeRequested { origin: None }` —— `None` 是"眼前这个源",核心据此还欠页面一个 disconnect 事件;指名的源是静默撤销 |
+| Close | 离开浏览器(核心从"这一帧不再画这一列"那里照旧听到 `BrowserClosed`) |
+
+**`None` 让一项画着但不答应任何事**——和滑块、和授权 chip 同一条规矩:
+一个长得能点、点了什么都不做的菜单项,比一个明显不可用的更糟。
+
+### 一条按位置对齐的契约,所以钉住
+
+页面是**按下标**给这六项配动作的(0、4、5)。画稿里插一项,下面所有动作就整体挪位——
+"添加到收藏"会变成撤销一个站点的授权。**不崩,只是悄悄做错事**,
+所以 `the_site_menu_keeps_the_order_the_page_arms` 把顺序钉死了。
+
+desktop **324 / 320**,fmt clean,画廊 36 态,Windows 通过。
+
+### 还欠(更新)
+
+- 自定义额度输入(**缺图**)、批量逐腿编辑器(**缺图**)
+- `browser_history::DeleteOrigin`:核心有,桌面**没有入口**——Recent 行没有右键菜单
+  (收藏磁贴有,但那是收藏的菜单)。**要一张图**:历史行的上下文菜单。
+- 收藏 / 自定义分组 / 多标签:**没有核心**,不是接线能解决的
+- 实体认证器签一笔(要人插钥匙)、xlsx 真表点一次(要人点文件对话框)
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
