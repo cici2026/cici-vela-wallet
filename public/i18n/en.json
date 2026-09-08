@@ -1283,6 +1283,7 @@
    "intentRepay": "Repay",
    "intentRevoke": "Revoke",
    "labelAmount": "Amount",
+   "amountUnknown": "Amount unknown",
    "labelTo": "To",
    "labelFrom": "From",
    "labelOwner": "Owner",

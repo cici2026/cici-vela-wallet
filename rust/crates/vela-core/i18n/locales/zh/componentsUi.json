@@ -133,6 +133,7 @@
       "intentRepay": "还款",
       "intentRevoke": "撤销",
       "labelAmount": "金额",
+      "amountUnknown": "金额未知",
       "labelTo": "接收方",
       "labelFrom": "发送方",
       "labelOwner": "拥有者",

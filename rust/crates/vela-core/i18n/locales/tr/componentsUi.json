@@ -133,6 +133,7 @@
       "intentRepay": "Geri Öde",
       "intentRevoke": "İptal Et",
       "labelAmount": "Tutar",
+      "amountUnknown": "Tutar bilinmiyor",
       "labelTo": "Alıcı",
       "labelFrom": "Gönderen",
       "labelOwner": "Sahip",

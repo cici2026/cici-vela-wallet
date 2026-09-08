@@ -133,6 +133,7 @@
       "intentRepay": "Lunasi",
       "intentRevoke": "Cabut",
       "labelAmount": "Jumlah",
+      "amountUnknown": "Jumlah tidak diketahui",
       "labelTo": "Ke",
       "labelFrom": "Dari",
       "labelOwner": "Pemilik",

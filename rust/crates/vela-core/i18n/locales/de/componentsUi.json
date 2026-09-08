@@ -133,6 +133,7 @@
       "intentRepay": "Zurückzahlen",
       "intentRevoke": "Widerrufen",
       "labelAmount": "Betrag",
+      "amountUnknown": "Betrag unbekannt",
       "labelTo": "An",
       "labelFrom": "Von",
       "labelOwner": "Eigentümer",

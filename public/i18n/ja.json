@@ -1244,6 +1244,7 @@
    "intentRepay": "返済",
    "intentRevoke": "取消",
    "labelAmount": "金額",
+   "amountUnknown": "金額不明",
    "labelTo": "宛先",
    "labelFrom": "送信元",
    "labelOwner": "所有者",

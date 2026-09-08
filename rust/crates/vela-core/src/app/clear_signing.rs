@@ -927,9 +927,14 @@ enum Step {
         index: usize,
     },
     AwaitSelectorSigs,
-    /// On-chain `decimals()` prefetch for unknown tokens.
+    /// On-chain `decimals()` and `symbol()` prefetch for unknown tokens.
+    ///
+    /// Two sets, because the two probes are two facts and either can be the
+    /// last one in. Both must land — see [`begin_warm`] — and the 4s timer is
+    /// still what bounds the wait.
     AwaitWarm {
         pending: BTreeSet<String>,
+        symbols: BTreeSet<String>,
         timer: u32,
         then: WarmThen,
     },
@@ -1493,21 +1498,27 @@ fn accept(model: &mut Model, result: ClearShellResult) -> Command<ClearSigningEf
         (
             Step::AwaitWarm {
                 mut pending,
+                mut symbols,
                 timer,
                 then,
             },
             ClearShellResult::RpcAnswer {
-                probe: ClearProbe::Decimals,
+                probe: probe @ (ClearProbe::Decimals | ClearProbe::Symbol),
                 to,
                 ..
             },
         ) => {
-            pending.remove(&to.to_lowercase());
-            if pending.is_empty() {
+            let answered = to.to_lowercase();
+            match probe {
+                ClearProbe::Symbol => symbols.remove(&answered),
+                _ => pending.remove(&answered),
+            };
+            if pending.is_empty() && symbols.is_empty() {
                 warm_done(model, run, then)
             } else {
                 run.step = Step::AwaitWarm {
                     pending,
+                    symbols,
                     timer,
                     then,
                 };
@@ -1518,6 +1529,7 @@ fn accept(model: &mut Model, result: ClearShellResult) -> Command<ClearSigningEf
         (
             Step::AwaitWarm {
                 pending,
+                symbols,
                 timer,
                 then,
             },
@@ -1526,7 +1538,7 @@ fn accept(model: &mut Model, result: ClearShellResult) -> Command<ClearSigningEf
             // Never let a slow RPC stall the sheet: format with what's known
             // (18 + unverified for the rest); in-flight lookups still fill
             // the cache for next time (`clear-signing.ts:389-397`).
-            let _ = pending;
+            let _ = (pending, symbols);
             warm_done(model, run, then)
         }
 
@@ -2013,10 +2025,18 @@ fn begin_warm(
                     data: ERC20_DECIMALS_SELECTOR.to_owned(),
                     probe: ClearProbe::Decimals,
                 },
-                // Asked alongside, never gating. The warm step still finishes
-                // on the DECIMALS answers alone: a slow symbol must not hold
-                // the sheet, and its absence only costs the fallback that was
-                // there before this probe existed.
+                // Gating, like decimals — phase 23 shipped this probe as
+                // non-gating and running it showed why that could not work:
+                // the two ride ONE round trip and finish milliseconds apart
+                // (622ms and 642ms against Gnosis), so whichever loses the
+                // coin flip is only in the cache, and the sheet formats
+                // without it. Non-gating did not mean "sometimes late"; it
+                // meant "almost never shown the first time a token is seen".
+                //
+                // What it costs: a token that answers decimals and hangs on
+                // symbol now waits — but only until the same 4s timer that
+                // already bounds this step, which then formats with what is
+                // known. The floor is unchanged; only the common case moved.
                 ClearOperation::RpcEthCall {
                     chain_id,
                     to: addr.clone(),
@@ -2031,6 +2051,7 @@ fn begin_warm(
         token,
     });
     run.step = Step::AwaitWarm {
+        symbols: pending.clone(),
         pending,
         timer: token,
         then,
@@ -3029,7 +3050,22 @@ fn format_token_amount(
     let (decimals, decimals_verified) =
         guess_token_decimals(model, run.req.chain_id(), token_addr.as_deref());
     let verified = decimals_verified && !token_invalid;
-    let display = format_token_value(&amount, decimals, &run.locale);
+    // An unverified amount is not a small amount. Formatting 1000000 raw units
+    // with the 18-decimal fallback printed "0" on a transfer of 1 USDC — a
+    // signing sheet stating a confident, wrong number on the one line a person
+    // is being asked to judge. Where the decimals are unknown the magnitude is
+    // unknown, so the core says nothing rather than something: the em dash is
+    // this wallet's word for "no number here" (the fee card's, when nothing is
+    // priced), and `unverified` is already set for the shells that have a
+    // phrase of their own.
+    //
+    // Both halves are needed. The dash alone under a warning is honest; the
+    // number was not.
+    let display = if verified {
+        format_token_value(&amount, decimals, &run.locale)
+    } else {
+        UNKNOWN_AMOUNT.to_owned()
+    };
     // The static table first (it is the TS's and stays authoritative for the
     // nineteen it holds), then what the chain itself answered, then the
     // address. Only the last of those leaves somebody reading a contract
@@ -4684,6 +4720,13 @@ fn format_number(value: f64, min_frac: usize, max_frac: usize, locale: &ClearLoc
 
 /// `formatTokenValue` (clear-signing.ts:1197-1214): BigInt division, up to 4
 /// significant fractional digits, trailing zeros trimmed.
+/// What a `tokenAmount` reads when the decimals could not be verified.
+///
+/// An em dash, not a zero and not a guess. The shells may replace it with a
+/// phrase of their own — they know `unverified` — but every shell that renders
+/// the value as it comes still shows the absence rather than a wrong number.
+pub const UNKNOWN_AMOUNT: &str = "—";
+
 fn format_token_value(raw_dec: &str, decimals: u32, locale: &ClearLocale) -> String {
     let (sign, digits) = match raw_dec.strip_prefix('-') {
         Some(rest) => ("-", rest),

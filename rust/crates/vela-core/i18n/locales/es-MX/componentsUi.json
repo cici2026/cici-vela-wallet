@@ -133,6 +133,7 @@
       "intentRepay": "Pagar",
       "intentRevoke": "Revocar",
       "labelAmount": "Cantidad",
+      "amountUnknown": "Cantidad desconocida",
       "labelTo": "Para",
       "labelFrom": "De",
       "labelOwner": "Propietario",

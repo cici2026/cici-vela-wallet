@@ -13,7 +13,9 @@
 use gpui::SharedString;
 
 use vela_core::app::approval_guard::GuardView;
-use vela_core::app::clear_signing::{ClearRisk, ClearSignField, ClearSignResult, ClearSigningView};
+use vela_core::app::clear_signing::{
+    ClearRisk, ClearSignField, ClearSignResult, ClearSigningView, UNKNOWN_AMOUNT,
+};
 use vela_core::app::fee_policy::FeeView;
 use vela_core::app::sign_request::SignView;
 
@@ -118,8 +120,12 @@ fn warnings(result: &ClearSignResult, s: &SigningStrings) -> Vec<Block> {
 }
 
 /// One decoded field as a row, keeping the core's flags as the tone.
+///
+/// The one substitution: an amount the core could not scale. The core has no
+/// words — it emits its em dash and sets `unverified` — and a dash under a
+/// warning is honest but silent, so the shell says it in the reader's own
+/// language. Only for a `tokenAmount`: `unverified` is set by no other field.
 fn row_of(field: &ClearSignField, s: &SigningStrings) -> crate::signing::fixtures::Row {
-    let _ = s;
     let tone = if field.warning {
         Tone::Danger
     } else if field.unverified || field.expired {
@@ -127,9 +133,14 @@ fn row_of(field: &ClearSignField, s: &SigningStrings) -> crate::signing::fixture
     } else {
         Tone::Neutral
     };
+    let value = if field.unverified && field.value.starts_with(UNKNOWN_AMOUNT) {
+        s.amount_unknown.clone()
+    } else {
+        SharedString::from(field.value.clone())
+    };
     (
         SharedString::from(field.label.clone()),
-        SharedString::from(field.value.clone()),
+        value,
         tone,
         // Addresses and raw values read as monospace; a decoded amount does
         // not. The core says which is which by carrying an address.
@@ -244,6 +255,43 @@ mod tests {
             address: None,
             usd_value: None,
         }
+    }
+
+    /// An amount the core could not scale reads as words, not as a dash and
+    /// not as a number.
+    ///
+    /// The core stopped printing a number it cannot compute (spec 032 phase
+    /// 25 — 1 USDC came out as "0"), and the dash it emits instead is correct
+    /// but silent. This row is the one a person is asked to judge, so the
+    /// shell spends a word on it. A verified amount is untouched: nothing here
+    /// may rewrite a number the core did compute.
+    #[test]
+    fn an_amount_with_unverified_decimals_says_so_in_words() {
+        let s = strings();
+        let mut unknown = field("Amount", &format!("{UNKNOWN_AMOUNT} USDC.e"));
+        unknown.unverified = true;
+        let known = field("Amount", "500 USDC.e");
+
+        let blocks = blocks(&view(result(vec![unknown, known])), &s);
+        let rows = blocks
+            .iter()
+            .find_map(|block| match block {
+                Block::Rows(rows) => Some(rows.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("the fields are drawn as rows"));
+
+        assert_eq!(rows[0].1, s.amount_unknown, "the dash was left to speak");
+        assert_ne!(
+            rows[0].2,
+            Tone::Neutral,
+            "an unverified amount is a caution"
+        );
+        assert_eq!(rows[1].1, SharedString::from("500 USDC.e"));
+        assert!(
+            !s.amount_unknown.is_empty() && !s.amount_unknown.contains('.'),
+            "the corpus key resolved to a phrase, not an echoed key"
+        );
     }
 
     fn result(fields: Vec<ClearSignField>) -> ClearSignResult {

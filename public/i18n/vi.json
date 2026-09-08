@@ -1244,6 +1244,7 @@
    "intentRepay": "Trả nợ",
    "intentRevoke": "Thu hồi",
    "labelAmount": "Số lượng",
+   "amountUnknown": "Không rõ số lượng",
    "labelTo": "Đến",
    "labelFrom": "Từ",
    "labelOwner": "Chủ sở hữu",
