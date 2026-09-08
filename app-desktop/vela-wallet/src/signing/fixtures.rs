@@ -28,7 +28,7 @@ pub struct AmountLine {
     pub tone: Tone,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChipState {
     Idle,
     Selected,

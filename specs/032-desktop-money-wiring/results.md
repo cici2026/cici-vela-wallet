@@ -1730,6 +1730,68 @@ desktop **312 / 308**,fmt clean,画廊 36 态,Windows 通过。
 
 desktop **317 / 313**,fmt clean,画廊 36 态,Windows 通过。
 
+## Phase 30 — 额度编辑器:无限额授权终于可以封顶,而不只是被拒
+
+phase 29 的普查结果:`approval_guard` 十个字段,壳只读了一个。后果是
+**桌面上的无限额授权只能被拒,不能封顶**——`enforce_no_unlimited` 在提交口失败朝关,
+安全,但人没有任何办法把它改成一个有限的数。这一刀补的是那条路。
+
+### 三处接线
+
+1. **编辑器画出来**:`GuardView.surface == ApprovalEditor` 时,从核心画一张额度卡——
+   额度值(核心自己的 `format_token_amount`)、chip 状态、注解、`increase_total`
+   那一行("增加 100"绝不能读成"上限 100")、小数未核验、已过期。
+2. **chip 能点**:`block_with_actions` 给每个 chip 挂一个 `PresetSelected { mode }`;
+   mock 传空,**画廊一个像素没动**(和 phase 21 滑块同一个规矩)。
+   **禁用的 chip 永远不挂动作**,哪怕调用方传了:"Requested" 灰着,
+   是这个钱包在拒绝那个数额,一次能点的拒绝就不是拒绝。
+3. **签的是改过的那份参数**:`approve()` 现在传 `guard_view.rewritten_params_json`
+   ——**不变量⑨**。原来这里是 `None`:人选了上限、屏幕上显示了上限,
+   而真正被签的还是站点最初那份无限额的请求。
+
+### 桌面上不给的那个 chip
+
+**"Grant all anyway" 不画。** 核心有这个事件(某些代币确实只能布尔授权),
+桌面不给它入口——创始人的军令,而且画稿里本来就没有这个 chip。
+
+**"Custom"(自定义金额)也没画**:任何一张桌面画稿里都没有那个输入框,
+而**一个点了不打开任何东西的 chip,比没有这个 chip 更糟**。记为缺图。
+
+### 核心动了一行(加了个 re-export,没加规则)
+
+`format_token_amount` 收 `U256`,而桌面**故意不依赖 alloy**
+(`executor/abi.rs` 自己写着:ABI 的活在核心,不在这里)。所以核心把它需要的那个类型
+`pub use ... as GuardAmount` 挂在那个函数旁边——**一个 re-export,比每个壳里再写一个
+格式化器便宜**,而第二个格式化器就是"我到底在授权多少"的第二个答案。
+
+### 实机全程
+
+本地页面发一笔真的 `approve(spender, 2^256-1)`(Gnosis USDC.e):
+
+- 单子:**Approve**(红)· Amount **Unlimited** · Spender `0x031d7d…84772b`
+- 额度卡:**Unlimited**(红)· Requested **灰掉** · Revoke 可点 ·
+  注解"为了安全,无限额授权已停用。请设一个有限的数额。"· **滑块关着**
+- 点 **Revoke** → chip 亮起 · **Spending cap 变成 `0 USDC.e`**(符号是 phase 23/25
+  那条 `symbol()` 探针查到的)· 费用 **0.01 xDAI** · **滑块武装**
+
+没有滑下去:那会真花钱、真发一笔授权,和 SC-303 一样是创始人的决定。
+
+### 测试
+
+无限额那张单子:Requested 必须是 Disabled、注解必须说明为什么、
+**`modes` 里不许出现 `Grant`**;选了 Balance 之后值是 `1,240 USDC`(核心的格式化器,
+六位小数);permit 和 `Surface::None` 一律不画编辑器(**链下 permit 封不了顶**,
+给它一个封顶控件是钱包假装自己能管一件它管不了的事)。
+还有一条钉不变量⑨:`approve_opts` 在 guard 改写过参数时必须把那份参数带上。
+
+desktop **321 / 317**,vela-core **1,286**,clippy `-D warnings` 干净,
+wasm 重建 `b51aefd99292`,`verify-web` 46,513 例全绿,画廊 36 态,Windows 通过。
+
+### 还欠
+
+自定义金额输入(缺图)、批量授权的逐腿编辑器(`GuardView.batch`,同样缺图)、
+`funding` 的充值流程(phase 29 只说了一句话)。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

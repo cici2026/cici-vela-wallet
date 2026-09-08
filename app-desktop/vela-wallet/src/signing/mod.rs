@@ -125,6 +125,9 @@ pub struct SigningStrings {
     pub error_network: SharedString,
     pub error_unlimited: SharedString,
     pub funding_title: String,
+    /// The approval editor's own two sentences.
+    pub decimals_unverified: SharedString,
+    pub resulting_total_unknown: String,
     pub warn_approve_all: SharedString,
     pub warn_permit_cant_cap: SharedString,
     pub warn_best_effort: SharedString,
@@ -277,6 +280,10 @@ impl SigningStrings {
             error_network: loc.t("send.lock.netNotFound"),
             error_unlimited: a("unlimitedDisabled"),
             funding_title: loc.t("componentsUi.funding.lead").to_string(),
+            decimals_unverified: a("decimalsUnverified"),
+            resulting_total_unknown: loc
+                .t("componentsUi.signingApprove.resultingTotalUnknown")
+                .to_string(),
             warn_approve_all: a("setApprovalAllWarn"),
             warn_permit_cant_cap: a("permitCantCap"),
             warn_best_effort: s("bestEffortWarning"),

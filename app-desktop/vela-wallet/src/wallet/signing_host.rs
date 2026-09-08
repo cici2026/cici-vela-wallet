@@ -300,33 +300,8 @@ impl SigningHost {
     /// second number, and the figure somebody agreed to would not be the
     /// figure that gets signed.
     pub fn approve(&mut self, cx: &mut Context<Self>) {
-        let quoted = self.fee_view.fee.as_ref().map(|estimate| SignQuotedFee {
-            amount: estimate.total_wei.clone(),
-            recipient: estimate.fee_recipient.clone().unwrap_or_default(),
-        });
-        let max_fee_per_gas = self
-            .fee_view
-            .fee
-            .as_ref()
-            .map(|estimate| estimate.max_fee_per_gas.clone());
-        self.dispatch_sign(
-            SignEvent::ApproveTapped {
-                opts: SignApproveOpts {
-                    max_fee_per_gas,
-                    bundler_cost_wei: None,
-                    gas_fee_token: None,
-                    quoted_fee: quoted,
-                    fee_collector: None,
-                    params_override_json: None,
-                    intent: self
-                        .clear_view
-                        .result
-                        .as_ref()
-                        .map(|result| result.intent.clone()),
-                },
-            },
-            cx,
-        );
+        let opts = approve_opts(&self.fee_view, &self.clear_view, &self.guard_view);
+        self.dispatch_sign(SignEvent::ApproveTapped { opts }, cx);
     }
 
     pub fn dispatch_fee(&mut self, event: FeeEvent, cx: &mut Context<Self>) {
@@ -552,6 +527,36 @@ pub fn known_chain_ids() -> Vec<u32> {
 
 /// The first call's `to` / `data` / `value`, for the decoder.
 ///
+/// What the confirm signs, assembled from the three views on screen.
+///
+/// A pure function so the one rule that matters here can be tested without a
+/// window: **invariant ⑨** — when `approval_guard` rewrote the request, those
+/// params are what gets signed, submitted and recorded. This carried `None`
+/// until spec 032 phase 30, which meant a cap somebody chose would have been
+/// discarded and the site's original ask signed instead.
+///
+/// The quote comes from the fee view that RENDERED the confirm card rather
+/// than from a fresh question, for the same reason spelled out in this cut's
+/// second lesson: a second question produces a second number, and the figure
+/// somebody agreed to would not be the figure that gets signed.
+fn approve_opts(fee: &FeeView, clear: &ClearSigningView, guard: &GuardView) -> SignApproveOpts {
+    SignApproveOpts {
+        max_fee_per_gas: fee
+            .fee
+            .as_ref()
+            .map(|estimate| estimate.max_fee_per_gas.clone()),
+        bundler_cost_wei: None,
+        gas_fee_token: None,
+        quoted_fee: fee.fee.as_ref().map(|estimate| SignQuotedFee {
+            amount: estimate.total_wei.clone(),
+            recipient: estimate.fee_recipient.clone().unwrap_or_default(),
+        }),
+        fee_collector: None,
+        params_override_json: guard.rewritten_params_json.clone(),
+        intent: clear.result.as_ref().map(|result| result.intent.clone()),
+    }
+}
+
 /// The blind rung's two facts: who it goes to, and how many bytes of calldata
 /// nobody could read. Both come from the first leg, like the decode does.
 fn facts_of(request: &IncomingRequest) -> crate::signing::live::RequestFacts {
@@ -600,6 +605,34 @@ fn typed_data_of(params_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Invariant ⑨: the capped params are the ones that get signed.
+    ///
+    /// This carried `None` until spec 032 phase 30. With the editor wired, a
+    /// `None` here would mean somebody picks a cap, watches the sheet show it,
+    /// and the site's ORIGINAL unlimited ask is what reaches the chain.
+    #[test]
+    fn a_chosen_cap_is_what_gets_signed() {
+        let fee = crate::core_host::CoreHost::<FeePolicy>::new().view();
+        let clear = crate::core_host::CoreHost::<ClearSigning>::new().view();
+        let mut guard = crate::core_host::CoreHost::<ApprovalGuard>::new().view();
+
+        // Nothing rewritten: the request stands as it arrived.
+        assert_eq!(
+            approve_opts(&fee, &clear, &guard).params_override_json,
+            None
+        );
+
+        let capped = r#"[{"to":"0xtoken","data":"0x095ea7b3capped"}]"#;
+        guard.rewritten_params_json = Some(capped.to_owned());
+        assert_eq!(
+            approve_opts(&fee, &clear, &guard)
+                .params_override_json
+                .as_deref(),
+            Some(capped),
+            "the cap the person chose was dropped on the way to the signer"
+        );
+    }
 
     /// A transaction decodes from its call — and a BATCH decodes from its
     /// first leg, which is the same thing the phone's sheet shows.

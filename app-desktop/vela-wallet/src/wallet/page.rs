@@ -7151,6 +7151,14 @@ impl WalletPage {
             // …and what the pipeline is doing, under it. Appended rather than
             // mixed in: what this request IS comes first, what the wallet is
             // doing about it second.
+            // The cap editor, from the guard. Placed before the pipeline's
+            // status so the decision comes above what the wallet is doing
+            // about it — and drawn at all only on the surface the core calls
+            // the editor, never over a permit (which cannot be capped) or a
+            // batch (whose per-leg editors are still owed).
+            if let Some((editor, _)) = signing_live::guard_editor(&host.guard_view, &self.signing) {
+                model.blocks.push(editor);
+            }
             model
                 .blocks
                 .extend(signing_live::status_blocks(&host.view, &self.signing));
@@ -7192,8 +7200,54 @@ impl WalletPage {
             .gap(px(16.))
             .child(signing_components::header(theme, &model));
 
+        // The allowance chips are a control when a machine is behind them.
+        // One dispatch per chip, in the order the block lists them; the mock
+        // gets none and draws exactly what the gallery has always drawn.
+        #[cfg(not(target_os = "linux"))]
+        let chip_modes: Vec<vela_core::app::approval_guard::GuardEditorMode> = self
+            .signing_host
+            .as_ref()
+            .and_then(|host| signing_live::guard_editor(&host.read(cx).guard_view, &self.signing))
+            .map(|(_, modes)| modes)
+            .unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let chip_modes: Vec<vela_core::app::approval_guard::GuardEditorMode> = Vec::new();
+
         for item in &model.blocks {
-            column = column.child(signing_components::block(theme, &mut self.icons, item));
+            let armed =
+                matches!(item, signing_fixtures::Block::Allowance { .. }) && !chip_modes.is_empty();
+            if armed {
+                let actions = chip_modes
+                    .iter()
+                    .map(|mode| {
+                        let mode = *mode;
+                        Some(
+                            Box::new(cx.listener(move |page, _: &gpui::ClickEvent, _, cx| {
+                                #[cfg(not(target_os = "linux"))]
+                                if let Some(host) = page.signing_host.as_ref() {
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch_guard(
+                                            vela_core::app::approval_guard::Event::PresetSelected {
+                                                mode,
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                }
+                                cx.notify();
+                            })) as crate::flows::panels::Click,
+                        )
+                    })
+                    .collect();
+                column = column.child(signing_components::block_with_actions(
+                    theme,
+                    &mut self.icons,
+                    item,
+                    actions,
+                ));
+            } else {
+                column = column.child(signing_components::block(theme, &mut self.icons, item));
+            }
         }
 
         column = column

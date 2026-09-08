@@ -12,7 +12,7 @@
 
 use gpui::SharedString;
 
-use vela_core::app::approval_guard::GuardView;
+use vela_core::app::approval_guard::{GuardEditorMode, GuardSurface, GuardView};
 use vela_core::app::clear_signing::{
     ClearBlindTyped, ClearDangerClass, ClearMessageView, ClearRisk, ClearSignField,
     ClearSignResult, ClearSigningView, ClearSiweBinding, ClearSurface, UNKNOWN_AMOUNT,
@@ -20,7 +20,7 @@ use vela_core::app::clear_signing::{
 use vela_core::app::fee_policy::FeeView;
 use vela_core::app::sign_request::{SignErrorKind, SignView};
 
-use crate::signing::fixtures::{Block, FeeModel};
+use crate::signing::fixtures::{Block, ChipState, FeeModel};
 use crate::signing::{SigningStrings, Tone};
 
 /// The core's risk grade in the drawn vocabulary.
@@ -99,6 +99,129 @@ pub fn blocks(clear: &ClearSigningView, facts: &RequestFacts, s: &SigningStrings
             .unwrap_or_default(),
         ClearSurface::BlindTransaction => blind_tx_blocks(facts, s),
     }
+}
+
+/// The never-unlimited spending-cap editor, and what each chip chooses.
+///
+/// `approval_guard` publishes ten fields and the desktop read exactly one of
+/// them (`confirm_allowed`) until spec 032 phase 30, so an approval could only
+/// ever be REFUSED here: `enforce_no_unlimited` fails closed at the submit
+/// chokepoint and there was no way to pick a cap. Safe, and crippled.
+///
+/// What is deliberately NOT offered: "grant all anyway". The core has the
+/// event, and this shell does not raise it — the founder's rule, and the
+/// drawn scenarios never drew that chip either.
+///
+/// What is missing rather than declined: the custom-amount input. No desktop
+/// scenario draws the field, and a chip that opens nothing is worse than a
+/// chip that is not there.
+#[must_use]
+pub fn guard_editor(
+    guard: &GuardView,
+    s: &SigningStrings,
+) -> Option<(Block, Vec<GuardEditorMode>)> {
+    if guard.surface != GuardSurface::ApprovalEditor {
+        return None;
+    }
+    let editor = guard.editor.as_ref()?;
+
+    let mut chips = Vec::new();
+    let mut modes = Vec::new();
+    let mut chip = |label: SharedString, mode: GuardEditorMode, offered: bool| {
+        let state = if !offered {
+            // Disabled, not absent: "Requested" greyed out is the wallet
+            // saying the amount the site asked for is the one thing it will
+            // not sign, which is a fact about this request.
+            ChipState::Disabled
+        } else if editor.mode == Some(mode) {
+            ChipState::Selected
+        } else {
+            ChipState::Idle
+        };
+        chips.push((label, state));
+        modes.push(mode);
+    };
+    chip(
+        s.chip_requested.clone(),
+        GuardEditorMode::Requested,
+        editor.requested_finite,
+    );
+    chip(
+        s.chip_balance.clone(),
+        GuardEditorMode::Balance,
+        editor.has_balance_cap,
+    );
+    chip(s.chip_revoke.clone(), GuardEditorMode::Revoke, true);
+
+    // The value row: the core's raw base units, formatted by the core's own
+    // formatter with this shell's separators. A second formatter would be a
+    // second answer to "how much am I approving".
+    let value = match editor.display_amount_raw.as_deref().and_then(|raw| {
+        raw.parse::<vela_core::app::approval_guard::GuardAmount>()
+            .ok()
+    }) {
+        Some(units) => SharedString::from(format!(
+            "{} {}",
+            vela_core::app::approval_guard::format_token_amount(
+                units,
+                guard.meta.decimals,
+                4,
+                ",",
+                ".",
+                false,
+            ),
+            guard.meta.symbol
+        )),
+        // Nothing parses as an amount here only when the request IS unlimited
+        // — which is exactly what the row must say.
+        None => s.value_unlimited.clone(),
+    };
+
+    // Only a chosen, finite cap reads as settled.
+    let value_tone = if editor.choice.is_some() {
+        Tone::Neutral
+    } else {
+        Tone::Danger
+    };
+
+    let mut notes: Vec<String> = Vec::new();
+    if !editor.requested_finite {
+        notes.push(format!("{} {}", s.unlimited_disabled, s.choose_prompt));
+    }
+    if guard.decimals_unverified {
+        // An amount capped with decimals nobody verified is a cap at an
+        // order of magnitude nobody verified.
+        notes.push(s.decimals_unverified.to_string());
+    }
+    if guard.expired {
+        notes.push(s.warn_expired.to_string());
+    }
+
+    // "increase by 100" must never read as "cap at 100" — the core computes
+    // the resulting total, including the case where the on-chain read failed
+    // and only the increment is known.
+    let resulting_total = guard.increase_total.as_ref().map(|total| {
+        let text = match total.total.as_deref() {
+            Some(sum) => SharedString::from(sum.to_owned()),
+            None => SharedString::from(crate::signing::fill(
+                &s.resulting_total_unknown,
+                &[("amount", &total.increment)],
+            )),
+        };
+        (s.label_resulting_total.clone(), text)
+    });
+
+    Some((
+        Block::Allowance {
+            label: s.label_spending_cap.clone(),
+            value,
+            value_tone,
+            chips,
+            note: (!notes.is_empty()).then(|| SharedString::from(notes.join(" "))),
+            resulting_total,
+        },
+        modes,
+    ))
 }
 
 /// What the PIPELINE is doing, under whatever the request is.
@@ -820,6 +943,128 @@ mod tests {
 
     fn pristine_sign() -> SignView {
         crate::core_host::CoreHost::<vela_core::app::sign_request::SignRequest>::new().view()
+    }
+
+    fn guard_view(editor: vela_core::app::approval_guard::GuardEditorView) -> GuardView {
+        GuardView {
+            surface: GuardSurface::ApprovalEditor,
+            detected: None,
+            meta: vela_core::app::approval_guard::GuardTokenMetaView {
+                symbol: "USDC".to_owned(),
+                decimals: 6,
+                verified: true,
+                loading: false,
+            },
+            editor: Some(editor),
+            confirm_allowed: false,
+            rewritten_params_json: None,
+            increase_total: None,
+            decimals_unverified: false,
+            expired: false,
+            batch: None,
+        }
+    }
+
+    fn editor_view(
+        mode: Option<GuardEditorMode>,
+        requested_finite: bool,
+        amount: Option<&str>,
+    ) -> vela_core::app::approval_guard::GuardEditorView {
+        vela_core::app::approval_guard::GuardEditorView {
+            mode,
+            custom_text: String::new(),
+            error: None,
+            choice: mode.map(|_| vela_core::app::approval_guard::GuardChoice::Amount {
+                amount_raw: amount.unwrap_or("0").to_owned(),
+            }),
+            display_amount_raw: amount.map(str::to_owned),
+            requested_finite,
+            has_balance_cap: true,
+            balance_raw: Some("2000000000".to_owned()),
+        }
+    }
+
+    /// An unlimited request offers a cap and refuses the amount it was asked
+    /// for — the founder's rule, drawn.
+    #[test]
+    fn an_unlimited_request_can_be_capped_but_never_granted() {
+        let s = strings();
+        let (block, modes) = guard_editor(&guard_view(editor_view(None, false, None)), &s)
+            .unwrap_or_else(|| unreachable!("the editor surface drew nothing"));
+
+        let Block::Allowance {
+            value, chips, note, ..
+        } = &block
+        else {
+            unreachable!("the editor is an allowance block")
+        };
+        assert_eq!(
+            *value, s.value_unlimited,
+            "an uncapped request reads as what it is"
+        );
+        assert_eq!(
+            chips[0].1,
+            ChipState::Disabled,
+            "the requested amount is refused"
+        );
+        assert_eq!(modes[0], GuardEditorMode::Requested);
+        assert!(
+            note.as_ref()
+                .is_some_and(|note| note.contains(s.unlimited_disabled.as_ref())),
+            "the sheet never says WHY the requested chip is dead"
+        );
+        // Never offered, on this shell, at all.
+        assert!(
+            !modes.contains(&GuardEditorMode::Grant),
+            "a `grant all anyway` chip reached a screen"
+        );
+    }
+
+    /// A chosen cap is a number, formatted by the core's own formatter.
+    #[test]
+    fn a_chosen_cap_shows_the_amount_it_caps_at() {
+        let s = strings();
+        let chosen = editor_view(Some(GuardEditorMode::Balance), true, Some("1240000000"));
+        let (block, _) =
+            guard_editor(&guard_view(chosen), &s).unwrap_or_else(|| unreachable!("no editor"));
+        let Block::Allowance {
+            value,
+            value_tone,
+            chips,
+            ..
+        } = &block
+        else {
+            unreachable!("not an allowance block")
+        };
+        // 1,240 USDC at six decimals — the guard's formatter, not this file's.
+        assert_eq!(*value, SharedString::from("1,240 USDC"));
+        assert_eq!(*value_tone, Tone::Neutral);
+        assert_eq!(
+            chips[1].1,
+            ChipState::Selected,
+            "the chosen chip is the lit one"
+        );
+        assert_eq!(
+            chips[0].1,
+            ChipState::Idle,
+            "a finite request may be taken as asked"
+        );
+    }
+
+    /// Nothing to gate, nothing drawn — and a permit is never capped here.
+    #[test]
+    fn the_editor_belongs_to_one_surface_only() {
+        let s = strings();
+        let mut permit = guard_view(editor_view(None, true, Some("1")));
+        permit.surface = vela_core::app::approval_guard::GuardSurface::PermitSign;
+        assert!(
+            guard_editor(&permit, &s).is_none(),
+            "an off-chain permit was given a cap editor the wallet cannot enforce"
+        );
+
+        let mut none = guard_view(editor_view(None, true, Some("1")));
+        none.surface = GuardSurface::None;
+        assert!(guard_editor(&none, &s).is_none());
     }
 
     /// The refusal that used to happen in silence.

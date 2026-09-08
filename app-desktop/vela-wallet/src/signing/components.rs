@@ -5,7 +5,10 @@
 //! the ones nobody has drawn yet, come out of one code path.
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::{Div, Hsla, ParentElement, SharedString, Styled, div, px};
+use gpui::{
+    Div, Hsla, InteractiveElement as _, ParentElement, SharedString,
+    StatefulInteractiveElement as _, Styled, div, px,
+};
 
 use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
@@ -90,7 +93,33 @@ pub fn header(theme: &Theme, model: &SigningModel) -> Div {
 }
 
 /// One block, rendered.
+/// One block, with the allowance chips ARMED.
+///
+/// The chips are a control, not a picture, and only when a machine is behind
+/// them: `actions` carries one per chip, in the order the block lists them.
+/// Passing none draws exactly what the gallery draws — the same rule the slide
+/// follows (spec 032 phase 21), and what keeps the 33 drawn scenarios
+/// pixel-identical after the editor went live.
+pub fn block_with_actions(
+    theme: &Theme,
+    icons: &mut IconCache,
+    item: &Block,
+    actions: Vec<Option<crate::flows::panels::Click>>,
+) -> Div {
+    block_inner(theme, icons, item, actions)
+}
+
 pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
+    block_inner(theme, icons, item, Vec::new())
+}
+
+fn block_inner(
+    theme: &Theme,
+    icons: &mut IconCache,
+    item: &Block,
+    mut actions: Vec<Option<crate::flows::panels::Click>>,
+) -> Div {
+    let _ = &mut actions;
     match item {
         Block::Intent { text, tone } => div()
             .text_size(theme::text_row_sub())
@@ -251,31 +280,45 @@ pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
             resulting_total,
         } => {
             let mut chip_row = div().flex().flex_wrap().gap(px(8.));
-            for (chip_label, state) in chips {
+            let mut chip_actions = actions.into_iter();
+            for (index, (chip_label, state)) in chips.iter().enumerate() {
                 let selected = *state == ChipState::Selected;
                 let disabled = *state == ChipState::Disabled;
-                chip_row = chip_row.child(
-                    div()
-                        .h(px(36.))
-                        .px(px(12.))
-                        .rounded_full()
-                        .border_1()
-                        .border_color(if selected {
-                            theme.accent
-                        } else {
-                            theme.outline_strong
-                        })
-                        .flex()
-                        .items_center()
-                        .opacity(if disabled { 0.45 } else { 1.0 })
-                        .text_size(theme::text_row_sub())
-                        .text_color(if selected {
-                            theme.accent
-                        } else {
-                            theme.fg_base
-                        })
-                        .child(chip_label.clone()),
-                );
+                // A disabled chip is never armed, whatever the caller passed:
+                // "Requested" greyed out is this wallet refusing that amount,
+                // and a click that took it would be the refusal undone by the
+                // control that states it.
+                let action = chip_actions.next().flatten().filter(|_| !disabled);
+                let chip = div()
+                    .h(px(36.))
+                    .px(px(12.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.outline_strong
+                    })
+                    .flex()
+                    .items_center()
+                    .opacity(if disabled { 0.45 } else { 1.0 })
+                    .text_size(theme::text_row_sub())
+                    .text_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.fg_base
+                    })
+                    .child(chip_label.clone());
+                // Stateful only when it is a control. A gallery chip stays the
+                // element the drawn scenarios have always rendered.
+                chip_row = match action {
+                    Some(action) => chip_row.child(
+                        chip.id(("allowance-chip", index))
+                            .cursor_pointer()
+                            .on_click(move |event, window, cx| action(event, window, cx)),
+                    ),
+                    None => chip_row.child(chip),
+                };
             }
             let mut card = div()
                 .p(px(16.))
