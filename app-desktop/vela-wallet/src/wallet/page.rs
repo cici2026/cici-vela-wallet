@@ -29,7 +29,8 @@ use crate::contacts::live as contacts_live;
 use crate::contacts::model::ContactRowModel;
 use crate::explore::ExploreStrings;
 use crate::explore::components as explore_components;
-use crate::explore::fixtures as explore_fixtures;
+use crate::explore::fixtures::{self as explore_fixtures, GroupAction};
+use crate::explore::live as explore_live;
 use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
 use crate::loc::Loc;
@@ -75,6 +76,7 @@ use crate::window_frame::{
 use vela_core::app::activity_feed::ActivityFeed;
 use vela_core::app::balance_dashboard::BalanceDashboard;
 use vela_core::app::batch_import::{BatchUnit, Event as BatchEvent};
+use vela_core::app::browser_history::BrowserHistory;
 use vela_core::app::contacts::{
     ContactExportScope, ContactFileFormat, ContactGroupInput, ContactSaveInput, Contacts,
     Event as ContactEvent,
@@ -6301,6 +6303,37 @@ impl WalletPage {
                 })
                 .detach();
         }));
+        // What the page calls itself, for the history the start screen reads.
+        // A visit is recorded when the DOCUMENT settles, not when a
+        // navigation starts: a load that fails or is cancelled is not a place
+        // anybody went, and the title only exists once the document parsed.
+        let page = cx.entity().downgrade();
+        let async_cx = cx.to_async();
+        crate::webview::on_meta_to(Box::new(move |url, title, favicon| {
+            let page = page.clone();
+            async_cx
+                .spawn(async move |cx| {
+                    page.update(cx, |_, cx| {
+                        resident::resident::<BrowserHistory>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::browser_history::Event::VisitRecorded {
+                                    url,
+                                    // Empty is ABSENT, not an empty title: the
+                                    // core's rule is that a report without one
+                                    // must not clobber a title already
+                                    // captured, and "" would clobber it.
+                                    title: (!title.is_empty()).then_some(title),
+                                    favicon: (!favicon.is_empty()).then_some(favicon),
+                                    now_ms: crate::executor::now_ms(),
+                                },
+                                cx,
+                            );
+                        });
+                    })
+                    .ok();
+                })
+                .detach();
+        }));
         let page = cx.entity().downgrade();
         let async_cx = cx.to_async();
         crate::webview::on_navigation_to(Box::new(move |url| {
@@ -6718,18 +6751,45 @@ impl WalletPage {
         ));
         column = column.child(grid);
 
-        for group in explore_fixtures::groups(&self.explore) {
+        // Recent is the core's; everything below it is still drawn, because
+        // nothing in `vela-core` owns favourites or custom groups yet. The
+        // drawn Recent group is DROPPED when the live one exists rather than
+        // shown beside it — two "Recent" headings, one of them invented, is
+        // the fixture leaking that phases 22, 26 and 27 each had to close.
+        let history = resident::resident::<BrowserHistory>(cx).read(cx).view();
+        let live_recent = explore_live::recent_group(&history.entries, &self.explore);
+        let groups = explore_fixtures::groups(&self.explore)
+            .into_iter()
+            .filter(|group| !(group.id == "recent" && self.identity.is_some()))
+            .collect::<Vec<_>>();
+        for group in live_recent.into_iter().chain(groups) {
             let action = match group.action {
                 explore_fixtures::GroupAction::Clear => self.explore.clear.clone(),
                 explore_fixtures::GroupAction::Edit => self.explore.edit.clone(),
                 explore_fixtures::GroupAction::Menu => SharedString::from("⋯"),
             };
-            column = column.child(section_header(
-                theme,
-                &mut self.icons,
-                group.title.clone(),
-                action,
-            ));
+            // The Clear on the live Recent heading clears the core's history.
+            // The drawn groups' actions stay inert: there is no machine behind
+            // a custom group, and a button that looked identical but deleted
+            // nothing would be the worse of the two lies.
+            let clearable = group.id == "recent" && matches!(group.action, GroupAction::Clear);
+            let (title_half, action_half) =
+                section_header_parts(theme, &mut self.icons, group.title.clone(), action);
+            let action_half = if clearable {
+                action_half
+                    .id("recent-clear")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|_, _: &gpui::ClickEvent, _, cx| {
+                        resident::resident::<BrowserHistory>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(vela_core::app::browser_history::Event::ClearAll, cx);
+                        });
+                        cx.notify();
+                    }))
+                    .into_any_element()
+            } else {
+                action_half.into_any_element()
+            };
+            column = column.child(section_header_row().child(title_half).child(action_half));
             let mut rows = div().flex().flex_col();
             for (i, site) in group.sites.iter().enumerate() {
                 rows = rows.child(
@@ -6739,10 +6799,28 @@ impl WalletPage {
                         &mut self.identicons,
                         site,
                     )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.browsing = true;
-                        cx.notify();
-                    })),
+                    .on_click({
+                        // Where the person left off, verbatim — that is what
+                        // the core stores the whole URL for. A row that opened
+                        // the origin instead would send somebody back to a
+                        // front page they had already navigated away from.
+                        let url = site.host.to_string();
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(entry) = resident::resident::<BrowserHistory>(cx)
+                                .read(cx)
+                                .view()
+                                .entries
+                                .iter()
+                                .find(|entry| entry.host == url)
+                            {
+                                this.browser_home = entry.url.clone();
+                                #[cfg(not(target_os = "linux"))]
+                                crate::webview::navigate(&entry.url);
+                            }
+                            this.browsing = true;
+                            cx.notify();
+                        })
+                    }),
                 );
             }
             column = column.child(rows);

@@ -33,6 +33,7 @@ pub mod approval_guard;
 pub mod balance_dashboard;
 pub mod balances;
 pub mod batch;
+pub mod browser_history;
 pub mod chain;
 pub mod chain_tokens;
 pub mod chainlink;

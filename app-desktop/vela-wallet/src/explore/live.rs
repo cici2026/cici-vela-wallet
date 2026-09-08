@@ -1,0 +1,147 @@
+//! The explore screen, built from what `browser_history` remembers.
+//!
+//! The **sibling** of `fixtures.rs`, as `signing/live.rs` is of its own: both
+//! produce the drawn models, and the page picks. What is live here is exactly
+//! one group — Recent — because exactly one core owns it. The favourites grid
+//! and the custom groups below it are still drawn, and they are drawn because
+//! nothing in `vela-core` owns them yet, which is a gap rather than a choice.
+//!
+//! Nothing here decides what is recent. Dedupe by origin, recency order, the
+//! cap and the "a report without a title must not clobber one" rule are all
+//! `browser_history`'s; this maps its entries onto rows and picks a colour.
+
+use gpui::{Hsla, SharedString, hsla};
+
+use vela_core::app::browser_history::BhistEntry;
+
+use super::ExploreStrings;
+use super::fixtures::{GroupAction, GroupModel, SiteModel};
+
+/// One remembered visit as a row.
+///
+/// The TITLE is what the page called itself and the HOST is what it actually
+/// is, so the host is the subtitle and never the other way round: a page may
+/// title itself anything at all, and a row that showed only that would let a
+/// site name itself after another one.
+#[must_use]
+pub fn site_of(entry: &BhistEntry) -> SiteModel {
+    let name = if entry.title.trim().is_empty() {
+        entry.host.clone()
+    } else {
+        entry.title.clone()
+    };
+    SiteModel {
+        // Keyed by ORIGIN, which is what the core dedupes on, so a row's
+        // element id is stable across visits to the same site.
+        id: "recent",
+        name: SharedString::from(name),
+        host: SharedString::from(entry.host.clone()),
+        letter: SharedString::from(letter_of(&entry.host)),
+        tint: tint_of(&entry.host),
+        subtitle: Some(SharedString::from(entry.host.clone())),
+        // No "2 hours ago": there is no word for it in the corpus, and an
+        // English one on a Chinese screen is worse than no line at all
+        // (phase 22's rule about showing a key to somebody who reads Chinese).
+        meta: None,
+    }
+}
+
+/// The Recent group, or `None` when nothing has been visited.
+///
+/// An empty group is not drawn: a heading with nothing under it reads as a
+/// feature that is broken rather than as a browser nobody has used yet.
+#[must_use]
+pub fn recent_group(entries: &[BhistEntry], strings: &ExploreStrings) -> Option<GroupModel> {
+    if entries.is_empty() {
+        return None;
+    }
+    Some(GroupModel {
+        id: "recent",
+        title: strings.recent.clone(),
+        action: GroupAction::Clear,
+        sites: entries.iter().map(site_of).collect(),
+    })
+}
+
+/// The first letter a person would read off the host.
+fn letter_of(host: &str) -> String {
+    host.chars()
+        .find(char::is_ascii_alphanumeric)
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().to_string())
+}
+
+/// A stable colour per host.
+///
+/// The drawn rows carry each protocol's brand colour, which is a fact about
+/// ten sites and not about the web. For everything else the hue comes from the
+/// host itself, so the same site is the same colour on every launch and two
+/// sites are unlikely to collide — display only, and it decides nothing.
+fn tint_of(host: &str) -> Hsla {
+    // FNV-1a, for a stable spread with no dependency.
+    let mut hash: u32 = 2_166_136_261;
+    for byte in host.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a hue, and the low bits are the point"
+    )]
+    let hue = (hash % 360) as f32 / 360.0;
+    // The saturation and lightness the drawn brand marks sit at, so a live row
+    // does not stand out beside a fixture one.
+    hsla(hue, 0.72, 0.55, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(host: &str, title: &str) -> BhistEntry {
+        BhistEntry {
+            origin: format!("https://{host}"),
+            url: format!("https://{host}/app"),
+            host: host.to_owned(),
+            title: title.to_owned(),
+            favicon: String::new(),
+            last_visited_ms: 1.0,
+        }
+    }
+
+    /// The host is the subtitle, always — a page's own title is a claim.
+    #[test]
+    fn a_row_shows_the_title_over_the_host_it_actually_is() {
+        let row = site_of(&entry("evil.example", "app.uniswap.org"));
+        assert_eq!(row.name, SharedString::from("app.uniswap.org"));
+        assert_eq!(
+            row.subtitle,
+            Some(SharedString::from("evil.example")),
+            "the host a page really is must still be on the row"
+        );
+        assert_eq!(row.letter, SharedString::from("E"));
+    }
+
+    /// A page with no title is its host, not a blank row.
+    #[test]
+    fn an_untitled_page_falls_back_to_its_host() {
+        let row = site_of(&entry("127.0.0.1:8137", "   "));
+        assert_eq!(row.name, SharedString::from("127.0.0.1:8137"));
+        assert_eq!(row.letter, SharedString::from("1"));
+    }
+
+    /// One colour per host, every launch.
+    #[test]
+    fn a_hosts_colour_is_stable_and_not_shared_with_its_neighbour() {
+        let a = tint_of("app.uniswap.org");
+        assert!((a.h - tint_of("app.uniswap.org").h).abs() < f32::EPSILON);
+        assert!((a.h - tint_of("polymarket.com").h).abs() > f32::EPSILON);
+    }
+
+    /// Nothing visited draws no heading at all.
+    #[test]
+    fn an_empty_history_draws_no_group() {
+        let strings = ExploreStrings::resolve(&crate::loc::Loc::from_env());
+        assert!(recent_group(&[], &strings).is_none());
+        assert!(recent_group(&[entry("a.example", "A")], &strings).is_some());
+    }
+}

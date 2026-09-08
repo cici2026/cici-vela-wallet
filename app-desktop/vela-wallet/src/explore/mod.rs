@@ -7,6 +7,7 @@
 
 pub mod components;
 pub mod fixtures;
+pub mod live;
 
 use gpui::SharedString;
 

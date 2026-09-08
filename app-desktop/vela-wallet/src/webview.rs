@@ -103,6 +103,21 @@ const BRIDGE_JS: &str = r#"
     const m = JSON.parse(json);
     window.postMessage({ ch: CHANNEL, ...m }, window.location.origin);
   };
+  // What the page calls itself. The phone shells get this from the native
+  // WebView's own title/favicon callbacks; wry has none, so the bridge reports
+  // it — twice, because a title is usually there at DOMContentLoaded and an
+  // icon link often is not, and `browser_history` is written to take a second
+  // report without clobbering what the first one captured.
+  const meta = () => {
+    const icon = document.querySelector("link[rel~='icon']");
+    window.ipc.postMessage(JSON.stringify({
+      vela: 'meta',
+      title: document.title || '',
+      favicon: icon ? icon.href : '',
+    }));
+  };
+  document.addEventListener('DOMContentLoaded', meta);
+  window.addEventListener('load', meta);
 })();
 "#;
 
@@ -141,8 +156,17 @@ thread_local! {
 /// Where a document load is reported. Same ownership as [`RequestSink`].
 type NavSink = Box<dyn Fn(String)>;
 
+/// What a page says it is called: `(url, title, favicon)`.
+///
+/// Untrusted, all three, and treated as display text only. The favicon is
+/// stored for the cross-client record and never FETCHED: this shell draws a
+/// letter, and fetching a URL a page handed us would be a beacon it gets for
+/// free every time somebody opens their history.
+type MetaSink = Box<dyn Fn(String, String, String)>;
+
 thread_local! {
     static NAV: RefCell<Option<NavSink>> = const { RefCell::new(None) };
+    static META: RefCell<Option<MetaSink>> = const { RefCell::new(None) };
 }
 
 /// Hand document loads to the page.
@@ -154,6 +178,11 @@ thread_local! {
 /// core's rule is written against.
 pub fn on_navigation_to(sink: NavSink) {
     NAV.with(|slot| *slot.borrow_mut() = Some(sink));
+}
+
+/// Hand page metadata to the page (the wallet's page, that is).
+pub fn on_meta_to(sink: MetaSink) {
+    META.with(|slot| *slot.borrow_mut() = Some(sink));
 }
 
 /// Hand requests to the page. Called once, when the page builds the browser.
@@ -340,6 +369,26 @@ fn on_request(request: wry::http::Request<String>) {
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(request.body()) else {
         return;
     };
+    // The bridge's other message. Checked first: it carries no `id`, so the
+    // provider path below would drop it silently.
+    if parsed.get("vela").and_then(|v| v.as_str()) == Some("meta") {
+        let text = |key: &str| {
+            parsed
+                .get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let url = BROWSER
+            .with(|slot| slot.borrow().as_ref().and_then(|b| b.view.url().ok()))
+            .unwrap_or_default();
+        META.with(|slot| {
+            if let Some(sink) = slot.borrow().as_ref() {
+                sink(url, text("title"), text("favicon"));
+            }
+        });
+        return;
+    }
     let (Some(id), Some(method)) = (
         parsed.get("id").and_then(|v| v.as_str()),
         parsed.get("method").and_then(|v| v.as_str()),
