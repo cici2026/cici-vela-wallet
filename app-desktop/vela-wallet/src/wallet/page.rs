@@ -82,6 +82,7 @@ use vela_core::app::contacts::{
     Event as ContactEvent,
 };
 use vela_core::app::display_currency::DisplayCurrency;
+use vela_core::app::explore_sites::ExploreSites;
 use vela_core::app::fee_policy::Event as FeeEvent;
 use vela_core::app::manage_tokens::{Event as MtokEvent, ManageTokens, MtokNetwork};
 use vela_core::app::network_admin::{Event as NetEvent, NetOverrideField, NetworkAdmin};
@@ -337,6 +338,12 @@ pub struct WalletPage {
     /// which is what the gallery and an unsigned-in window get.
     #[cfg(not(target_os = "linux"))]
     signing_host: Option<gpui::Entity<crate::wallet::signing_host::SigningHost>>,
+    /// Which favourite the open tile menu is about.
+    menu_origin: Option<String>,
+    /// What the open page last called itself, from the bridge's own report.
+    /// The star pins with THIS rather than the host, because the host is what
+    /// a tile falls back to and a page's title is what a person recognises.
+    browser_title: Option<String>,
     /// The permissions machine for the browser column. Born with the first
     /// request a page makes, because that is the first moment there is an
     /// origin to judge.
@@ -601,6 +608,8 @@ impl WalletPage {
             send_host: None,
             #[cfg(not(target_os = "linux"))]
             signing_host: None,
+            menu_origin: None,
+            browser_title: None,
             #[cfg(not(target_os = "linux"))]
             browser_host: None,
             #[cfg(not(target_os = "linux"))]
@@ -6167,7 +6176,44 @@ impl WalletPage {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(star)
+            .child(
+                // The star pins the page that is open. It reads the url from
+                // the WEBVIEW, never from the address bar's text: what is
+                // pinned has to be the document that is actually loaded.
+                div()
+                    .id("toolbar-star")
+                    .cursor_pointer()
+                    .child(star)
+                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                        #[cfg(not(target_os = "linux"))]
+                        if let Some(url) = crate::webview::current_url() {
+                            // The page's own title when it has reported one;
+                            // the host otherwise. The core keeps whichever
+                            // arrives until somebody renames the tile.
+                            let title = this
+                                .browser_title
+                                .clone()
+                                .or_else(crate::webview::host)
+                                .unwrap_or_default();
+                            resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                                resident.dispatch(
+                                    vela_core::app::explore_sites::Event::FavoriteAdded {
+                                        url,
+                                        // The page's own title arrives with the
+                                        // next meta report; the host is what is
+                                        // certainly true right now, and the core
+                                        // lets a later title replace it while
+                                        // nobody has renamed the tile.
+                                        title: (!title.is_empty()).then_some(title),
+                                        now_ms: crate::executor::now_ms(),
+                                    },
+                                    cx,
+                                );
+                            });
+                        }
+                        cx.notify();
+                    })),
+            )
             .child(
                 div()
                     .id("site-menu")
@@ -6332,7 +6378,8 @@ impl WalletPage {
             let page = page.clone();
             async_cx
                 .spawn(async move |cx| {
-                    page.update(cx, |_, cx| {
+                    page.update(cx, |page, cx| {
+                        page.browser_title = (!title.is_empty()).then(|| title.clone());
                         resident::resident::<BrowserHistory>(cx).update(cx, |resident, cx| {
                             resident.dispatch(
                                 vela_core::app::browser_history::Event::VisitRecorded {
@@ -6727,7 +6774,37 @@ impl WalletPage {
             .flex()
             .flex_col();
 
-        let favorites = explore_fixtures::favorites();
+        // The person's own grid once they are signed in; the drawn one before
+        // that, which is what the gallery reviews. Same fork as Recent.
+        let explore_view = resident::resident::<ExploreSites>(cx).read(cx).view();
+        let live_grid = self.identity.is_some() && explore_view.ready;
+        let favorites: Vec<explore_fixtures::SiteModel> = if live_grid {
+            explore_view
+                .favorites
+                .iter()
+                .map(explore_live::tile_of)
+                .collect()
+        } else {
+            explore_fixtures::favorites()
+        };
+        // What each tile opens and what its menu acts on — the ORIGIN, which
+        // is the site's identity, kept beside the row so a click and a
+        // right-click cannot disagree about which site they mean.
+        let origins: Vec<(String, String)> = if live_grid {
+            explore_view
+                .favorites
+                .iter()
+                .map(|site| (site.origin.clone(), site.url.clone()))
+                .collect()
+        } else {
+            favorites
+                .iter()
+                .map(|site| {
+                    let url = format!("https://{}", site.host);
+                    (url.clone(), url)
+                })
+                .collect()
+        };
         column = column.child(section_header(
             theme,
             &mut self.icons,
@@ -6740,11 +6817,13 @@ impl WalletPage {
             grid = grid.child(
                 explore_components::site_tile(ElementId::from(("tile", i)), theme, site)
                     .on_click({
-                        // A favourite opens THAT site. Before this every tile
-                        // set `browsing` and the page drew the same mock, so
-                        // clicking Aave showed Uniswap — which no mock can be
-                        // blamed for once the page is real.
-                        let url = format!("https://{}", site.host);
+                        // A favourite opens THAT site, at the url it was
+                        // pinned at — which is deeper than the origin when
+                        // somebody pinned the page they actually work on.
+                        let url = origins
+                            .get(i)
+                            .map(|(_, url)| url.clone())
+                            .unwrap_or_default();
                         cx.listener(move |this, _, _, cx| {
                             this.browsing = true;
                             this.browser_home = url.clone();
@@ -6753,21 +6832,28 @@ impl WalletPage {
                             cx.notify();
                         })
                     })
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    .on_mouse_down(MouseButton::Right, {
+                        // The menu acts on the site it was opened over.
+                        let origin = origins.get(i).map(|(origin, _)| origin.clone());
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.menu_origin = origin.clone();
                             this.menu = Some((ContactsMenu::Tile, event.position, Anchor::TopLeft));
                             cx.notify();
-                        }),
-                    ),
+                        })
+                    }),
             );
         }
-        grid = grid.child(explore_components::add_tile(
-            ElementId::from("tile-add"),
-            theme,
-            &mut self.icons,
-            self.explore.add.clone(),
-        ));
+        // The "add" affordance is left OUT when the grid is full rather than
+        // drawn and refusing — the core says which, and a control that cannot
+        // work is worse than an absent one.
+        if !(live_grid && explore_view.favorites_full) {
+            grid = grid.child(explore_components::add_tile(
+                ElementId::from("tile-add"),
+                theme,
+                &mut self.icons,
+                self.explore.add.clone(),
+            ));
+        }
         column = column.child(grid);
 
         // Recent is the core's; everything below it is still drawn, because
@@ -6777,9 +6863,19 @@ impl WalletPage {
         // the fixture leaking that phases 22, 26 and 27 each had to close.
         let history = resident::resident::<BrowserHistory>(cx).read(cx).view();
         let live_recent = explore_live::recent_group(&history.entries, &self.explore);
+        // …and so are the person's own groups. The drawn ones (交易 / 预测市场)
+        // are mock CONTENT, not chrome: they go the moment there is a real
+        // book to show, exactly as the drawn Recent does.
+        let live_groups = if live_grid {
+            explore_live::custom_groups(&explore_view)
+        } else {
+            Vec::new()
+        };
         let groups = explore_fixtures::groups(&self.explore)
             .into_iter()
             .filter(|group| !(group.id == "recent" && self.identity.is_some()))
+            .filter(|group| !(live_grid && group.id != "recent"))
+            .chain(live_groups)
             .collect::<Vec<_>>();
         for group in live_recent.into_iter().chain(groups) {
             let action = match group.action {
@@ -7781,8 +7877,32 @@ impl WalletPage {
                     cx.notify();
                 })) as contacts_components::MenuAction),
             ],
-            // Favourites: rename, move to a group, remove. No core owns them.
-            ContactsMenu::Tile => Vec::new(),
+            // The favourite tile's menu, in the order it is drawn: open in a
+            // new tab, rename, move to a group, remove.
+            //
+            // Remove is the core's `FavoriteRemoved`, which also takes the
+            // site out of every group it was in. Rename and move need an
+            // input and a group picker that no desktop scenario draws yet,
+            // and a new tab needs the strip (still owed) — all three stay
+            // drawn and inert rather than armed and lying.
+            ContactsMenu::Tile => vec![
+                None,
+                None,
+                None,
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    let origin = this.menu_origin.take();
+                    this.menu = None;
+                    if let Some(origin) = origin {
+                        resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::explore_sites::Event::FavoriteRemoved { origin },
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+            ],
         }
     }
 

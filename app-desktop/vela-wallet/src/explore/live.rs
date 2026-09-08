@@ -13,6 +13,7 @@
 use gpui::{Hsla, SharedString, hsla};
 
 use vela_core::app::browser_history::BhistEntry;
+use vela_core::app::explore_sites::{ExploreSite, ExploreView};
 
 use super::ExploreStrings;
 use super::fixtures::{GroupAction, GroupModel, SiteModel};
@@ -61,6 +62,42 @@ pub fn recent_group(entries: &[BhistEntry], strings: &ExploreStrings) -> Option<
         action: GroupAction::Clear,
         sites: entries.iter().map(site_of).collect(),
     })
+}
+
+/// One pinned site as a tile.
+#[must_use]
+pub fn tile_of(site: &ExploreSite) -> SiteModel {
+    SiteModel {
+        id: "favorite",
+        name: SharedString::from(site.name.clone()),
+        host: SharedString::from(site.host.clone()),
+        letter: SharedString::from(letter_of(&site.host)),
+        tint: tint_of(&site.host),
+        subtitle: Some(SharedString::from(site.host.clone())),
+        meta: None,
+    }
+}
+
+/// The person's own groups, in the order they made them.
+///
+/// A hidden group draws nothing at all — hiding is what this wallet offers
+/// instead of deleting for the two system groups, and a custom group that a
+/// person hid should behave the same way rather than reappear greyed.
+#[must_use]
+pub fn custom_groups(view: &ExploreView) -> Vec<GroupModel> {
+    view.groups
+        .iter()
+        .filter(|group| !group.hidden)
+        .map(|group| GroupModel {
+            // The page keys rows by (group id, index); a stable literal here
+            // would collide across groups, so the id travels as the name's
+            // own leaked string only for element ids — see `page.rs`.
+            id: "custom",
+            title: SharedString::from(group.name.clone()),
+            action: GroupAction::Menu,
+            sites: group.sites.iter().map(tile_of).collect(),
+        })
+        .collect()
 }
 
 /// The first letter a person would read off the host.
