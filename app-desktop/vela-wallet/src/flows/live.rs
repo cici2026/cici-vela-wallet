@@ -40,8 +40,8 @@ use vela_core::app::send::{
 use crate::flows::fixtures::{
     AddressCard, AssetsEmpty, AssetsPanel, BatchImport, BatchRow, ContactPick, CtaState,
     DepositEntry as FlowDeposit, FactLead, FactRow, FeeRow, FeeTokenPick, FeeTokenRow, FilterChip,
-    HistoryGroup, NetworkRow, ReceiveList, ReceiveQr, RecipientCard, SendConfirm, SendForm,
-    SendNotice, SendPick, SendReceipt, StatusChip, StatusTone, TokenMark, address_lines,
+    HistoryGroup, NetworkRow, ReceiveGate, ReceiveList, ReceiveQr, RecipientCard, SendConfirm,
+    SendForm, SendNotice, SendPick, SendReceipt, StatusChip, StatusTone, TokenMark, address_lines,
 };
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
@@ -554,6 +554,20 @@ pub fn receive_qr(
         // would work today and silently ignore an amount the moment the request
         // builder lands.
         qr_payload: (!pay.qr_value.is_empty()).then(|| SharedString::from(pay.qr_value.clone())),
+        // Covered until this account has read the warning once. `gate_loading`
+        // keeps it covered while the flag is still being read, so a first
+        // visit never flashes the code and then hides it.
+        gate: (!pay.acknowledged).then(|| ReceiveGate {
+            title: s.warning_title.clone(),
+            body: s.warning_body.clone(),
+            counterfactual: s.warning_counterfactual.clone(),
+            confirm: s.warning_confirm.clone(),
+            loading: pay.gate_loading,
+        }),
+        // The core's own answer, not "is there a payload": an address may be
+        // ready to copy long before anybody has been told which networks it
+        // is safe on.
+        can_copy: pay.can_copy,
         centre: TokenMark {
             ticker: SharedString::from(symbol),
             badge: tint(chain_id),
@@ -1783,6 +1797,51 @@ mod tests {
                 .is_empty(),
             "the queued sentence never appears under a failure"
         );
+    }
+
+    /// The address is not handed over until the warning has been read.
+    ///
+    /// Two things follow the core's gate, and both were the shell's own guess
+    /// until spec 032 phase 38: the code is REPLACED by the warning (a cover
+    /// somebody can read around is one they will read around), and the copy
+    /// affordance is withheld — `can_copy`, not "is there a payload".
+    #[test]
+    fn the_receive_screen_asks_before_it_hands_the_address_over() {
+        let s = FlowStrings::resolve(&crate::loc::Loc::from_env());
+        let watch =
+            crate::core_host::CoreHost::<vela_core::app::receive_watch::ReceiveWatch>::new().view();
+        let mut pay = pay_view();
+
+        // Fresh account: the flag is being read, so the cover is up and even
+        // its button is withheld.
+        pay.gate_loading = true;
+        pay.acknowledged = false;
+        pay.can_copy = false;
+        let qr = receive_qr("0xabc", "Golden", 100, &watch, &pay, &s, "en");
+        let gate = qr.gate.as_ref().unwrap_or_else(|| unreachable!("no gate"));
+        assert!(
+            gate.loading,
+            "the button appeared while the flag was loading"
+        );
+        assert!(!qr.can_copy);
+
+        // Read, not yet acknowledged: the warning stands, with its button.
+        pay.gate_loading = false;
+        let qr = receive_qr("0xabc", "Golden", 100, &watch, &pay, &s, "en");
+        let gate = qr.gate.as_ref().unwrap_or_else(|| unreachable!("no gate"));
+        assert!(!gate.loading);
+        assert_eq!(gate.confirm, s.warning_confirm);
+        assert!(
+            !gate.title.is_empty() && !gate.body.is_empty() && !gate.counterfactual.is_empty(),
+            "the warning must say what it is about, and why one address is enough"
+        );
+
+        // Acknowledged: the code appears and the address can be copied.
+        pay.acknowledged = true;
+        pay.can_copy = true;
+        let qr = receive_qr("0xabc", "Golden", 100, &watch, &pay, &s, "en");
+        assert!(qr.gate.is_none());
+        assert!(qr.can_copy);
     }
 
     /// A real `PaymentRequestView`, from a booted core.

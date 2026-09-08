@@ -2954,6 +2954,16 @@ impl WalletPage {
         };
         let mut actions = panels::PanelActions {
             open_qr: bind(FlowStep::ReceiveQr, cx),
+            // "I Understand": the gate the core keeps per account. Bound for
+            // every panel — the receive screen is the only one that draws it,
+            // and binding it there and nowhere else is what a `None` in the
+            // other panels already says.
+            acknowledge: Some(Box::new(cx.listener(|_, _: &gpui::ClickEvent, _, cx| {
+                resident::resident::<PaymentRequest>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(vela_core::app::payment_request::Event::Acknowledge, cx);
+                });
+                cx.notify();
+            })) as panels::Click),
             open_qr_rows: Vec::new(),
             open_tx: bind(FlowStep::TxDetail, cx),
             open_tx_rows: Vec::new(),

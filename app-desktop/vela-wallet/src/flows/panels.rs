@@ -43,6 +43,9 @@ pub struct PanelActions {
     /// `open_qr_rows` instead — the rows are real networks and each one opens
     /// its own code, so which row was clicked is now information.
     pub open_qr: Option<Click>,
+    /// DR2L: "I Understand" on the pre-receive warning — the gate that has to
+    /// be passed once per account before the address is handed over.
+    pub acknowledge: Option<Click>,
     /// DR1L, live: one listener per network row. Empty falls back to `open_qr`.
     pub open_qr_rows: Vec<Click>,
     /// DA1L: a row opens its transaction.
@@ -161,7 +164,9 @@ pub fn render(
         FlowBody::Receive(model) => {
             receive(model, theme, icons, actions.open_qr, actions.open_qr_rows)
         }
-        FlowBody::ReceiveQr(model) => receive_qr(model, theme, icons, identicons),
+        FlowBody::ReceiveQr(model) => {
+            receive_qr(model, theme, icons, identicons, actions.acknowledge)
+        }
         FlowBody::History(groups) => {
             history(groups, theme, icons, actions.open_tx, actions.open_tx_rows)
         }
@@ -249,6 +254,7 @@ fn receive_qr(
     theme: &Theme,
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
+    acknowledge: Option<Click>,
 ) -> Div {
     let mut col = column().child(
         div()
@@ -280,6 +286,14 @@ fn receive_qr(
         );
     }
 
+    // The gate comes FIRST, and it replaces the code rather than sitting over
+    // it: a warning somebody can read around is one they will read around,
+    // and the whole point is that the address is not handed over until this
+    // has been read once.
+    if let Some(gate) = &model.gate {
+        return col.child(receive_gate(theme, gate, acknowledge));
+    }
+
     col.child(address_card(
         theme,
         icons,
@@ -290,7 +304,11 @@ fn receive_qr(
         // The whole address, rejoined from the two halves the card draws. A
         // receive screen's job is to hand this over, and the two ways it does
         // that — the code and this card — were both decorative until 031.
-        model.qr_payload.is_some().then(|| {
+        //
+        // `can_copy` is the CORE's answer, and it is not "is there a payload":
+        // an address can be ready long before anybody has been told which
+        // networks it is safe on.
+        (model.qr_payload.is_some() && model.can_copy).then(|| {
             SharedString::from(format!(
                 "{}{}",
                 model.account.lines.0, model.account.lines.1
@@ -1759,4 +1777,49 @@ pub fn scan_modal(model: &ScanModal, theme: &Theme, icons: &mut IconCache) -> Di
                 .child(model.hint.clone()),
         )
         .child(tools)
+}
+
+/// The warning that stands where the code will be.
+///
+/// Not an overlay ON the code: a cover somebody can read around is one they
+/// will read around. The button is withheld while the flag is still being
+/// read — a button that appears a frame later is one somebody clicks twice,
+/// and the second click would land on whatever took its place.
+fn receive_gate(
+    theme: &Theme,
+    gate: &crate::flows::fixtures::ReceiveGate,
+    act: Option<Click>,
+) -> Div {
+    let mut card = column()
+        .p(px(20.))
+        .rounded(px(16.))
+        .border_1()
+        .border_color(theme.border_card)
+        .child(
+            div()
+                .text_size(theme::text_row_title())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.fg_base)
+                .child(gate.title.clone()),
+        )
+        .child(
+            div()
+                .text_size(theme::text_row_sub())
+                .text_color(theme.fg_muted)
+                .child(gate.body.clone()),
+        )
+        .child(
+            div()
+                .text_size(theme::text_row_sub())
+                .text_color(theme.fg_muted)
+                .child(gate.counterfactual.clone()),
+        );
+    if !gate.loading {
+        card = card.child(clickable(
+            "receive-ack",
+            act,
+            accent_button(theme, gate.confirm.clone()),
+        ));
+    }
+    card
 }

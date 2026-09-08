@@ -201,6 +201,11 @@ pub struct FlowStrings {
     pub share_card_note: String,
     pub token_contract: SharedString,
     pub warning_reminder: SharedString,
+    /// The gate a person passes once per account, in the corpus's words.
+    pub warning_title: SharedString,
+    pub warning_body: SharedString,
+    pub warning_counterfactual: SharedString,
+    pub warning_confirm: SharedString,
     pub save_image: SharedString,
     pub share_card_headline: SharedString,
 
@@ -427,6 +432,10 @@ impl FlowStrings {
             share_card_note: raw("receive.shareCardNetworkNote"),
             token_contract: s("receive.tokenContract"),
             warning_reminder: s("receive.warningReminder"),
+            warning_title: s("receive.warningTitle"),
+            warning_body: s("receive.warningBody"),
+            warning_counterfactual: s("receive.warningCounterfactual"),
+            warning_confirm: s("receive.warningConfirm"),
             save_image: s("receive.request.saveImage"),
             share_card_headline: s("receive.shareCardHeadline"),
 

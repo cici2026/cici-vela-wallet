@@ -200,6 +200,20 @@ pub struct DepositEntry {
     pub rows: Vec<(SharedString, SharedString)>,
 }
 
+/// The pre-receive warning, in the corpus's own words.
+#[derive(Clone)]
+pub struct ReceiveGate {
+    pub title: SharedString,
+    pub body: SharedString,
+    /// Why one address works everywhere — the sentence that stops somebody
+    /// hunting for a per-network address they do not need.
+    pub counterfactual: SharedString,
+    pub confirm: SharedString,
+    /// The flag is still being read: draw the cover, but not the button. A
+    /// button that appears a frame later is one somebody clicks twice.
+    pub loading: bool,
+}
+
 #[derive(Clone)]
 pub struct ReceiveQr {
     pub title: SharedString,
@@ -218,6 +232,16 @@ pub struct ReceiveQr {
     /// the core's `qr_value` — because a decorative code on a screen whose
     /// whole job is to be scanned is a screen that does not work.
     pub qr_payload: Option<SharedString>,
+    /// The warning a person must read before the code is shown.
+    ///
+    /// `Some` while `payment_request` says the account has not acknowledged it
+    /// (and while the flag is still being read, so a first visit never flashes
+    /// the code). The gate is the reason `can_copy` and `can_save` exist: a
+    /// screen whose whole job is to hand an address over must first say which
+    /// networks that address is safe on.
+    pub gate: Option<ReceiveGate>,
+    /// May the address be copied yet? The core's `can_copy`.
+    pub can_copy: bool,
     /// Money that landed while this code was open, newest first.
     ///
     /// Empty in every mock, because the mocks draw the screen before anything
@@ -607,6 +631,11 @@ fn receive_qr(s: &FlowStrings, asset_mode: bool) -> ReceiveQr {
         // The mocks draw the design, not a wallet: no payload, so the card
         // keeps the pattern the drawing shows.
         qr_payload: None,
+        // The gallery draws the code, not the cover: the drawn scenarios are
+        // reviewed for the code's own composition, and a live screen shows
+        // the warning first (spec 032 phase 38).
+        gate: None,
+        can_copy: false,
         // The mocks draw the screen before anything has arrived.
         deposits: Vec::new(),
     }
