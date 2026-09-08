@@ -1842,6 +1842,53 @@ desktop **323 / 319**,fmt clean,画廊 36 态,Windows 通过。
 `approval_guard` 的自定义金额输入(桌面没图)、批量逐腿编辑器(没图)、
 `swipe_action` 仍未用于**标注**(核心自己分派了,所以它只剩"给按钮起名字"这一个用途)。
 
+## Phase 32 — 封顶编辑器,在一笔真的无限额授权上
+
+phase 30 建的东西一直没在真请求上见过。这一刀只做一件事:让它发生,然后看。
+
+### 全程(临时文件被清了,所以是从零开始的一遍)
+
+1. 空状态开 app → **走真的 onboarding 登录**(不是塞盘):
+   "I already have a wallet" → "This device" → 固定密钥集答签名 → 金标 Safe
+   `0x88cCA0…266894`(SC-302 又验了一次)。
+2. 探索页 → 本地页面 → 同意面板 → Connect(授权按 origin 落盘)。
+3. 页面发一笔**真的 `approve(spender, 2^256-1)`** —— USDC.e on Gnosis。
+
+### 屏幕上
+
+抬头 `127.0.0.1:8137` · Gnosis,intent **Approve**(红),
+**Amount: Unlimited**(红),Spender `0x031d7d…84772b`;
+**Spending cap 卡**:值 `Unlimited`(红),三个 chip——
+**Requested 灰(这一笔要的额度,这个钱包不签)**、Balance 灰、**Revoke 可点**;
+下面一句"Unlimited approvals are disabled for your safety Set a finite amount to continue."
+费用 0.01 xDAI 已报价,**滑块是关的**——因为还没有人选过额度。
+
+点 **Revoke**:chip 亮起,**值从 `Unlimited` 变成 `0 USDC.e`**(核心的格式化器 + 探针查到的符号),
+**滑块武装**。三机 AND 的最后一票就是这个选择。
+
+**没有滑下去**:那会真花 xDAI 并把一条授权写上链,和 SC-303 一样是创始人的决定。
+被签的是不是改写后的参数,由 phase 30 那条单测钉着(`a_chosen_cap_is_what_gets_signed`)。
+
+### Balance 为什么是灰的 —— 查了,不是缺陷
+
+金标 Safe 在 Gnosis 上的 USDC.e 余额**就是 0**(直接问链:`balanceOf` 返回 0)。
+余额上限等于 0,而 0 就是 Revoke,核心因此不提供这个 chip。读也通、规则也对。
+
+### 这一屏把那个缺口照得很清楚
+
+今天可选的只有 **Revoke** 和(有余额时的)**Balance**。
+一个人想授权"就 100 USDC",**桌面上做不到**——自定义金额输入没有图。
+这不是接线欠账,是**缺一张图**;这张截图就是要这张图的理由。
+
+### 顺手记一个排版毛病
+
+那句提示是 `unlimitedDisabled` + `choosePrompt` 用空格拼的,
+而语料里前一句**没有句号**,于是屏幕上读作"…for your safety Set a finite amount…"。
+**画稿里也是这么拼的**(`fixtures.rs` 同一行),所以我没有单方面改:
+要么语料补标点,要么两边一起换拼法——是创始人的字。
+
+desktop **323 / 319**(无新增测试:这一刀是跑,不是写),fmt clean。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
