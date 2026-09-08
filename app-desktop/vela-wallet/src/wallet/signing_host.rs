@@ -513,7 +513,7 @@ impl SigningHost {
 ///
 /// The same list the network settings show, because a request for a chain the
 /// settings say is present must not be refused as absent.
-fn known_chain_ids() -> Vec<u32> {
+pub fn known_chain_ids() -> Vec<u32> {
     let mut ids: Vec<u32> = vela_core::app::network_admin::BUILTIN_CHAINS
         .iter()
         .map(|chain| chain.chain_id)

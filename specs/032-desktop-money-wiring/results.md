@@ -1538,6 +1538,89 @@ desktop **295 / 291**,fmt clean,画廊 36 态全渲染,Windows 通过。
 后面的帧是 `Amount 1 USDC.e`。原来这一帧是画稿里的
 "Swap 0.5 ETH → 1,278.11 USDC · Uniswap V3 Router"。
 
+## Phase 27 — C 组开工:一个真 dApp 现在能连上了
+
+spec 里写着 C 组不做,理由是「桌面没有 web 引擎」——那个理由在 phase 13/14 就没了。
+而没有 C 组,浏览器那一列其实是废的:**除了签名方法,所有请求一律答 4900**,
+而任何一个真 dApp 在要签名之前都会先问 `eth_chainId`、`eth_requestAccounts`。
+本地那个探针页之所以能走通,只因为它**不问自答**直接发 `eth_sendTransaction`。
+
+### 三件事,各归各的
+
+| 谁 | 管什么 |
+|---|---|
+| `dapp_permissions`(核心) | 是不是这一帧、是不是安全源、这个源有没有授权、要不要弹同意、`eth_accounts` 答什么 |
+| `browser_host`(新,壳) | 执行核心的操作:读写授权、答页面、发 EIP-1193 事件、写"已连接"活动行、把签名类交给签名列 |
+| `executor::dapp_rpc`(新,壳) | 核心转出来的那一堆里,**谁答**:签名 / 钱包状态 / 切链 / 只读代理 |
+
+**为什么 `browser_host` 是宿主而不是 resident**:`ForwardToSigning` 要开签名列、
+`SettleForwarded` 要结掉签名列还欠的答复,两件都要 `Context`——和 `SigningHost` 同一个形状。
+
+### 只读代理是白名单,而且白名单在两个地方——所以要测
+
+`dapp_rpc` 的表是从 `extension/lib/protocol.js` 的 `classifyMethod` / `READ_PROXY_METHODS`
+移植的。**那个文件本来就 `include_str!` 进了这个二进制**(页面里的 provider 就是它拼出来的),
+所以有一条测试**把 JS 解析出来逐个比对**:两边不一致就红。
+
+黑名单式路由是**失败朝开**的:`eth_signTransaction` 不被任何"是不是签名方法"抓住,
+一个 catch-all 的 read 桶会把它转给公共节点——那时钱包就是一个挂着钱包名字的开放 RPC 中继。
+
+### 跑起来抓到的两个,都是"字符串是谁"的错
+
+**① 授权是按整条 URL 存的。** 第一次连成功后去看盘:
+`vela.perm.http://127.0.0.1:8137/?v=3`——**带 path 带 query**。
+`webview.rs` 把 `view.url()` 原样当 origin 递了进去。授权覆盖的是**一个站点**,
+按 URL 存意味着同一个站点翻一页就再问一次,连接徽章也永远对不上号。
+修法不是我自己写个 trim:**核心已经导出了 `dapp_permissions::origin_of`**(它每次导航都用它),
+壳改成调它——不然写进去的 key 和查出来的 key 会是两种拼法,还少了默认端口归一化那条规则。
+
+**② 机器出生时,文档已经开着了。** 这台机器是**第一个请求**才出生的,而那时页面早就 load 完了。
+核心的 `current_origin` / `connected_addr` 只有 `NavigationStarted` 会设——
+于是连接面板画出来是一个没有名字的「?」、没有"已连接"、Disconnect 无从谈起。
+修法:宿主一建好就把**当前文档的 URL** 补告诉它一次。
+
+### 还有第三个,是 phase 26 那个错的第三次露头
+
+连接面板本身画的还是画稿:**"app.uniswap.org · Connected" + "Ethereum"**,
+而真连着的是 `127.0.0.1:8137` 上的 Gnosis。同一类错误第三次出现
+(phase 22 抬头、phase 26 正文、这次是连接面板),现在这三处都读核心了。
+"Connected"只在核心说有授权地址时才写——它是一句断言。
+
+### 实机全程
+
+同一个本地页面,连拍与点击:
+
+```
+ethereum: present
+eth_chainId -> "0x64"          ← 壳答的钱包状态,EIP-1193 最简十六进制
+eth_accounts -> []             ← 核心答的:没授权就是空,而且不弹窗(不变量⑧)
+[同意面板弹出 → 点 Connect]
+evt accountsChanged ["0x88cca0…266894"]
+eth_requestAccounts -> ["0x88cCA0EeDbF2C4426110bbFc998F048689266894"]
+eth_accounts -> ["0x88cCA0…"]
+```
+
+盘上:`vela.perm.http://127.0.0.1:8137` = 金标地址 + chain 100;
+活动里一行 `type: "connect"`。**再开一次同一个站点:不再问**,accountsChanged 直接来,
+第三列根本不出现(该问的问完了就没有可问的)。
+
+desktop **305 / 301**,fmt clean,画廊 36 态,Windows 通过。
+
+### 坑:合成点击只在窗口是 key 的时候算数
+
+gpui 的窗口不是 key 时,鼠标**移动**照收(按钮会变色),**点击却不派发**——
+第一次点只是激活窗口。所以自动化要么先激活再点,要么像我最后那样**新开一个窗口就点**。
+(`osascript` 设 frontmost 不够;窗口变亮才算。)另外这台机器要在
+系统设置 → 隐私与安全性 → 辅助功能 里勾上 Terminal,否则 CGEvent 一个都不落地。
+
+### 还欠(C 组只做了一台机器)
+
+- `dapp_session`(WalletPair / 远程注入)和 `browser_history` 没接:收藏、历史、
+  多标签仍是画稿;`wallet_switchEthereumChain` 改的是**这一列的链**,不是全局设置。
+- `wallet_addEthereumChain` / `wallet_watchAsset` 按扩展的做法**答应但什么都不改**——
+  网络和代币只在设置里由人添加。
+- 连接面板的 Disconnect 已接 `RevokeRequested`,但**没实机点过**。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

@@ -105,6 +105,23 @@ pub struct SendHost {
     last_track_status: Option<TrackStatus>,
 }
 
+/// Every address this wallet holds.
+///
+/// `dapp_permissions` judges a grant against ALL of them, because a grant is
+/// pinned to the address it was made for rather than to whichever account is
+/// active now (the core's invariant ⑨). Handing it only the active one would
+/// make switching accounts look like a revoked connection.
+pub fn account_addresses() -> Vec<String> {
+    storage::load_accounts()
+        .map(|accounts| {
+            accounts
+                .into_iter()
+                .map(|account| account.address)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The active account, whole — the send flow signs as it.
 pub fn active_account() -> Option<Account> {
     let accounts = storage::load_accounts().ok()?;

@@ -196,6 +196,20 @@ pub fn merge_value(key: &str, fields: Map<String, Value>) -> Result<()> {
     write_all(map)
 }
 
+/// Remove one key entirely.
+///
+/// Not `write_value(key, Null)`: a stored null is a record the usage count and
+/// every future reader still have to step over, and a revoked permission
+/// should leave nothing behind that says a site was ever here.
+pub fn remove_value(key: &str) -> Result<()> {
+    let Ok(_guard) = LOCK.lock() else {
+        return Err(StorageError("the storage lock is poisoned".to_owned()));
+    };
+    let mut map = read_all()?;
+    map.remove(key);
+    write_all(map)
+}
+
 fn write_key(key: &str, value: Value) -> Result<()> {
     let Ok(_guard) = LOCK.lock() else {
         return Err(StorageError("the storage lock is poisoned".to_owned()));

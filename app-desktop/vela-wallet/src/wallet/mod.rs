@@ -4,6 +4,7 @@
 //! `components` the reusable visuals (theme + resolved strings in, `Div` out),
 //! `page` the one entity that owns state and interaction.
 
+pub mod browser_host;
 pub mod components;
 pub mod fixtures;
 pub mod live;

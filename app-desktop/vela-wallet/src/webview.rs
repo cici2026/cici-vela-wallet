@@ -38,6 +38,8 @@ use std::cell::RefCell;
 
 use gpui::{Bounds, Pixels, Window};
 
+use vela_core::app::dapp_permissions::{DpermPageEvent, DpermRejectReason, DpermRespondPayload};
+
 /// The provider, verbatim from the extension (spec 027). Injected into every
 /// page rather than reimplemented, because a second EIP-1193 implementation is
 /// a second set of bugs — and this one has an extension's worth of use behind
@@ -104,6 +106,17 @@ const BRIDGE_JS: &str = r#"
 })();
 "#;
 
+/// The extension's protocol table, verbatim.
+///
+/// Exposed so the desktop's own copy of the read allowlist can be CHECKED
+/// against it rather than kept in step by hand — the same file, in the same
+/// binary, is the page's provider.
+#[cfg(test)]
+#[must_use]
+pub fn protocol_js() -> &'static str {
+    PROTOCOL_JS
+}
+
 /// One EIP-1193 request, with the two facts the page cannot forge attached by
 /// this side of the boundary.
 pub struct Incoming {
@@ -123,6 +136,24 @@ type RequestSink = Box<dyn Fn(Incoming)>;
 
 thread_local! {
     static SINK: RefCell<Option<RequestSink>> = const { RefCell::new(None) };
+}
+
+/// Where a document load is reported. Same ownership as [`RequestSink`].
+type NavSink = Box<dyn Fn(String)>;
+
+thread_local! {
+    static NAV: RefCell<Option<NavSink>> = const { RefCell::new(None) };
+}
+
+/// Hand document loads to the page.
+///
+/// A NAVIGATION, not a URL poll: `dapp_permissions` settles the requests an
+/// origin left pending when its document goes away, and a poll would report
+/// that late — after the next page could have inherited an answer meant for
+/// the last one. wry reports the load as it starts, which is the moment the
+/// core's rule is written against.
+pub fn on_navigation_to(sink: NavSink) {
+    NAV.with(|slot| *slot.borrow_mut() = Some(sink));
 }
 
 /// Hand requests to the page. Called once, when the page builds the browser.
@@ -229,6 +260,15 @@ pub fn reload() {
     });
 }
 
+/// The document the browser is on, whole. `None` before the first page.
+///
+/// The URL and not the origin: the permissions machine derives its own origin
+/// from it, and that derivation is the one its grants are keyed by.
+#[must_use]
+pub fn current_url() -> Option<String> {
+    BROWSER.with(|slot| slot.borrow().as_ref()?.view.url().ok())
+}
+
 /// The host the toolbar shows.
 ///
 /// From the WEBVIEW, so the lock and the name beside it describe the page that
@@ -259,6 +299,16 @@ fn build(window: &Window, home: &str) -> Option<wry::WebView> {
         .with_initialization_script(provider_script())
         .with_initialization_script(BRIDGE_JS)
         .with_ipc_handler(on_request)
+        .with_navigation_handler(|url| {
+            NAV.with(|slot| {
+                if let Some(sink) = slot.borrow().as_ref() {
+                    sink(url);
+                }
+            });
+            // Every navigation is allowed. This handler REPORTS; deciding
+            // where a browser may go is not a thing this file gets to invent.
+            true
+        })
         .with_url(home)
         .build_as_child(window);
     match built {
@@ -298,6 +348,7 @@ fn on_request(request: wry::http::Request<String>) {
     };
     let origin = BROWSER
         .with(|slot| slot.borrow().as_ref().and_then(|b| b.view.url().ok()))
+        .map(|url| origin_of(&url))
         .unwrap_or_default();
     let incoming = Incoming {
         id: id.to_owned(),
@@ -346,6 +397,116 @@ pub fn respond(id: &str, payload: &vela_core::app::sign_request::SignResponsePay
     deliver(&answer.to_string());
 }
 
+/// The ORIGIN of a URL, by the CORE's own derivation.
+///
+/// The whole URL went over until spec 032 phase 27 measured what it wrote: a
+/// grant keyed `http://127.0.0.1:8137/?v=3`. Every rule that reads this string
+/// is written about an origin — a grant covers a SITE — so keying it by URL
+/// asks again on the next page of the same site and leaves the connected chip
+/// comparing two strings that cannot match.
+///
+/// `dapp_permissions::origin_of` and not a copy of it here: the machine
+/// derives the origin from the page URL on every navigation, and a shell that
+/// trimmed differently would write a grant under one spelling and look it up
+/// under another. It also refuses anything that is not http(s), and normalises
+/// the default port — two rules a hand-rolled `split` in this file would have
+/// had to rediscover.
+///
+/// Empty when there is no origin, which matches no grant: fail closed.
+fn origin_of(url: &str) -> String {
+    vela_core::app::dapp_permissions::origin_of(url).unwrap_or_default()
+}
+
+/// Answer one provider request the permissions core decided.
+///
+/// The JSON shapes are the wire's, and the core said WHICH shape: an address
+/// array for `eth_accounts`, EIP-2255's capability list for
+/// `wallet_requestPermissions`, or an error whose code the core chose. The
+/// words for a rejection are the shell's — the core carries a reason, not a
+/// sentence — but nothing here decides whether it is a rejection.
+pub fn respond_permission(id: &str, payload: &DpermRespondPayload) {
+    let answer = match payload {
+        DpermRespondPayload::Accounts { addresses } => serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "result": addresses,
+        }),
+        DpermRespondPayload::Permissions { granted } => serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "result": if *granted {
+                serde_json::json!([{ "parentCapability": "eth_accounts" }])
+            } else {
+                serde_json::json!([])
+            },
+        }),
+        DpermRespondPayload::Error { code, reason } => serde_json::json!({
+            "dir": "res",
+            "id": id,
+            "error": { "code": code, "message": reject_message(*reason) },
+        }),
+    };
+    deliver(&answer.to_string());
+}
+
+/// An EIP-1193 event, in the envelope the provider already listens for.
+pub fn emit_page_event(event: &DpermPageEvent) {
+    let answer = match event {
+        DpermPageEvent::AccountsChanged { addresses } => serde_json::json!({
+            "dir": "evt",
+            "event": "accountsChanged",
+            "data": addresses,
+        }),
+        DpermPageEvent::ChainChanged { chain_id_hex } => serde_json::json!({
+            "dir": "evt",
+            "event": "chainChanged",
+            "data": chain_id_hex,
+        }),
+        DpermPageEvent::Disconnect => serde_json::json!({
+            "dir": "evt",
+            "event": "disconnect",
+        }),
+    };
+    deliver(&answer.to_string());
+}
+
+/// What a rejection says. English by design and by precedent: this string goes
+/// to a DEVELOPER's console, not onto a screen a person reads, and the
+/// corpus's sentences are written for the second audience.
+fn reject_message(reason: DpermRejectReason) -> &'static str {
+    match reason {
+        DpermRejectReason::UnauthorizedFrame => "Unauthorized frame",
+        DpermRejectReason::NoAccountAvailable => "No wallet account available",
+        DpermRejectReason::ConsentBusy => "Another connection request is open",
+        DpermRejectReason::InsecureOrigin => "Signing requires a secure origin",
+        DpermRejectReason::UserRejected => "User rejected the request",
+        DpermRejectReason::NavigatedAway => "The page navigated away",
+        DpermRejectReason::BrowserClosed => "The browser was closed",
+        DpermRejectReason::NotConnected => "This site is not connected",
+        DpermRejectReason::StaleAuthorizedAddress => "The authorized address changed",
+    }
+}
+
+/// Answer a forwarded request the shell routed itself.
+///
+/// `eth_chainId`, a node read, a chain switch: an answer the core never sees
+/// because it is not a permission. The envelope is the same one every other
+/// answer uses, which is what keeps one id to one settled promise.
+pub fn respond_json(id: &str, result: &serde_json::Value) {
+    let answer = serde_json::json!({ "dir": "res", "id": id, "result": result });
+    deliver(&answer.to_string());
+}
+
+/// The other half: a refusal with a code the caller chose deliberately.
+pub fn respond_error(id: &str, code: i32, message: &str) {
+    let answer = serde_json::json!({
+        "dir": "res",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    deliver(&answer.to_string());
+}
+
 /// A request this wallet cannot answer yet.
 ///
 /// 4900 and not 4001: the person did not decline, and a dApp that reads a
@@ -376,6 +537,36 @@ fn deliver(json: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A grant covers a site, so the string the core judges must BE the site
+    /// — and must be the SAME string the core derives on a navigation.
+    #[test]
+    fn an_origin_keeps_the_site_and_drops_the_page() {
+        assert_eq!(
+            origin_of("http://127.0.0.1:8137/?v=3"),
+            "http://127.0.0.1:8137"
+        );
+        assert_eq!(
+            origin_of("https://app.uniswap.org/swap?chain=gnosis#pool"),
+            "https://app.uniswap.org"
+        );
+        // The port is part of the origin — :8137 and :9000 on one host are two
+        // sites — except the scheme's own default, which is not spelled.
+        assert_eq!(origin_of("http://localhost:3000/"), "http://localhost:3000");
+        assert_eq!(
+            origin_of("https://example.com:443/x"),
+            "https://example.com"
+        );
+    }
+
+    /// Nothing readable, nothing granted.
+    #[test]
+    fn an_unreadable_url_is_no_origin_at_all() {
+        assert_eq!(origin_of("about:blank"), "");
+        assert_eq!(origin_of(""), "");
+        // A `file://` page is not a site anything may be granted to.
+        assert_eq!(origin_of("file:///Users/me/index.html"), "");
+    }
 
     /// The provider must be a CLASSIC script by the time it is injected.
     ///

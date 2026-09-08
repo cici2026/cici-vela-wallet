@@ -56,6 +56,13 @@ pub struct ExploreStrings {
     pub switch_account: SharedString,
     pub network: SharedString,
     pub connection_explainer: SharedString,
+    /// The consent the in-app browser asks for. `connect.browser.*` — the
+    /// corpus the phone shells already ask this question with; a desktop
+    /// wording of its own would be a second sentence about the same grant.
+    pub consent_title: String,
+    pub consent_body: SharedString,
+    pub consent_connect: SharedString,
+    pub consent_cancel: SharedString,
     pub auto_request_hint: SharedString,
     pub disconnect: SharedString,
     pub close: SharedString,
@@ -103,6 +110,10 @@ impl ExploreStrings {
             switch_account: s("explore.switchAccount"),
             network: s("explore.network"),
             connection_explainer: s("explore.connectionExplainer"),
+            consent_title: loc.t("connect.browser.title").to_string(),
+            consent_body: loc.t("connect.browser.body"),
+            consent_connect: loc.t("connect.browser.connect"),
+            consent_cancel: loc.t("connect.browser.cancel"),
             auto_request_hint: s("explore.autoRequestHint"),
             disconnect: s("explore.disconnect"),
             close: s("explore.close"),
@@ -127,9 +138,16 @@ mod tests {
                 "explore.connectionExplainer",
             ),
             (s.close.as_ref(), "explore.close"),
+            (s.consent_body.as_ref(), "connect.browser.body"),
+            (s.consent_connect.as_ref(), "connect.browser.connect"),
+            (s.consent_cancel.as_ref(), "connect.browser.cancel"),
         ] {
             assert_ne!(value, key, "`{key}` echoed the key");
         }
+        assert!(
+            s.consent_title.contains("{{host}}"),
+            "connect.browser.title must keep its host slot"
+        );
         assert!(
             s.site_count.contains("{{n}}"),
             "siteCount must be a template"
