@@ -114,6 +114,9 @@ pub struct SigningStrings {
     pub warn_unverified_amount: SharedString,
     /// What an amount reads when its decimals could not be verified.
     pub amount_unknown: SharedString,
+    /// While the core is still resolving. An empty body would read as a
+    /// transaction that does nothing.
+    pub loading: SharedString,
     pub warn_approve_all: SharedString,
     pub warn_permit_cant_cap: SharedString,
     pub warn_best_effort: SharedString,
@@ -256,6 +259,7 @@ impl SigningStrings {
             warn_token_to_contract: s("tokenToContractWarning"),
             warn_unverified_amount: s("unverifiedWarning"),
             amount_unknown: s("amountUnknown"),
+            loading: s("loading"),
             warn_approve_all: a("setApprovalAllWarn"),
             warn_permit_cant_cap: a("permitCantCap"),
             warn_best_effort: s("bestEffortWarning"),

@@ -82,6 +82,11 @@ pub struct SigningHost {
     /// spec 032 phase 22 it named the MOCK's site on every live request.
     pub origin: String,
     pub chain_id: u32,
+    /// What the sheet can still say when the ladder decodes nothing. Parsed
+    /// ONCE, here, from the same params the machines were told about: a second
+    /// reading of an untrusted payload is a second answer to "what am I
+    /// signing", and only one of them would be on screen.
+    pub facts: crate::signing::live::RequestFacts,
     ctx: SignContext,
     #[allow(dead_code, reason = "held so the ceremony outlives the request")]
     channel: Arc<CeremonyChannel>,
@@ -109,6 +114,7 @@ impl SigningHost {
         let mut host = Self {
             origin: request.origin.clone(),
             chain_id: request.chain_id,
+            facts: facts_of(&request),
             sign,
             view,
             clear,
@@ -522,6 +528,19 @@ fn known_chain_ids() -> Vec<u32> {
 
 /// The first call's `to` / `data` / `value`, for the decoder.
 ///
+/// The blind rung's two facts: who it goes to, and how many bytes of calldata
+/// nobody could read. Both come from the first leg, like the decode does.
+fn facts_of(request: &IncomingRequest) -> crate::signing::live::RequestFacts {
+    let call = first_call(&request.params_json);
+    let data = call.as_ref().and_then(|c| c.1.clone()).unwrap_or_default();
+    crate::signing::live::RequestFacts {
+        to: call.and_then(|c| c.0),
+        // Hex, so two characters per byte; an odd tail is a malformed payload
+        // and rounds DOWN rather than claiming a byte that is not there.
+        data_bytes: data.trim_start_matches("0x").len() / 2,
+    }
+}
+
 /// A batch decodes from its first leg today, which is what the phone's sheet
 /// shows too; the per-leg panorama (CS26) is a drawn state nobody has wired.
 fn first_call(params_json: &str) -> Option<(Option<String>, Option<String>, Option<String>)> {

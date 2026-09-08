@@ -6610,10 +6610,12 @@ impl WalletPage {
         if let Some(host) = self.signing_host.as_ref() {
             let host = host.read(cx);
             let fee = &host.fee_view;
-            let blocks = signing_live::blocks(&host.clear_view, &self.signing);
-            if !blocks.is_empty() {
-                model.blocks = blocks;
-            }
+            // ALWAYS the core's, never "the core's if it has any". The old
+            // `if !blocks.is_empty()` left the GALLERY's blocks under a live
+            // header for every surface the live builder had nothing for —
+            // which was four of the core's six, resolution included. A drawn
+            // swap under a true header is the worst thing this column can say.
+            model.blocks = signing_live::blocks(&host.clear_view, &host.facts, &self.signing);
             // WHO is asking, from the request. The mock's Uniswap header on a
             // live request is the one fact the person is judging, wrong.
             let (name, dapp_host, letter) = signing_live::dapp_identity(&host.origin);

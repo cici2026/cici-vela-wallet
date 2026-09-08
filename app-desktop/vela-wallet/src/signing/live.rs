@@ -14,7 +14,8 @@ use gpui::SharedString;
 
 use vela_core::app::approval_guard::GuardView;
 use vela_core::app::clear_signing::{
-    ClearRisk, ClearSignField, ClearSignResult, ClearSigningView, UNKNOWN_AMOUNT,
+    ClearBlindTyped, ClearDangerClass, ClearMessageView, ClearRisk, ClearSignField,
+    ClearSignResult, ClearSigningView, ClearSiweBinding, ClearSurface, UNKNOWN_AMOUNT,
 };
 use vela_core::app::fee_policy::FeeView;
 use vela_core::app::sign_request::SignView;
@@ -45,15 +46,254 @@ pub fn confirm_enabled(sign: &SignView, guard: &GuardView, fee: &FeeView) -> boo
     sign.confirm_gate_open && guard.confirm_allowed && fee.confirm_fee_ready
 }
 
-/// The blocks a resolved request draws, in the order they are read.
+/// What the shell knows about the request that the core does not hand back.
+///
+/// Only reached on the blind rung, where by definition nothing was decoded:
+/// what is still TRUE then is who it goes to and how many bytes nobody could
+/// read. Parsed once, by the host, from the same params the machines were told
+/// about — re-parsing it here would be a second reading of an untrusted
+/// payload, and two readings can disagree.
+#[derive(Clone, Default)]
+pub struct RequestFacts {
+    pub to: Option<String>,
+    pub data_bytes: usize,
+}
+
+/// The sheet's body, dispatched by the core's own `ClearSurface`.
+///
+/// **This is the core's dispatch, not the shell's.** Reading `result.is_some()`
+/// instead — which this file did until spec 032 phase 26 — collapses five
+/// distinct surfaces into "decoded / not decoded", and the caller then had
+/// nothing to draw for four of them. The panel filled that hole with the
+/// GALLERY's blocks, so a real request from `127.0.0.1` was drawn, under its
+/// own true header, as "Swap 0.5 ETH for 1,278.11 USDC · Uniswap V3 Router"
+/// for as long as resolution took. Phase 22 fixed the mirror image of this (a
+/// mock header over a live request); this half is worse, because a header the
+/// reader can verify invites them to trust the body under it.
+///
+/// `Loading` draws a line rather than nothing for the same reason invariant ⑦
+/// exists: a blind view must never flash before the clear one, and an empty
+/// body reads as "this transaction does nothing".
+#[must_use]
+pub fn blocks(clear: &ClearSigningView, facts: &RequestFacts, s: &SigningStrings) -> Vec<Block> {
+    match clear.surface {
+        ClearSurface::None => Vec::new(),
+        ClearSurface::Loading => vec![Block::Sentence {
+            text: s.loading.clone(),
+            tone: Tone::Neutral,
+        }],
+        ClearSurface::ClearSign => clear
+            .result
+            .as_ref()
+            .map(|result| result_blocks(result, s))
+            .unwrap_or_default(),
+        ClearSurface::EthSign | ClearSurface::MessageSign => clear
+            .message
+            .as_ref()
+            .map(|message| message_blocks(message, s))
+            .unwrap_or_default(),
+        ClearSurface::BlindTypedData => clear
+            .blind_typed
+            .as_ref()
+            .map(|typed| blind_typed_blocks(typed, s))
+            .unwrap_or_default(),
+        ClearSurface::BlindTransaction => blind_tx_blocks(facts, s),
+    }
+}
+
+/// A message the person is asked to sign, in the core's own classification.
+///
+/// The payload is shown as the core prepared it: `decoded_text` when the bytes
+/// are readable, the short hex preview when they are not. Nothing here decodes
+/// anything — a second reading of the payload is a second answer to "what am I
+/// signing", and only one of them would be on screen.
+fn message_blocks(message: &ClearMessageView, s: &SigningStrings) -> Vec<Block> {
+    let signing_in = message.siwe.is_some();
+    let danger = matches!(
+        message.danger_class,
+        ClearDangerClass::EthSign | ClearDangerClass::SiwePhish
+    );
+    let mut out = vec![Block::Intent {
+        text: if signing_in {
+            s.intent_sign_in.clone()
+        } else {
+            s.intent_message.clone()
+        },
+        tone: if danger { Tone::Danger } else { Tone::Neutral },
+    }];
+
+    if message.danger_class == ClearDangerClass::EthSign {
+        // `eth_sign` signs an opaque digest: there is no text to read, and the
+        // sentence says so before the digest is shown.
+        out.push(Block::Sentence {
+            text: s.body_eth_sign.clone(),
+            tone: Tone::Danger,
+        });
+    }
+    if let Some(text) = message.decoded_text.as_ref().filter(|t| !t.is_empty()) {
+        out.push(Block::Sentence {
+            text: SharedString::from(text.clone()),
+            tone: Tone::Neutral,
+        });
+    }
+    if let Some(preview) = message.binary_preview.as_ref() {
+        out.push(Block::Code {
+            lines: vec![SharedString::from(preview.clone())],
+            note: None,
+        });
+    }
+    if message.non_printable {
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: SharedString::from(s.warn_hex_message.clone()),
+        });
+    }
+
+    if let Some(siwe) = message.siwe.as_ref() {
+        let mut rows = vec![(
+            s.label_siwe_site.clone(),
+            // The host the check RAN ON, never a prettier one: the core's own
+            // field doc says showing a different string is how a lookalike
+            // slips past.
+            SharedString::from(
+                siwe.domain_host
+                    .clone()
+                    .unwrap_or_else(|| siwe.domain.clone()),
+            ),
+            Tone::Neutral,
+            false,
+        )];
+        if let Some(statement) = siwe.statement.as_ref() {
+            rows.push((
+                s.label_siwe_statement.clone(),
+                SharedString::from(statement.clone()),
+                Tone::Neutral,
+                false,
+            ));
+        }
+        if let Some(uri) = siwe.uri.as_ref() {
+            rows.push((
+                s.label_siwe_origin.clone(),
+                SharedString::from(uri.clone()),
+                Tone::Neutral,
+                false,
+            ));
+        }
+        out.push(Block::Rows(rows));
+        match siwe_binding(message) {
+            // Only a proven match is asserted. `Unknown` says nothing, which
+            // is the fail-safe side: an unparseable authority is not evidence
+            // of phishing and must not be sold as evidence of safety.
+            Some(true) => out.push(Block::Positive(SharedString::from(s.ok_siwe.clone()))),
+            Some(false) => out.push(Block::Warning {
+                tone: Tone::Danger,
+                text: SharedString::from(s.warn_siwe_mismatch.clone()),
+            }),
+            None => {}
+        }
+    }
+
+    if message.danger_class == ClearDangerClass::EthSign {
+        out.push(Block::Warning {
+            tone: Tone::Danger,
+            text: s.warn_eth_sign.clone(),
+        });
+    }
+    out
+}
+
+fn siwe_binding(message: &ClearMessageView) -> Option<bool> {
+    match message.binding? {
+        ClearSiweBinding::Ok => Some(true),
+        ClearSiweBinding::Mismatch => Some(false),
+        ClearSiweBinding::Unknown => None,
+    }
+}
+
+/// Typed data nobody published a descriptor for: the payload's own projection.
+///
+/// The core takes the first five `message` entries in payload order and the
+/// domain; this draws them and says, in the corpus's words, that no descriptor
+/// explained them.
+fn blind_typed_blocks(typed: &ClearBlindTyped, s: &SigningStrings) -> Vec<Block> {
+    let mut out = vec![
+        Block::Intent {
+            text: typed
+                .primary_type
+                .clone()
+                .map_or_else(|| s.intent_typed_data.clone(), SharedString::from),
+            tone: Tone::Caution,
+        },
+        Block::Warning {
+            tone: Tone::Caution,
+            text: s.warn_blind_typed.clone(),
+        },
+    ];
+    if typed.has_domain {
+        out.push(Block::Party {
+            label: s.label_typed_domain.clone(),
+            name: typed
+                .domain_name
+                .clone()
+                .map_or_else(|| s.tag_unverified.clone(), SharedString::from),
+            address: typed.verifying_contract.clone().map(SharedString::from),
+            badge: None,
+        });
+    }
+    let rows: Vec<crate::signing::fixtures::Row> = typed
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                SharedString::from(field.key.clone()),
+                SharedString::from(field.value.clone()),
+                Tone::Neutral,
+                true,
+            )
+        })
+        .collect();
+    if !rows.is_empty() {
+        out.push(Block::Rows(rows));
+    }
+    out
+}
+
+/// The bottom rung: a transaction nothing could read.
+///
+/// Two facts and no invention — how many bytes were not decoded, and who they
+/// go to. The amount is deliberately absent: scaling a value is what the core
+/// does for every other rung, and a number this file composed on its own would
+/// be a second authority on "how much" (recorded as a gap in phase 26).
+fn blind_tx_blocks(facts: &RequestFacts, s: &SigningStrings) -> Vec<Block> {
+    let mut out = vec![
+        Block::Intent {
+            text: s.intent_contract_call.clone(),
+            tone: Tone::Caution,
+        },
+        Block::Warning {
+            tone: Tone::Caution,
+            text: SharedString::from(crate::signing::fill(
+                &s.warn_blind_decode,
+                &[("bytes", &facts.data_bytes.to_string())],
+            )),
+        },
+    ];
+    if let Some(to) = facts.to.as_ref() {
+        out.push(Block::Party {
+            label: s.label_interacting.clone(),
+            name: s.tag_unverified.clone(),
+            address: Some(SharedString::from(to.clone())),
+            badge: Some((s.tag_unverified.clone(), Tone::Caution)),
+        });
+    }
+    out
+}
+
+/// The blocks a decoded request draws, in the order they are read.
 ///
 /// Intent first — what this DOES — then what is wrong with it, then the
 /// detail. A warning under the fields is a warning after the decision.
-#[must_use]
-pub fn blocks(clear: &ClearSigningView, s: &SigningStrings) -> Vec<Block> {
-    let Some(result) = clear.result.as_ref() else {
-        return Vec::new();
-    };
+fn result_blocks(result: &ClearSignResult, s: &SigningStrings) -> Vec<Block> {
     let mut out = vec![Block::Intent {
         text: SharedString::from(result.intent.clone()),
         tone: tone_of(result.risk),
@@ -272,7 +512,11 @@ mod tests {
         unknown.unverified = true;
         let known = field("Amount", "500 USDC.e");
 
-        let blocks = blocks(&view(result(vec![unknown, known])), &s);
+        let blocks = blocks(
+            &view(result(vec![unknown, known])),
+            &RequestFacts::default(),
+            &s,
+        );
         let rows = blocks
             .iter()
             .find_map(|block| match block {
@@ -316,9 +560,200 @@ mod tests {
         let _ = host.dispatch(vela_core::app::clear_signing::Event::Cleared);
         ClearSigningView {
             resolved: true,
+            // The surface a decoded request is presented on. The core picks it
+            // and the sheet follows it, so a fixture that set only `result`
+            // would be testing a state the core never produces.
+            surface: ClearSurface::ClearSign,
             result: Some(result),
             ..host.view()
         }
+    }
+
+    fn surfaced(surface: ClearSurface, view: ClearSigningView) -> ClearSigningView {
+        ClearSigningView { surface, ..view }
+    }
+
+    fn pristine() -> ClearSigningView {
+        crate::core_host::CoreHost::<vela_core::app::clear_signing::ClearSigning>::new().view()
+    }
+
+    fn message(danger: ClearDangerClass) -> ClearMessageView {
+        ClearMessageView {
+            payload: "0xdead".to_owned(),
+            is_hex: true,
+            decoded_text: Some("Sign in to Example".to_owned()),
+            binary_preview: None,
+            non_printable: false,
+            siwe: None,
+            binding: None,
+            danger_class: danger,
+        }
+    }
+
+    /// Every surface the core can present draws SOMETHING.
+    ///
+    /// This is the guard on the defect phase 26 fixed. The panel used to keep
+    /// the gallery's blocks whenever the live builder returned nothing, so a
+    /// real request wore a drawn swap under its own true header. The panel no
+    /// longer has that fallback — which means an empty answer here is now a
+    /// blank sheet, and a blank sheet reads as "this does nothing". Any
+    /// surface that stops drawing must fail here first.
+    #[test]
+    fn every_surface_the_core_can_present_draws_something() {
+        let s = strings();
+        let facts = RequestFacts {
+            to: Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()),
+            data_bytes: 196,
+        };
+        let cases: Vec<(ClearSurface, ClearSigningView)> = vec![
+            (ClearSurface::Loading, pristine()),
+            (
+                ClearSurface::ClearSign,
+                view(result(vec![field("Amount", "1 USDC.e")])),
+            ),
+            (
+                ClearSurface::MessageSign,
+                ClearSigningView {
+                    message: Some(message(ClearDangerClass::Plain)),
+                    ..pristine()
+                },
+            ),
+            (
+                ClearSurface::EthSign,
+                ClearSigningView {
+                    message: Some(message(ClearDangerClass::EthSign)),
+                    ..pristine()
+                },
+            ),
+            (
+                ClearSurface::BlindTypedData,
+                ClearSigningView {
+                    blind_typed: Some(ClearBlindTyped {
+                        primary_type: Some("Permit".to_owned()),
+                        has_domain: true,
+                        domain_name: Some("Example".to_owned()),
+                        verifying_contract: Some("0xcccc".to_owned()),
+                        fields: vec![vela_core::app::clear_signing::ClearBlindField {
+                            key: "spender".to_owned(),
+                            value: "0xdddd".to_owned(),
+                        }],
+                    }),
+                    ..pristine()
+                },
+            ),
+            (ClearSurface::BlindTransaction, pristine()),
+        ];
+        for (surface, base) in cases {
+            let drawn = blocks(&surfaced(surface, base), &facts, &s);
+            assert!(
+                !drawn.is_empty(),
+                "{surface:?} drew nothing — the sheet would be blank"
+            );
+        }
+        // The one surface that is meant to be empty: the core presenting
+        // nothing at all. Drawing something here would be the shell inventing
+        // a request.
+        assert!(blocks(&surfaced(ClearSurface::None, pristine()), &facts, &s).is_empty());
+    }
+
+    /// The blind rung says the two things that are still true, and no more.
+    #[test]
+    fn a_blind_transaction_says_only_what_is_true_about_it() {
+        let s = strings();
+        let facts = RequestFacts {
+            to: Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()),
+            data_bytes: 196,
+        };
+        let drawn = blocks(
+            &surfaced(ClearSurface::BlindTransaction, pristine()),
+            &facts,
+            &s,
+        );
+        let warned = drawn.iter().any(|block| match block {
+            Block::Warning { text, .. } => text.contains("196"),
+            _ => false,
+        });
+        assert!(warned, "the byte count nobody could read is the warning");
+        let named = drawn.iter().any(|block| match block {
+            Block::Party { address, .. } => address.as_ref().is_some_and(|a| a.contains("0xbbbb")),
+            _ => false,
+        });
+        assert!(named, "who it goes to is still known");
+        // No amount: scaling a value is the core's job on every other rung,
+        // and a number composed here would be a second authority on "how much".
+        assert!(
+            !drawn
+                .iter()
+                .any(|block| matches!(block, Block::Amount { .. })),
+            "the shell invented an amount"
+        );
+    }
+
+    /// `eth_sign` is the hard-warning surface, never the calm message view —
+    /// and an unknown SIWE binding asserts nothing in either direction.
+    #[test]
+    fn the_message_surfaces_keep_the_cores_classification() {
+        let s = strings();
+        let facts = RequestFacts::default();
+
+        let hard = blocks(
+            &surfaced(
+                ClearSurface::EthSign,
+                ClearSigningView {
+                    message: Some(message(ClearDangerClass::EthSign)),
+                    ..pristine()
+                },
+            ),
+            &facts,
+            &s,
+        );
+        assert!(
+            hard.iter().any(|block| matches!(
+                block,
+                Block::Warning {
+                    tone: Tone::Danger,
+                    ..
+                }
+            )),
+            "eth_sign drew no danger warning"
+        );
+
+        let mut unknown_binding = message(ClearDangerClass::SiweOk);
+        unknown_binding.siwe = Some(vela_core::app::clear_signing::ClearSiweFields {
+            domain: "example.com".to_owned(),
+            domain_host: Some("example.com".to_owned()),
+            address: None,
+            statement: Some("Sign in".to_owned()),
+            uri: None,
+            chain_id: None,
+            nonce: None,
+        });
+        unknown_binding.binding = Some(ClearSiweBinding::Unknown);
+        let calm = blocks(
+            &surfaced(
+                ClearSurface::MessageSign,
+                ClearSigningView {
+                    message: Some(unknown_binding),
+                    ..pristine()
+                },
+            ),
+            &facts,
+            &s,
+        );
+        assert!(
+            !calm.iter().any(|block| matches!(block, Block::Positive(_))),
+            "an unparseable authority was sold as a verified match"
+        );
+        assert!(
+            !calm.iter().any(|block| matches!(
+                block,
+                Block::Warning {
+                    tone: Tone::Danger,
+                    ..
+                }
+            )),
+            "an unknown binding is not evidence of phishing either"
+        );
     }
 
     /// The slide is three machines' answer, ANDed.
@@ -366,6 +801,7 @@ mod tests {
         detail.detail = true;
         let blocks = blocks(
             &view(result(vec![field("To", "0xbbb"), detail])),
+            &RequestFacts::default(),
             &strings(),
         );
         let rows = blocks
@@ -386,7 +822,7 @@ mod tests {
         let mut burn = result(vec![field("To", "0xbbb")]);
         burn.to_own_token = true;
         burn.best_effort = true;
-        let blocks = blocks(&view(burn), &s);
+        let blocks = blocks(&view(burn), &RequestFacts::default(), &s);
         let warnings: Vec<_> = blocks
             .iter()
             .filter_map(|block| match block {
@@ -403,12 +839,17 @@ mod tests {
         assert_eq!(warnings[1].0, Tone::Caution);
     }
 
-    /// An unresolved request draws no blocks — never an empty intent that
-    /// would read as "this does nothing".
+    /// A pristine machine — nothing presented at all — draws nothing.
+    ///
+    /// Written before phase 26 as "nothing decoded draws nothing", which is no
+    /// longer the same sentence: a request that decodes to nothing is the
+    /// BlindTransaction surface and it draws the blind rung. What draws
+    /// nothing is `ClearSurface::None`, which is the core saying it has not
+    /// been given a request to present.
     #[test]
-    fn nothing_decoded_draws_nothing() {
+    fn a_machine_with_no_request_draws_nothing() {
         let host = crate::core_host::CoreHost::<vela_core::app::clear_signing::ClearSigning>::new();
-        assert!(blocks(&host.view(), &strings()).is_empty());
+        assert!(blocks(&host.view(), &RequestFacts::default(), &strings()).is_empty());
     }
 }
 

@@ -1476,6 +1476,68 @@ desktop **292 / 288**;wasm 重建 `5d01841e0bb3`(3,728,061 字节),`verify-web` 
 phase 22 修过反过来的那一半(真请求配 mock 的抬头);这是同一个错误的另一半,
 而且更糟:**抬头是真的,会让人以为正文也是真的**。归 phase 26。
 
+## Phase 26 — 面板的正文归核心,而核心早就说了该画哪一屏
+
+phase 25 那一跑抓到的:**真请求的抬头下面画着画稿里的那笔 swap**。
+
+### 洞在哪
+
+```rust
+let blocks = signing_live::blocks(&host.clear_view, &self.signing);
+if !blocks.is_empty() { model.blocks = blocks; }   // ← 空就留着 mock
+```
+
+而 live 构造器的第一行是 `let Some(result) = clear.result else { return Vec::new() }`。
+**核心六个面它只认一个**,另外五个一律空:解析途中、personal_sign、eth_sign、
+盲签 typed data、盲签交易——**每一种都会把画稿的正文留在屏幕上**。
+
+phase 22 修的是反过来的一半(真请求配 mock 的抬头)。这一半更糟:
+**抬头是真的、是可核对的,它会让人以为下面那段也是真的。**
+
+### 修法:读核心自己的 `ClearSurface`
+
+核心早就有这个分派,而且文档里写着不变量⑦:**"盲签的视图绝不能在清晰的之前闪一下"**——
+`Loading` 就是为这件事存在的。壳之前用 `result.is_some()` 自己造了一个二分法,
+把六个面压成"解出来/没解出来",于是四个面没东西可画。
+
+现在 `blocks()` 按 `clear.surface` 分派:
+
+| 面 | 画什么 |
+|---|---|
+| `None` | 什么都不画(核心说它没有请求要展示,壳再画就是壳在编请求) |
+| `Loading` | 一行 `loading` 语料。**空正文读起来像"这笔什么也不做"** |
+| `ClearSign` | 原来那条路 |
+| `MessageSign` / `EthSign` | 核心分好的 danger class:`eth_sign` 是硬警告面(先说这是一个不可读的摘要,再给摘要,最后红警告),普通消息给 `decoded_text`;SIWE 三行 + **只有 `Ok` 才敢说"匹配"**(`Unknown` 什么都不说——权威解不出来不是钓鱼的证据,更不是安全的证据) |
+| `BlindTypedData` | primary type + domain + 载荷前五个字段 |
+| `BlindTransaction` | 两个仍然为真的事实:**没人读得懂的字节数**、**收款合约是谁** |
+
+**SIWE 那一行显示的是 `domain_host`——核心比对时用的那个串**,不是更好看的那个:
+核心自己的字段注释写着,显示一个比对之外的串正是仿冒域名混过去的路子。
+
+### 盲签那一屏故意缺一样东西
+
+**金额没画。** 把 wei 缩放成人读的数,核心在别的每一档都做了(`format_wei_amount`),
+壳自己算一个就是"这笔多少钱"的第二个权威。所以这一档暂时不显示原生金额——
+**记成缺口**,而不是悄悄补一个自己算的数。(要补就该核心出一个 blind-tx 视图。)
+
+### 测试
+
+- **每一个核心能展示的面都得画出东西**:panel 已经没有"空就退回 mock"的兜底了,
+  所以从今往后空正文就是白屏,而白屏读起来像"这笔什么也不做"。哪个面哪天不画了,
+  先在这条测试上响。
+- 盲签只说真话:字节数在警告里、收款方在 Party 里、**没有 `Block::Amount`**。
+- `eth_sign` 必须是硬警告面;`Unknown` 的 SIWE 绑定既不给"已验证",也不给红警告。
+- 老测试 `nothing_decoded_draws_nothing` 改名了:**"没解出来"现在不等于"不画"**,
+  不画的是 `ClearSurface::None`。
+
+desktop **295 / 291**,fmt clean,画廊 36 态全渲染,Windows 通过。
+
+### 真机眼见为实
+
+同一个本地页面,连拍 40 帧:**第一帧就是 "Loading…"**——真抬头、诚实的正文、滑块关着;
+后面的帧是 `Amount 1 USDC.e`。原来这一帧是画稿里的
+"Swap 0.5 ETH → 1,278.11 USDC · Uniswap V3 Router"。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
