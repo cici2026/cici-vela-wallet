@@ -117,6 +117,14 @@ pub struct SigningStrings {
     /// While the core is still resolving. An empty body would read as a
     /// transaction that does nothing.
     pub loading: SharedString,
+    /// The pipeline's own three words. Existing keys, all of them: a signing
+    /// sheet that says nothing while it works reads as one that hung.
+    pub status_signing: SharedString,
+    pub status_submitted: SharedString,
+    pub error_generic: SharedString,
+    pub error_network: SharedString,
+    pub error_unlimited: SharedString,
+    pub funding_title: String,
     pub warn_approve_all: SharedString,
     pub warn_permit_cant_cap: SharedString,
     pub warn_best_effort: SharedString,
@@ -260,6 +268,15 @@ impl SigningStrings {
             warn_unverified_amount: s("unverifiedWarning"),
             amount_unknown: s("amountUnknown"),
             loading: s("loading"),
+            status_signing: s("signing"),
+            status_submitted: s("submitted"),
+            // The send flow's own sentence for a submit that failed. One
+            // wallet, one way of saying "it did not go out, your funds are
+            // safe" — and no raw relay text on a screen (SC-305).
+            error_generic: loc.t("send.txErrorGeneric"),
+            error_network: loc.t("send.lock.netNotFound"),
+            error_unlimited: a("unlimitedDisabled"),
+            funding_title: loc.t("componentsUi.funding.lead").to_string(),
             warn_approve_all: a("setApprovalAllWarn"),
             warn_permit_cant_cap: a("permitCantCap"),
             warn_best_effort: s("bestEffortWarning"),

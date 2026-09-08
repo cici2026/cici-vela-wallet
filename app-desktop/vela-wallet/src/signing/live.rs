@@ -18,7 +18,7 @@ use vela_core::app::clear_signing::{
     ClearSignResult, ClearSigningView, ClearSiweBinding, ClearSurface, UNKNOWN_AMOUNT,
 };
 use vela_core::app::fee_policy::FeeView;
-use vela_core::app::sign_request::SignView;
+use vela_core::app::sign_request::{SignErrorKind, SignView};
 
 use crate::signing::fixtures::{Block, FeeModel};
 use crate::signing::{SigningStrings, Tone};
@@ -99,6 +99,68 @@ pub fn blocks(clear: &ClearSigningView, facts: &RequestFacts, s: &SigningStrings
             .unwrap_or_default(),
         ClearSurface::BlindTransaction => blind_tx_blocks(facts, s),
     }
+}
+
+/// What the PIPELINE is doing, under whatever the request is.
+///
+/// `sign_request` publishes six judgements the desktop read none of before
+/// spec 032 phase 29: it is signing, it is submitting, it has a hash, it
+/// failed, it needs the gas account topped up. A sheet that shows none of
+/// them is a sheet that looks identical while it works, while it succeeds and
+/// while it refuses — and one of those refusals is the fail-closed
+/// `enforce_no_unlimited`, which until now happened in total silence.
+///
+/// Every word here is a key the corpus already had.
+#[must_use]
+pub fn status_blocks(sign: &SignView, s: &SigningStrings) -> Vec<Block> {
+    let mut out = Vec::new();
+
+    // The gas account cannot pay. The full top-up flow is the send column's
+    // and is not wired here yet (phase 29 records it); saying WHY the slide
+    // will not move is the half that must not wait for it.
+    if let Some(funding) = sign.funding.as_ref() {
+        out.push(Block::Warning {
+            tone: Tone::Caution,
+            text: SharedString::from(crate::signing::fill(
+                &s.funding_title,
+                &[("symbol", &funding.data.native_symbol)],
+            )),
+        });
+    }
+
+    if let Some(error) = sign.error.as_ref() {
+        // The two the person can act on get their own sentence; the rest share
+        // the send flow's, because a wallet should not have two ways of saying
+        // "it did not go out and your funds are safe".
+        let text = match error.kind {
+            SignErrorKind::UnlimitedApproval => s.error_unlimited.clone(),
+            SignErrorKind::UnsupportedChain => s.error_network.clone(),
+            // A refusal the person just made needs no sentence telling them
+            // they made it, and the sheet is closing anyway.
+            SignErrorKind::UserRejected | SignErrorKind::WalletSwitchedChains => {
+                SharedString::default()
+            }
+            _ => s.error_generic.clone(),
+        };
+        if !text.is_empty() {
+            out.push(Block::Warning {
+                tone: Tone::Danger,
+                text,
+            });
+        }
+    }
+
+    // Submitted outranks signing: once there is a hash the ceremony is over,
+    // and "Signing…" beside a submitted operation reads as a second signature.
+    if sign.pending_op_hash.is_some() {
+        out.push(Block::Positive(s.status_submitted.clone()));
+    } else if sign.is_signing || sign.is_submitting {
+        out.push(Block::Sentence {
+            text: s.status_signing.clone(),
+            tone: Tone::Neutral,
+        });
+    }
+    out
 }
 
 /// A message the person is asked to sign, in the core's own classification.
@@ -754,6 +816,109 @@ mod tests {
             )),
             "an unknown binding is not evidence of phishing either"
         );
+    }
+
+    fn pristine_sign() -> SignView {
+        crate::core_host::CoreHost::<vela_core::app::sign_request::SignRequest>::new().view()
+    }
+
+    /// The refusal that used to happen in silence.
+    ///
+    /// `enforce_no_unlimited` fails CLOSED at the submit chokepoint, so an
+    /// unlimited approval cannot be signed — but until phase 29 the desktop
+    /// drew nothing when it refused, and the person was left with a sheet that
+    /// simply stopped working.
+    #[test]
+    fn a_refusal_says_which_refusal_it_was() {
+        let s = strings();
+        let unlimited = SignView {
+            error: Some(vela_core::app::sign_request::SignErrorNotice {
+                kind: SignErrorKind::UnlimitedApproval,
+                detail: None,
+            }),
+            ..pristine_sign()
+        };
+        let drawn = status_blocks(&unlimited, &s);
+        assert!(
+            drawn.iter().any(|block| matches!(
+                block,
+                Block::Warning { tone: Tone::Danger, text } if *text == s.error_unlimited
+            )),
+            "the unlimited refusal drew nothing"
+        );
+
+        // A submit failure says the send flow's sentence, never the relay's
+        // own words (SC-305: no raw relay text reaches a screen).
+        let failed = SignView {
+            error: Some(vela_core::app::sign_request::SignErrorNotice {
+                kind: SignErrorKind::SubmitFailed,
+                detail: Some("relayer said: nonce too low".to_owned()),
+            }),
+            ..pristine_sign()
+        };
+        let drawn = status_blocks(&failed, &s);
+        assert!(
+            drawn.iter().any(|block| matches!(
+                block,
+                Block::Warning { text, .. } if *text == s.error_generic
+            )),
+            "a submit failure drew nothing"
+        );
+        assert!(
+            !drawn.iter().any(|block| matches!(
+                block,
+                Block::Warning { text, .. } if text.contains("nonce")
+            )),
+            "the relay's own words reached the screen"
+        );
+
+        // A rejection the person just made needs no sentence about it.
+        let rejected = SignView {
+            error: Some(vela_core::app::sign_request::SignErrorNotice {
+                kind: SignErrorKind::UserRejected,
+                detail: None,
+            }),
+            ..pristine_sign()
+        };
+        assert!(status_blocks(&rejected, &s).is_empty());
+    }
+
+    /// Working, then submitted — and never both.
+    #[test]
+    fn the_pipeline_says_what_it_is_doing() {
+        let s = strings();
+        let signing = SignView {
+            is_signing: true,
+            ..pristine_sign()
+        };
+        assert!(status_blocks(&signing, &s).iter().any(|block| matches!(
+            block,
+            Block::Sentence { text, .. } if *text == s.status_signing
+        )));
+
+        // A hash means the ceremony is over: "Signing…" beside a submitted
+        // operation reads as a second signature.
+        let submitted = SignView {
+            is_signing: true,
+            pending_op_hash: Some("0xhash".to_owned()),
+            ..pristine_sign()
+        };
+        let drawn = status_blocks(&submitted, &s);
+        assert!(
+            drawn
+                .iter()
+                .any(|block| matches!(block, Block::Positive(_)))
+        );
+        assert!(
+            !drawn.iter().any(|block| matches!(
+                block,
+                Block::Sentence { text, .. } if *text == s.status_signing
+            )),
+            "it claimed to be signing something it had already submitted"
+        );
+
+        // Nothing in flight, nothing said.
+        assert!(status_blocks(&pristine_sign(), &s).is_empty());
     }
 
     /// The slide is three machines' answer, ANDed.

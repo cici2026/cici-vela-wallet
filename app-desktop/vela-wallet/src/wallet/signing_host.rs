@@ -92,6 +92,10 @@ pub struct SigningHost {
     channel: Arc<CeremonyChannel>,
     /// The core asked to close the column.
     pub closed: bool,
+    /// The hash already handed to the tracker. The handoff stays on the view
+    /// after it is taken, and the tracker merges by hash anyway, but handing
+    /// the same submission over on every render is a poll nobody asked for.
+    handed_off: Option<String>,
 }
 
 impl SigningHost {
@@ -127,6 +131,7 @@ impl SigningHost {
             ctx,
             channel,
             closed: false,
+            handed_off: None,
         };
         host.begin(&request, &account.address, cx);
         host
@@ -428,6 +433,25 @@ impl SigningHost {
             }
         }
         self.view = self.sign.view();
+        // The tracker, the moment the core has something to hand it.
+        //
+        // Its own words: "the shell feeds this to `tx_tracker::Event::Submitted`
+        // the moment it appears (idempotent — the tracker merges by hash)".
+        // Nobody was feeding it, so a dApp's transaction was submitted and then
+        // FORGOTTEN: no pending row settling, no confirmation, nothing on the
+        // next launch. The send column has done this since phase 4; this is the
+        // same promise for the path a dApp drives.
+        if let Some(handoff) = self.view.tracker_handoff.clone()
+            && self.handed_off.as_deref() != Some(handoff.user_op_hash.as_str())
+        {
+            self.handed_off = Some(handoff.user_op_hash.clone());
+            crate::executor::tracker::submitted(
+                handoff.user_op_hash,
+                handoff.record_ids,
+                handoff.chain_id,
+                cx,
+            );
+        }
         // `Hidden` is the core saying the request is over — the column closes
         // on the machine's word, never on a click this file interpreted.
         self.closed = self.view.surface == vela_core::app::sign_request::SignSurface::Hidden;

@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use vela_core::app::fee_policy::FeeCall;
 use vela_core::app::sign_request::{
@@ -41,6 +41,9 @@ use vela_core::user_op::WalletKey;
 
 use crate::executor::passkey::{self, Ceremony};
 use crate::executor::{now_ms, relay, storage, user_op};
+
+/// `vela.transactionHistory` — the shared local store.
+const TX_KEY: &str = "vela.transactionHistory";
 
 /// How this operation is performed, and therefore where. Mirrors
 /// `send::SendAnswer` — the signing panel owns its machines the way the send
@@ -375,17 +378,290 @@ fn submit_failure(
     }
 }
 
+/// One dApp signature or transaction, in the store every other client reads.
+///
+/// These two functions were stubs until spec 032 phase 29, which means every
+/// dApp transaction this wallet ever submitted **left no trace**: nothing in
+/// the activity feed, and nothing for the tracker to settle on the next
+/// launch. The send path has had this since phase 4; this is the same promise
+/// (User Story 2 — money in flight outlives every window) for the path a dApp
+/// drives.
+///
+/// Shape: `buildSigningRecord` (`dapp-history.ts:162-228`), field for field —
+/// the row is read by the feed, by the phone and by the web.
 fn persist_record(record: &SignRecord) {
-    let _ = record;
+    use vela_core::app::sign_request::SignRecordKind;
+
+    let (kind, to, value, symbol, decimals) = match record.kind {
+        SignRecordKind::DappTx => {
+            let call = first_param(&record.params_json);
+            (
+                "dapp_tx",
+                call.as_ref()
+                    .and_then(|tx| tx.get("to"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                call.as_ref()
+                    .and_then(|tx| tx.get("value"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("0x0")
+                    .to_owned(),
+                native_symbol(record.chain_id),
+                18,
+            )
+        }
+        // A signature moves nothing, and a row that claimed a value and a
+        // symbol would show up in the feed as money.
+        SignRecordKind::SignTypedData => (
+            "sign_typed_data",
+            String::new(),
+            "0".to_owned(),
+            String::new(),
+            0,
+        ),
+        SignRecordKind::SignMessage => (
+            "sign_message",
+            String::new(),
+            "0".to_owned(),
+            String::new(),
+            0,
+        ),
+    };
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "seconds, as the store keeps them"
+    )]
+    let timestamp = (record.now_ms / 1000.0) as i64;
+    // What was signed, kept for the replay view — clipped, because a payload
+    // is untrusted and unbounded and this file is the one that decides how
+    // much of it lives on the disk forever.
+    let (signed_request, truncated) = clip(&record.params_json);
+    let mut row = json!({
+        "id": record.record_id,
+        "userOpHash": record.user_op_hash,
+        "txHash": record.result,
+        "from": record.from,
+        "to": to,
+        "value": value,
+        "symbol": symbol,
+        "decimals": decimals,
+        "chainId": record.chain_id,
+        "timestamp": timestamp,
+        "status": match record.status {
+            vela_core::app::sign_request::SignRecordStatus::Pending => "pending",
+            vela_core::app::sign_request::SignRecordStatus::Confirmed => "confirmed",
+        },
+        "type": kind,
+        "dappOrigin": record.dapp_origin,
+        "signedRequest": signed_request,
+        "requestTruncated": truncated,
+    });
+    if let Some(intent) = &record.intent {
+        row["intent"] = json!(intent);
+    }
+
+    let mut rows = match storage::read_value(TX_KEY) {
+        Ok(Some(Value::Array(rows))) => rows,
+        _ => Vec::new(),
+    };
+    // Same id, never a second row — a resubmit of the same request closes the
+    // record it opened (the core's note on `SignRecordClose`).
+    if let Some(existing) = rows
+        .iter_mut()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(record.record_id.as_str()))
+    {
+        *existing = row;
+    } else {
+        rows.push(row);
+    }
+    let _ = storage::write_value(TX_KEY, Value::Array(rows));
 }
 
+/// Close a pending record IN PLACE.
 fn update_record(record_id: &str, close: &vela_core::app::sign_request::SignRecordClose) {
-    let _ = (record_id, close);
+    use vela_core::app::sign_request::SignRecordClose;
+
+    let Ok(Some(Value::Array(mut rows))) = storage::read_value(TX_KEY) else {
+        return;
+    };
+    let Some(row) = rows
+        .iter_mut()
+        .find(|row| row.get("id").and_then(Value::as_str) == Some(record_id))
+    else {
+        return;
+    };
+    match close {
+        SignRecordClose::Confirmed { tx_hash } => {
+            row["status"] = json!("confirmed");
+            row["txHash"] = json!(tx_hash);
+        }
+        SignRecordClose::Failed => row["status"] = json!("failed"),
+    }
+    let _ = storage::write_value(TX_KEY, Value::Array(rows));
+}
+
+/// The first element of a JSON-RPC params array, when it is an object.
+fn first_param(params_json: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(params_json)
+        .ok()?
+        .get(0)
+        .filter(|first| first.is_object())
+        .cloned()
+}
+
+/// The native coin of a chain, for the row's symbol.
+fn native_symbol(chain_id: u32) -> String {
+    vela_core::app::network_admin::BUILTIN_CHAINS
+        .iter()
+        .find(|chain| chain.chain_id == chain_id)
+        .map_or_else(String::new, |chain| chain.native_symbol.to_owned())
+}
+
+/// The stored payload, and whether it was cut.
+///
+/// A page chooses this string's length; the wallet chooses how much of it it
+/// keeps. 8 KB is well past any real request and far short of a store a site
+/// could grow on purpose.
+fn clip(params_json: &str) -> (String, bool) {
+    const CAP: usize = 8 * 1024;
+    if params_json.len() <= CAP {
+        return (params_json.to_owned(), false);
+    }
+    // On a char boundary: a truncated multibyte tail is not JSON and not text.
+    let mut end = CAP;
+    while end > 0 && !params_json.is_char_boundary(end) {
+        end -= 1;
+    }
+    (params_json[..end].to_owned(), true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vela_core::app::sign_request::{
+        SignRecord, SignRecordClose, SignRecordKind, SignRecordStatus,
+    };
+
+    fn record(kind: SignRecordKind, params: &str) -> SignRecord {
+        SignRecord {
+            record_id: "dapp-1757000000000-tx".to_owned(),
+            kind,
+            method: "eth_sendTransaction".to_owned(),
+            params_json: params.to_owned(),
+            result: String::new(),
+            from: "0x88cCA0EeDbF2C4426110bbFc998F048689266894".to_owned(),
+            chain_id: 100,
+            now_ms: 1_757_000_000_000.0,
+            status: SignRecordStatus::Pending,
+            user_op_hash: "0xhash".to_owned(),
+            dapp_origin: "https://app.uniswap.org".to_owned(),
+            intent: Some("Swap".to_owned()),
+        }
+    }
+
+    /// A dApp transaction lands in the store the feed and the tracker read.
+    ///
+    /// This was a no-op stub until spec 032 phase 29 — every dApp transaction
+    /// this wallet submitted left no trace at all.
+    #[test]
+    fn a_dapp_transaction_is_written_where_every_client_reads_it() {
+        storage::tests::with_temp_state("sign-record", || {
+            let record = record(
+                SignRecordKind::DappTx,
+                r#"[{"to":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","value":"0x2386f26fc10000"}]"#,
+            );
+            persist_record(&record);
+
+            let rows = match storage::read_value(TX_KEY).ok().flatten() {
+                Some(Value::Array(rows)) => rows,
+                _ => unreachable!("nothing was written"),
+            };
+            let row = rows.first().unwrap_or_else(|| unreachable!("no row"));
+            assert_eq!(row.get("type").and_then(Value::as_str), Some("dapp_tx"));
+            assert_eq!(row.get("status").and_then(Value::as_str), Some("pending"));
+            assert_eq!(
+                row.get("to").and_then(Value::as_str),
+                Some("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                "the recipient comes from the params the wallet is about to sign"
+            );
+            assert_eq!(
+                row.get("value").and_then(Value::as_str),
+                Some("0x2386f26fc10000")
+            );
+            // The chain table's own spelling — "xDAI", not a shell's guess at it.
+            assert_eq!(row.get("symbol").and_then(Value::as_str), Some("xDAI"));
+            assert_eq!(row.get("chainId").and_then(Value::as_u64), Some(100));
+            assert_eq!(
+                row.get("timestamp").and_then(Value::as_i64),
+                Some(1_757_000_000)
+            );
+
+            // Closing PATCHES the row it opened — one request, one row, ever.
+            update_record(
+                &record.record_id,
+                &SignRecordClose::Confirmed {
+                    tx_hash: "0xdeadbeef".to_owned(),
+                },
+            );
+            let rows = match storage::read_value(TX_KEY).ok().flatten() {
+                Some(Value::Array(rows)) => rows,
+                _ => unreachable!("the store vanished"),
+            };
+            assert_eq!(rows.len(), 1, "closing wrote a second row");
+            assert_eq!(
+                rows[0].get("status").and_then(Value::as_str),
+                Some("confirmed")
+            );
+            assert_eq!(
+                rows[0].get("txHash").and_then(Value::as_str),
+                Some("0xdeadbeef")
+            );
+        });
+    }
+
+    /// A signature moves nothing, and its row must not claim otherwise.
+    #[test]
+    fn a_signature_row_carries_no_amount() {
+        storage::tests::with_temp_state("sign-record-msg", || {
+            let mut record = record(SignRecordKind::SignMessage, r#"["0xdeadbeef","0xabc"]"#);
+            record.record_id = "dapp-1757000000000-msg".to_owned();
+            persist_record(&record);
+            let rows = match storage::read_value(TX_KEY).ok().flatten() {
+                Some(Value::Array(rows)) => rows,
+                _ => unreachable!("nothing written"),
+            };
+            let row = &rows[0];
+            assert_eq!(
+                row.get("type").and_then(Value::as_str),
+                Some("sign_message")
+            );
+            assert_eq!(row.get("value").and_then(Value::as_str), Some("0"));
+            assert_eq!(row.get("symbol").and_then(Value::as_str), Some(""));
+            assert_eq!(row.get("to").and_then(Value::as_str), Some(""));
+        });
+    }
+
+    /// The stored payload is clipped on a character boundary.
+    ///
+    /// A page chooses the length of what it asks to sign; this file chooses
+    /// how much of it lives on the disk forever.
+    #[test]
+    fn an_enormous_payload_is_clipped_and_says_so() {
+        let long = format!("[\"{}\"]", "字".repeat(9000));
+        let (kept, truncated) = clip(&long);
+        assert!(truncated, "a 27 KB payload was stored whole");
+        assert!(kept.len() <= 8 * 1024);
+        assert!(
+            std::str::from_utf8(kept.as_bytes()).is_ok(),
+            "the clip cut a multibyte character in half"
+        );
+        let (kept, truncated) = clip("[]");
+        assert!(!truncated);
+        assert_eq!(kept, "[]");
+    }
 
     /// A plain dApp transaction.
     #[test]

@@ -7148,6 +7148,12 @@ impl WalletPage {
             // which was four of the core's six, resolution included. A drawn
             // swap under a true header is the worst thing this column can say.
             model.blocks = signing_live::blocks(&host.clear_view, &host.facts, &self.signing);
+            // …and what the pipeline is doing, under it. Appended rather than
+            // mixed in: what this request IS comes first, what the wallet is
+            // doing about it second.
+            model
+                .blocks
+                .extend(signing_live::status_blocks(&host.view, &self.signing));
             // WHO is asking, from the request. The mock's Uniswap header on a
             // live request is the one fact the person is judging, wrong.
             let (name, dapp_host, letter) = signing_live::dapp_identity(&host.origin);

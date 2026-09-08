@@ -1668,6 +1668,68 @@ desktop **312 / 308**,fmt clean,画廊 36 态,Windows 通过。
 收藏、自定义分组、多标签仍无核心;`DeleteOrigin`(删单条)核心有、桌面没有入口
 (右键菜单是画稿);`dapp_session`(WalletPair / 远程注入,1,959 行)没接。
 
+## Phase 29 — 第二条 grep,跑在这一轮新接的机器上
+
+本文件末尾那条规矩:**每接完一台机器就跑第二条 grep**——视图给了什么判断字段,
+壳读了什么。这一轮接了四台(pool 不算机器),所以跑一遍。差集如下:
+
+| 机器 | 视图字段 | 壳读了 | 差集 |
+|---|---|---|---|
+| `dapp_permissions` | 4 | 3 | `popup`(扩展弹窗专用,桌面永不设) |
+| `browser_history` | 1 | 1 | — |
+| `clear_signing` | 8 | 4 | phase 26 已补齐(surface 分派) |
+| `approval_guard` | 10 | **1** | 九个,见下 |
+| `sign_request` | 13 | **2** | 十一个,三个是钱的事 |
+
+### 最重的三个,都在 `sign_request`
+
+**① `tracker_handoff` 没人读 → dApp 发出去的交易,发完就被忘了。**
+核心自己的注释写着"壳一看到它就喂给 `tx_tracker::Event::Submitted`(幂等,按哈希合并)"。
+没人喂 ⇒ 没有待确认、没有确认、下次开机也不会有人去追。
+**发送列 phase 4 就做了这件事**,dApp 这条从来没做过。
+
+**② `persist_record` / `update_record` 是两个空壳。**
+`executor/sign_request.rs` 里这两个函数的函数体是 `let _ = record;`——
+**这个钱包发出去的每一笔 dApp 交易,盘上什么都没留**:活动列表里没有,
+下次启动也没有待settle的行。现在按 `buildSigningRecord`(`dapp-history.ts:162-228`)
+逐字段写,并且**同一个 id 只有一行**:关闭是原地打补丁,不是追加第二行。
+
+签名(personal_sign / typed data)那两种行**不带金额也不带符号**——
+一行声称有 value 的签名记录,会在活动里读成一笔钱。
+
+载荷**存但要剪**:长度是页面定的,存多少是钱包定的。8 KB,按字符边界剪,
+带一个 `requestTruncated`。(一个被拦腰砍断的多字节字符既不是 JSON 也不是文本。)
+
+**③ `error` / `is_signing` / `is_submitting` / `pending_op_hash` / `funding` 都没人读。**
+最难看的是:`enforce_no_unlimited` 在提交口**失败朝关**——所以无限额授权确实签不出去,
+但桌面**一个字都不说**,人看到的是一张忽然不动了的单子。
+现在:无限额说"为了安全,无限额授权已停用"(`signingApprove.unlimitedDisabled`),
+链不支持说"找不到那个网络",其余共用发送流那句"没发出去,你的钱是安全的"
+(`send.txErrorGeneric`)——**中继自己的话一个字不上屏**(SC-305)。
+**新增语料键 0 个。**
+
+已提交(有哈希)压过"签名中":签完还挂着"Signing…",读起来像第二次签名。
+
+### 判定为"不读是对的"
+
+- `notice`(Expired / AlreadySettled):核心设它时**根本没开单**(surface 仍是 Hidden),
+  桌面没有可画的地方;它是扩展弹窗那条路的。
+- `popup`:同上,`dapp_permissions` 那台机器给扩展用的。
+- `request` / `global_chain_id`:抬头和链徽章画的是宿主保留的那两个请求事实,同一个来源。
+
+### 还欠(明说,不是忘了)
+
+- **`approval_guard` 九个字段没接**:授权编辑器(改额度的那几个 chip)、
+  `rewritten_params_json`(改完额度之后**真正该被签的那份参数**)、
+  `increase_total`、`decimals_unverified`、`expired`、`batch`。
+  今天的后果是:**无限额授权在桌面上无法封顶,只能被拒**——安全,但残废。
+  这是下一刀,而且是创始人"绝不无限额"那条军令的正主。
+- `funding` 只说了一句话,**没有充值流程**(发送列有一整套;dApp 这条没接)。
+- `swipe_action` / `reconcile_pending` 没读:前者是滑块该做什么(桌面只有一种),
+  后者是账户切换还没 ack——都记着。
+
+desktop **317 / 313**,fmt clean,画廊 36 态,Windows 通过。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
