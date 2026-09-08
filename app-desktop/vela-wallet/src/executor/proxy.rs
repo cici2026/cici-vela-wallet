@@ -77,6 +77,57 @@ pub fn agent(timeout: Duration) -> Agent {
     config.build().new_agent()
 }
 
+/// The agent for ONE url, which is the same agent unless the target is local.
+///
+/// A proxy is a way to reach the outside; `127.0.0.1` is not outside. A local
+/// node — `http://127.0.0.1:8545`, an ordinary way to run a wallet — is
+/// unreachable through a SOCKS proxy that has no route back to this machine,
+/// and the pool reads that as an endpoint that failed and bans it. Found by
+/// spec 032 phase 31, when this session's own proxy started refusing and four
+/// pool tests (which serve loopback HTTP) went red without a line of their
+/// code changing.
+///
+/// `NO_PROXY` cannot be relied on for this: it is only consulted when `ureq`
+/// picks the proxy from the environment itself, and [`system_proxy`]
+/// deliberately replaces that pick with a rewritten one.
+pub fn agent_for(url: &str, timeout: Duration) -> Agent {
+    if is_local(url) {
+        return Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(None)
+            .build()
+            .new_agent();
+    }
+    agent(timeout)
+}
+
+/// Is this url on this machine (or its own network's name for it)?
+fn is_local(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    // Strip the port, and the brackets an IPv6 literal carries.
+    let host = host.rsplit_once(':').map_or(host, |(head, tail)| {
+        if tail.chars().all(|c| c.is_ascii_digit()) {
+            head
+        } else {
+            host
+        }
+    });
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 /// The proxy to configure on an agent, or `None` to leave `ureq`'s own default
 /// in place.
 ///
@@ -248,6 +299,38 @@ fn parse_gvariant_list(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A proxy is a way to reach the outside, and this machine is not outside.
+    ///
+    /// A local node (`http://127.0.0.1:8545`) behind a system proxy was
+    /// unreachable, and the pool read that as an endpoint that failed and
+    /// banned it. It also made four pool tests go red the moment this
+    /// session's own proxy started refusing, without a line of their code
+    /// changing.
+    #[test]
+    fn a_local_endpoint_is_never_proxied() {
+        for url in [
+            "http://127.0.0.1:8545",
+            "http://127.0.0.1:8545/rpc?k=1",
+            "https://localhost:8443/",
+            "http://LOCALHOST:1234",
+            "http://[::1]:8545",
+            "http://foo.localhost/rpc",
+        ] {
+            assert!(is_local(url), "{url} was treated as remote");
+        }
+        for url in [
+            "https://ethereum-rpc.publicnode.com",
+            "https://rpc.gnosischain.com/",
+            // Not loopback: a private LAN address still goes wherever the
+            // machine's proxy settings say it goes.
+            "http://192.168.1.10:8545",
+            // A hostname that merely CONTAINS the word is not this machine.
+            "https://localhost.attacker.example/rpc",
+        ] {
+            assert!(!is_local(url), "{url} was treated as local");
+        }
+    }
 
     /// The failure this module exists for: `ALL_PROXY=socks://…` (which is what
     /// `ureq` picks even when `HTTPS_PROXY` is also exported) asks for a LOCAL

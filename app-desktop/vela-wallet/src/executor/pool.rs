@@ -677,7 +677,8 @@ fn post(
     timeout_ms: u32,
 ) -> (RpcTransportOutcome, Option<Value>) {
     let payload = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-    let agent = proxy::agent(Duration::from_millis(u64::from(timeout_ms)));
+    // Per URL: an endpoint on this machine is never reached through a proxy.
+    let agent = proxy::agent_for(url, Duration::from_millis(u64::from(timeout_ms)));
     let mut request = agent.post(url).header("content-type", "application/json");
     // Invariant ②: a bundler call carries the same-chain RPC the pool verified.
     if let Some(rpc) = x_rpc_url {

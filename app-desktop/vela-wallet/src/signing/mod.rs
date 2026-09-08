@@ -124,7 +124,13 @@ pub struct SigningStrings {
     pub error_generic: SharedString,
     pub error_network: SharedString,
     pub error_unlimited: SharedString,
-    pub funding_title: String,
+    pub funding_lead: String,
+    /// The gas-account top-up, drawn IN the sheet (never a second modal).
+    pub funding_title: SharedString,
+    pub funding_address_label: SharedString,
+    pub funding_amount_label: SharedString,
+    pub funding_check_now: SharedString,
+    pub funding_confirming: SharedString,
     /// The approval editor's own two sentences.
     pub decimals_unverified: SharedString,
     pub resulting_total_unknown: String,
@@ -279,7 +285,12 @@ impl SigningStrings {
             error_generic: loc.t("send.txErrorGeneric"),
             error_network: loc.t("send.lock.netNotFound"),
             error_unlimited: a("unlimitedDisabled"),
-            funding_title: loc.t("componentsUi.funding.lead").to_string(),
+            funding_lead: loc.t("componentsUi.funding.lead").to_string(),
+            funding_title: loc.t("componentsUi.funding.title"),
+            funding_address_label: loc.t("componentsUi.funding.addressLabel"),
+            funding_amount_label: loc.t("componentsUi.funding.amountLabel"),
+            funding_check_now: loc.t("componentsUi.funding.checkNow"),
+            funding_confirming: loc.t("componentsUi.funding.statusConfirming"),
             decimals_unverified: a("decimalsUnverified"),
             resulting_total_unknown: loc
                 .t("componentsUi.signingApprove.resultingTotalUnknown")

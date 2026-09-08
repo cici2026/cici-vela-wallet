@@ -2351,6 +2351,25 @@ impl WalletPage {
                             &mut self.icons,
                         ))
                         .on_click(cx.listener(|this, _, _, cx| {
+                            // Closing the SIGNING column is an answer, and the
+                            // core decides which one: a request not yet
+                            // submitted is rejected (4001), one already
+                            // submitted or failed is merely dismissed, and a
+                            // close over the top-up cancels the funding. This
+                            // file used to just hide the column, which left
+                            // the dApp's promise hanging until a navigation
+                            // happened to settle it.
+                            #[cfg(not(target_os = "linux"))]
+                            if this.panel == PanelId::Signing
+                                && let Some(host) = this.signing_host.clone()
+                            {
+                                host.update(cx, |host, cx| {
+                                    host.dispatch_sign(
+                                        vela_core::app::sign_request::Event::SwipeDismissed,
+                                        cx,
+                                    );
+                                });
+                            }
                             this.panel = PanelId::None;
                             cx.notify();
                         })),
@@ -7138,30 +7157,54 @@ impl WalletPage {
         // fork every other surface takes, and what keeps the 33 drawn
         // scenarios reviewable after real requests arrive.
         let mut model = signing_fixtures::build(self.signing_state, &self.signing);
+        // Which of the two things this column is: the request, or the gas
+        // account it cannot pay from.
+        let mut funding = false;
         #[cfg(not(target_os = "linux"))]
         if let Some(host) = self.signing_host.as_ref() {
             let host = host.read(cx);
             let fee = &host.fee_view;
-            // ALWAYS the core's, never "the core's if it has any". The old
-            // `if !blocks.is_empty()` left the GALLERY's blocks under a live
-            // header for every surface the live builder had nothing for —
-            // which was four of the core's six, resolution included. A drawn
-            // swap under a true header is the worst thing this column can say.
-            model.blocks = signing_live::blocks(&host.clear_view, &host.facts, &self.signing);
-            // …and what the pipeline is doing, under it. Appended rather than
-            // mixed in: what this request IS comes first, what the wallet is
-            // doing about it second.
-            // The cap editor, from the guard. Placed before the pipeline's
-            // status so the decision comes above what the wallet is doing
-            // about it — and drawn at all only on the surface the core calls
-            // the editor, never over a permit (which cannot be capped) or a
-            // batch (whose per-leg editors are still owed).
-            if let Some((editor, _)) = signing_live::guard_editor(&host.guard_view, &self.signing) {
-                model.blocks.push(editor);
+            // The gas account cannot pay: the sheet SWAPS to the top-up and
+            // shows nothing else. Not stacked, not appended — the core calls
+            // this surface "the in-sheet funding swap (BUG-1: never a stacked
+            // second modal)", and a request drawn under a top-up prompt is a
+            // person deciding two things at once.
+            if host.view.surface == vela_core::app::sign_request::SignSurface::Funding {
+                model.blocks = signing_live::funding_blocks(&host.view, &self.signing);
+                model.confirm_label = self.signing.funding_check_now.clone();
+                // Armed on its own terms: this slide is not a signature, it is
+                // "I have sent it, look again". The three-machine AND governs
+                // signing, and applying it here would leave the only way out
+                // of a top-up shut.
+                model.confirm_enabled = true;
+                funding = true;
+                // The header and the fee card belong to the request, not to
+                // the top-up: the person is being asked for one thing here.
+                model.fee = signing_fixtures::FeeModel::Hidden;
+            } else {
+                // ALWAYS the core's, never "the core's if it has any". The old
+                // `if !blocks.is_empty()` left the GALLERY's blocks under a live
+                // header for every surface the live builder had nothing for —
+                // which was four of the core's six, resolution included. A drawn
+                // swap under a true header is the worst thing this column can say.
+                model.blocks = signing_live::blocks(&host.clear_view, &host.facts, &self.signing);
+                // …and what the pipeline is doing, under it. Appended rather than
+                // mixed in: what this request IS comes first, what the wallet is
+                // doing about it second.
+                // The cap editor, from the guard. Placed before the pipeline's
+                // status so the decision comes above what the wallet is doing
+                // about it — and drawn at all only on the surface the core calls
+                // the editor, never over a permit (which cannot be capped) or a
+                // batch (whose per-leg editors are still owed).
+                if let Some((editor, _)) =
+                    signing_live::guard_editor(&host.guard_view, &self.signing)
+                {
+                    model.blocks.push(editor);
+                }
+                model
+                    .blocks
+                    .extend(signing_live::status_blocks(&host.view, &self.signing));
             }
-            model
-                .blocks
-                .extend(signing_live::status_blocks(&host.view, &self.signing));
             // WHO is asking, from the request. The mock's Uniswap header on a
             // live request is the one fact the person is judging, wrong.
             let (name, dapp_host, letter) = signing_live::dapp_identity(&host.origin);
@@ -7186,9 +7229,21 @@ impl WalletPage {
         #[cfg(not(target_os = "linux"))]
         let confirm_action: Option<panels::Click> =
             (model.confirm_enabled && self.signing_host.is_some()).then(|| {
-                Box::new(cx.listener(|page, _: &gpui::ClickEvent, _, cx| {
+                Box::new(cx.listener(move |page, _: &gpui::ClickEvent, _, cx| {
                     if let Some(host) = page.signing_host.as_ref() {
-                        host.update(cx, |host, cx| host.approve(cx));
+                        host.update(cx, |host, cx| {
+                            if funding {
+                                // "I have topped it up" — the core re-runs the
+                                // pre-check with the opts it saved, so the
+                                // request resumes rather than starting over.
+                                host.dispatch_sign(
+                                    vela_core::app::sign_request::Event::FundingCompleteTapped,
+                                    cx,
+                                );
+                            } else {
+                                host.approve(cx);
+                            }
+                        });
                     }
                 })) as panels::Click
             });

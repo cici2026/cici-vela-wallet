@@ -18,7 +18,7 @@ use vela_core::app::clear_signing::{
     ClearSignResult, ClearSigningView, ClearSiweBinding, ClearSurface, UNKNOWN_AMOUNT,
 };
 use vela_core::app::fee_policy::FeeView;
-use vela_core::app::sign_request::{SignErrorKind, SignView};
+use vela_core::app::sign_request::{SignErrorKind, SignFundingPresentation, SignSurface, SignView};
 
 use crate::signing::fixtures::{Block, ChipState, FeeModel};
 use crate::signing::{SigningStrings, Tone};
@@ -99,6 +99,77 @@ pub fn blocks(clear: &ClearSigningView, facts: &RequestFacts, s: &SigningStrings
             .unwrap_or_default(),
         ClearSurface::BlindTransaction => blind_tx_blocks(facts, s),
     }
+}
+
+/// The gas account cannot pay, drawn IN the sheet.
+///
+/// The core's own note on this surface: "the in-sheet funding swap (BUG-1:
+/// never a stacked second modal)" — the bug this project spent a week on when
+/// the phone stacked one and it rendered invisible. The desktop swaps the
+/// body of the column it already has.
+///
+/// The relay's own words for a sponsorship denial are NOT shown: a screen
+/// carries the wallet's sentences (SC-305), and the shortfall and the address
+/// are what a person can act on anyway.
+#[must_use]
+pub fn funding_blocks(sign: &SignView, s: &SigningStrings) -> Vec<Block> {
+    let Some(funding) = sign.funding.as_ref() else {
+        return Vec::new();
+    };
+    let data = &funding.data;
+    let mut out = vec![
+        Block::Intent {
+            text: s.funding_title.clone(),
+            tone: Tone::Neutral,
+        },
+        Block::Sentence {
+            text: SharedString::from(crate::signing::fill(
+                &s.funding_lead,
+                &[("symbol", &data.native_symbol)],
+            )),
+            tone: Tone::Neutral,
+        },
+    ];
+
+    // What to send, and where. The shortfall rather than the recommendation
+    // alone: somebody who already has half of it should not be asked for all
+    // of it again. Saturating, because a balance that overtook the
+    // recommendation between the check and this frame is not a negative
+    // amount to send.
+    let shortfall = data
+        .recommended_wei
+        .parse::<u128>()
+        .unwrap_or(0)
+        .saturating_sub(data.current_balance_wei.parse::<u128>().unwrap_or(0));
+    out.push(Block::Card {
+        title: None,
+        rows: vec![
+            (
+                s.funding_address_label.clone(),
+                SharedString::from(data.deposit_address.clone()),
+                Tone::Neutral,
+                true,
+            ),
+            (
+                s.funding_amount_label.clone(),
+                SharedString::from(format!(
+                    "{} {}",
+                    vela_core::app::fee_policy::from_base_units(shortfall, 18),
+                    data.native_symbol
+                )),
+                Tone::Neutral,
+                false,
+            ),
+        ],
+        tone: Tone::Neutral,
+    });
+
+    if funding.presentation == SignFundingPresentation::Confirming {
+        // The top-up is on its way. A positive line, because this is the one
+        // state on this surface where the person has already done their part.
+        out.push(Block::Positive(s.funding_confirming.clone()));
+    }
+    out
 }
 
 /// The never-unlimited spending-cap editor, and what each chip chooses.
@@ -245,7 +316,7 @@ pub fn status_blocks(sign: &SignView, s: &SigningStrings) -> Vec<Block> {
         out.push(Block::Warning {
             tone: Tone::Caution,
             text: SharedString::from(crate::signing::fill(
-                &s.funding_title,
+                &s.funding_lead,
                 &[("symbol", &funding.data.native_symbol)],
             )),
         });
@@ -1065,6 +1136,64 @@ mod tests {
         let mut none = guard_view(editor_view(None, true, Some("1")));
         none.surface = GuardSurface::None;
         assert!(guard_editor(&none, &s).is_none());
+    }
+
+    /// The top-up says how much is still missing, and where to send it.
+    #[test]
+    fn the_funding_surface_asks_for_the_shortfall_not_the_whole_reserve() {
+        let s = strings();
+        let sign = SignView {
+            surface: SignSurface::Funding,
+            funding: Some(vela_core::app::sign_request::SignFundingView {
+                data: vela_core::app::sign_request::SignFundingNeeded {
+                    deposit_address: "0xdep0517".to_owned(),
+                    safe_address: "0x88cCA0".to_owned(),
+                    chain_id: 100,
+                    native_symbol: "xDAI".to_owned(),
+                    threshold_wei: "1000000000000000000".to_owned(),
+                    recommended_wei: "2000000000000000000".to_owned(),
+                    // Half of it is already there.
+                    current_balance_wei: "1500000000000000000".to_owned(),
+                },
+                presentation: SignFundingPresentation::Topup,
+                denial_reason: Some("relayer said: sponsorship declined".to_owned()),
+            }),
+            ..pristine_sign()
+        };
+        let drawn = funding_blocks(&sign, &s);
+        let rows = drawn
+            .iter()
+            .find_map(|block| match block {
+                Block::Card { rows, .. } => Some(rows.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("the top-up drew no address and no amount"));
+        assert_eq!(rows[0].1, SharedString::from("0xdep0517"));
+        assert!(rows[0].3, "an address is read character by character");
+        assert_eq!(
+            rows[1].1,
+            SharedString::from("0.5 xDAI"),
+            "somebody who already holds half was asked for all of it again"
+        );
+        // The relay's own words stay off the screen (SC-305).
+        assert!(
+            !drawn.iter().any(|block| matches!(
+                block,
+                Block::Sentence { text, .. } if text.contains("sponsorship")
+            )),
+            "the relay's denial text reached the sheet"
+        );
+
+        // Once it is on its way, the sheet says so.
+        let mut confirming = sign;
+        if let Some(funding) = confirming.funding.as_mut() {
+            funding.presentation = SignFundingPresentation::Confirming;
+        }
+        assert!(
+            funding_blocks(&confirming, &s)
+                .iter()
+                .any(|block| matches!(block, Block::Positive(_)))
+        );
     }
 
     /// The refusal that used to happen in silence.
