@@ -6141,18 +6141,136 @@ impl WalletPage {
 
     // -- column 2: explore (spec 022 DE1–DE4) --------------------------------
 
+    /// Show the tab somebody picked.
+    ///
+    /// One webview, so a switch is a navigation. A tab with no url is the
+    /// start page — the wallet's own screen, not a blank document.
+    fn select_browser_tab(&mut self, id: &str, url: Option<&str>, cx: &mut Context<Self>) {
+        resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+            resident.dispatch(
+                vela_core::app::explore_sites::Event::TabSelected { id: id.to_owned() },
+                cx,
+            );
+        });
+        match url {
+            Some(url) => {
+                self.browsing = true;
+                self.browser_home = url.to_owned();
+                #[cfg(not(target_os = "linux"))]
+                crate::webview::navigate(url);
+            }
+            None => self.browsing = false,
+        }
+        cx.notify();
+    }
+
+    /// Close a tab, and follow the core to whatever it selected next.
+    ///
+    /// The neighbour rule is the machine's (right, then left); this only obeys
+    /// the answer — a shell that picked its own next tab would be a second
+    /// opinion about where a person just went.
+    fn close_browser_tab(&mut self, id: &str, cx: &mut Context<Self>) {
+        let resident = resident::resident::<ExploreSites>(cx);
+        resident.update(cx, |resident, cx| {
+            resident.dispatch(
+                vela_core::app::explore_sites::Event::TabClosed { id: id.to_owned() },
+                cx,
+            );
+        });
+        let view = resident.read(cx).view();
+        let next = view
+            .selected_tab
+            .as_ref()
+            .and_then(|id| view.tabs.iter().find(|tab| &tab.id == id))
+            .and_then(|tab| tab.url.clone());
+        match next {
+            Some(url) => {
+                self.browsing = true;
+                self.browser_home = url.clone();
+                #[cfg(not(target_os = "linux"))]
+                crate::webview::navigate(&url);
+            }
+            // Nothing left, or a start-page tab: the wallet's own screen.
+            None => self.browsing = false,
+        }
+        cx.notify();
+    }
+
     /// The browser column: tab strip, toolbar, then either the start page or
     /// the page being browsed. The start page is the same vocabulary the phone
     /// draws — favourites grid, groups of rows — at desktop width.
     fn explore_content(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
         let browsing = self.browsing;
-        let tabs = explore_fixtures::tabs(&self.explore, browsing);
-        let strip = explore_components::tab_strip(
+        // The person's own tabs once they are signed in. ONE webview serves
+        // them all, so switching re-navigates rather than swapping a live
+        // page — the honest limitation of a single native subview, and the
+        // reason a tab remembers a url rather than a session.
+        let explore_tabs = resident::resident::<ExploreSites>(cx).read(cx).view();
+        let live_tabs =
+            self.identity.is_some() && explore_tabs.ready && !explore_tabs.tabs.is_empty();
+        let tabs = if live_tabs {
+            explore_live::tab_models(&explore_tabs, &self.explore)
+        } else {
+            explore_fixtures::tabs(&self.explore, browsing)
+        };
+        let actions = if self.identity.is_some() && explore_tabs.ready {
+            let ids: Vec<String> = explore_tabs.tabs.iter().map(|tab| tab.id.clone()).collect();
+            let urls: Vec<Option<String>> = explore_tabs
+                .tabs
+                .iter()
+                .map(|tab| tab.url.clone())
+                .collect();
+            explore_components::TabActions {
+                select: ids
+                    .iter()
+                    .zip(urls.iter())
+                    .map(|(id, url)| {
+                        let (id, url) = (id.clone(), url.clone());
+                        Some(
+                            Box::new(cx.listener(move |page, _: &gpui::ClickEvent, _, cx| {
+                                page.select_browser_tab(&id, url.as_deref(), cx);
+                            })) as panels::Click,
+                        )
+                    })
+                    .collect(),
+                close: ids
+                    .iter()
+                    .map(|id| {
+                        let id = id.clone();
+                        Some(
+                            Box::new(cx.listener(move |page, _: &gpui::ClickEvent, _, cx| {
+                                page.close_browser_tab(&id, cx);
+                            })) as panels::Click,
+                        )
+                    })
+                    .collect(),
+                new_tab: Some(Box::new(cx.listener(|page, _: &gpui::ClickEvent, _, cx| {
+                    // A new tab is the START page: a browser does not
+                    // decide where somebody wants to go next.
+                    resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                        resident.dispatch(
+                            vela_core::app::explore_sites::Event::TabOpened {
+                                url: None,
+                                title: None,
+                                now_ms: crate::executor::now_ms(),
+                            },
+                            cx,
+                        );
+                    });
+                    page.browsing = false;
+                    cx.notify();
+                })) as panels::Click),
+            }
+        } else {
+            explore_components::TabActions::default()
+        };
+        let strip = explore_components::tab_strip_with(
             theme,
             &mut self.icons,
             &tabs,
             self.explore.new_tab.clone(),
             self.explore.close_tab.clone(),
+            actions,
         );
         let identity = self.identity();
         // The two trailing affordances open different things, so the page — not
@@ -6380,6 +6498,29 @@ impl WalletPage {
                 .spawn(async move |cx| {
                     page.update(cx, |page, cx| {
                         page.browser_title = (!title.is_empty()).then(|| title.clone());
+                        // The strip follows the document, from the one place
+                        // that knows a page settled. A navigation with no tab
+                        // OPENS one: the first page a person opens is the
+                        // first tab they have, and a strip that stayed empty
+                        // while a site was on screen would be lying about
+                        // where they are.
+                        let explore = resident::resident::<ExploreSites>(cx);
+                        let selected = explore.read(cx).view().selected_tab;
+                        explore.update(cx, |resident, cx| {
+                            let event = match selected {
+                                Some(id) => vela_core::app::explore_sites::Event::TabNavigated {
+                                    id,
+                                    url: url.clone(),
+                                    title: (!title.is_empty()).then(|| title.clone()),
+                                },
+                                None => vela_core::app::explore_sites::Event::TabOpened {
+                                    url: Some(url.clone()),
+                                    title: (!title.is_empty()).then(|| title.clone()),
+                                    now_ms: crate::executor::now_ms(),
+                                },
+                            };
+                            resident.dispatch(event, cx);
+                        });
                         resident::resident::<BrowserHistory>(cx).update(cx, |resident, cx| {
                             resident.dispatch(
                                 vela_core::app::browser_history::Event::VisitRecorded {

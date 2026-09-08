@@ -16,7 +16,7 @@ use vela_core::app::browser_history::BhistEntry;
 use vela_core::app::explore_sites::{ExploreSite, ExploreView};
 
 use super::ExploreStrings;
-use super::fixtures::{GroupAction, GroupModel, SiteModel};
+use super::fixtures::{GroupAction, GroupModel, SiteModel, TabModel};
 
 /// One remembered visit as a row.
 ///
@@ -96,6 +96,36 @@ pub fn custom_groups(view: &ExploreView) -> Vec<GroupModel> {
             title: SharedString::from(group.name.clone()),
             action: GroupAction::Menu,
             sites: group.sites.iter().map(tile_of).collect(),
+        })
+        .collect()
+}
+
+/// The open tabs, as the strip draws them.
+///
+/// A tab with no url is the START PAGE — every browser's first tab, drawn with
+/// the wallet's own mark rather than a favicon, and the core keeps that
+/// distinction as `url: None` rather than as an empty string.
+#[must_use]
+pub fn tab_models(view: &ExploreView, strings: &ExploreStrings) -> Vec<TabModel> {
+    view.tabs
+        .iter()
+        .map(|tab| TabModel {
+            id: "tab",
+            title: if tab.title.trim().is_empty() {
+                strings.start_page.clone()
+            } else {
+                SharedString::from(tab.title.clone())
+            },
+            site: tab.url.as_ref().map(|_| SiteModel {
+                id: "tab",
+                name: SharedString::from(tab.title.clone()),
+                host: SharedString::from(tab.host.clone()),
+                letter: SharedString::from(letter_of(&tab.host)),
+                tint: tint_of(&tab.host),
+                subtitle: None,
+                meta: None,
+            }),
+            selected: view.selected_tab.as_deref() == Some(tab.id.as_str()),
         })
         .collect()
 }
