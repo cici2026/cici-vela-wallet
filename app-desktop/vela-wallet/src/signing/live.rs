@@ -257,7 +257,12 @@ pub fn guard_editor(
 
     let mut notes: Vec<String> = Vec::new();
     if !editor.requested_finite {
-        notes.push(format!("{} {}", s.unlimited_disabled, s.choose_prompt));
+        // Two sentences, two LINES. The web shell settled this and says why
+        // (`AllowanceEditor.svelte`): joining them with a space produces a
+        // run-on in CJK, where a space is not a sentence break — and the
+        // English corpus string carries no full stop either, so a space reads
+        // as "…for your safety Set a finite amount…" in every locale.
+        notes.push(format!("{}\n{}", s.unlimited_disabled, s.choose_prompt));
     }
     if guard.decimals_unverified {
         // An amount capped with decimals nobody verified is a cap at an
@@ -288,7 +293,7 @@ pub fn guard_editor(
             value,
             value_tone,
             chips,
-            note: (!notes.is_empty()).then(|| SharedString::from(notes.join(" "))),
+            note: (!notes.is_empty()).then(|| SharedString::from(notes.join("\n"))),
             resulting_total,
         },
         modes,

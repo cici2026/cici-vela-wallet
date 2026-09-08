@@ -1934,6 +1934,58 @@ desktop **324 / 320**,fmt clean,画廊 36 态,Windows 通过。
 - 收藏 / 自定义分组 / 多标签:**没有核心**,不是接线能解决的
 - 实体认证器签一笔(要人插钥匙)、xlsx 真表点一次(要人点文件对话框)
 
+## Phase 34 — 去 web 版找答案:一条能移植,两条查清了不是我以为的那样
+
+创始人:"web 版基本功能都有了,收藏/分组/多标签 web 都做了,你可以看看"。看了。
+
+### 能移植的那一条:**两句话,两行**
+
+`app-web/.../signing/ui/AllowanceEditor.svelte` 的 `.note` 用 `white-space: pre-line`,
+拼接用换行,注释写着理由:
+
+> Two sentences, two lines: joining them with a space produces a run-on in CJK,
+> where a space is not a sentence break.
+
+正是 phase 32 我记下的那个毛病(桌面上读作"…for your safety Set a finite amount…")。
+桌面**两边一起改成换行**——live 构造器和画稿 `fixtures.rs` 同一行,
+不然画廊和真单子会在同一句话上分家。实测 gpui 认这个换行:那句现在是两行。
+
+### 查清楚的第一条:**收藏 / 分组 / 多标签,web 也只是画稿**
+
+`src/routes/[locale]/wallet/+page.server.ts` 自己写着:
+
+> No explore data here (spec 022 founder call): 探索 is the in-app dApp browser,
+> and this client IS a browser tab — it cannot host one. The vocabulary still
+> ships for the gallery, which is the design source the three native clients
+> are reviewed against.
+
+web 上探索**只存在于 gallery 路由**,`ExploreHome` / `ExploreDesktop` 只被
+`/gallery/[state]` 引用;`model.ts` 顶上也写着"当真的浏览器引擎和 dApp 注册表到来时,
+它们替换掉建这些的 fixture 层"。所以 web 有的是**和桌面同一套图**,不是活的收藏。
+
+**结论没变,措辞要更准**:桌面缺的不是图(图两边都有),是**没有任何一端有规则**——
+收藏存在哪、分组是什么、标签页由谁拥有,`vela-core` 里没有机器管。
+要做就是**新写一台核心机器 + 一个共享存储键**,那是产品决定,不是接线。
+
+### 查清楚的第二条:**自定义额度输入,web 也没接**
+
+web 的 chip 里**有** `custom`,`SigningHost.svelte` 也把它派发成
+`preset_selected { mode: 'custom' }`——但整个 web 仓库里
+**没有任何地方派发 `custom_amount_changed`**,`AllowanceEditor.svelte` 里也没有输入框。
+也就是说:选了 Custom 之后没有地方输数字,**和桌面一样卡在同一步**。
+
+所以这条不是"桌面欠 web 一块",是**两端都欠核心已经准备好的那个事件一个输入框**。
+桌面这边我照 web 的形状把 `custom` chip 也画上(和它一样可点、派发同一个事件)
+在**输入框有图之前是没有意义的**,所以没画——一个点了没反应的 chip,
+正是这一刀反复在删的东西。
+
+### 顺带确认:两端的"被签的是改写后的参数"是一致的
+
+web `SigningHost.approveOpts()` 里 `params_override_json: guard.rewritten_params_json`,
+和桌面 phase 30 的修法逐字一致。两端同一条不变量⑨。
+
+desktop **324 / 320**,fmt clean,画廊 36 态。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

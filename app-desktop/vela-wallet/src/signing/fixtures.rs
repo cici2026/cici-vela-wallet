@@ -477,7 +477,10 @@ pub fn build(state: &str, s: &SigningStrings) -> SigningModel {
                             (s.chip_custom.clone(), ChipState::Idle),
                             (s.chip_revoke.clone(), ChipState::Idle),
                         ],
-                        note: Some(format!("{} {}", s.unlimited_disabled, s.choose_prompt).into()),
+                        // Two sentences, two LINES — the web's `AllowanceEditor.svelte`
+                        // rule: a space is not a sentence break in CJK, and
+                        // the first string carries no full stop.
+                        note: Some(format!("{}\n{}", s.unlimited_disabled, s.choose_prompt).into()),
                         resulting_total: None,
                     },
                     Block::Party {
