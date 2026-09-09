@@ -299,6 +299,35 @@ pub fn demo_page() -> DemoPage {
 
 /// DE2's right-click menu on a favourite tile, and the toolbar's ⋯ site menu
 /// (M3). Both ride the spec-018 menu card rather than growing a second one.
+/// The menu on a row in Recent (spec 032 phase 40).
+///
+/// History rows had no menu on any client, so the core's `DeleteOrigin` — one
+/// site forgotten rather than the whole list cleared — could not be reached at
+/// all. Three items in the order somebody wants them, with the destructive one
+/// behind the divider, exactly as the tile menu arranges its own.
+pub fn recent_menu(strings: &ExploreStrings) -> MenuModel {
+    MenuModel {
+        items: vec![
+            MenuItemModel {
+                icon: Icon::ExternalLink,
+                label: strings.open_in_new_tab.clone(),
+                destructive: false,
+            },
+            MenuItemModel {
+                icon: Icon::Star,
+                label: strings.add_to_favorites.clone(),
+                destructive: false,
+            },
+            MenuItemModel {
+                icon: Icon::Trash2,
+                label: strings.delete.clone(),
+                destructive: true,
+            },
+        ],
+        divider_after: Some(1),
+    }
+}
+
 pub fn tile_menu(strings: &ExploreStrings) -> MenuModel {
     MenuModel {
         items: vec![

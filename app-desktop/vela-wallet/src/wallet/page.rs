@@ -174,6 +174,9 @@ enum ContactsMenu {
     Site,
     /// Spec 022 M4 — right-click on a favourite tile (DE2).
     Tile,
+    /// Spec 032 phase 40 — right-click on a row in Recent. The only way to
+    /// reach the core's `DeleteOrigin`, which forgets ONE site.
+    Recent,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -6154,6 +6157,23 @@ impl WalletPage {
 
     // -- column 2: explore (spec 022 DE1–DE4) --------------------------------
 
+    /// The history row the open menu is about: its url and its title.
+    ///
+    /// Resolved from the ORIGIN the right-click recorded, against the core's
+    /// CURRENT list — never from a copy taken when the menu opened, because a
+    /// visit can land in between and the row under the cursor is the one the
+    /// person means.
+    fn take_menu_entry(&mut self, cx: &mut Context<Self>) -> Option<(String, String)> {
+        let origin = self.menu_origin.clone()?;
+        resident::resident::<BrowserHistory>(cx)
+            .read(cx)
+            .view()
+            .entries
+            .iter()
+            .find(|entry| entry.origin == origin)
+            .map(|entry| (entry.url.clone(), entry.title.clone()))
+    }
+
     /// Show the tab somebody picked.
     ///
     /// One webview, so a switch is a navigation. A tab with no url is the
@@ -7068,6 +7088,21 @@ impl WalletPage {
                         &mut self.identicons,
                         site,
                     )
+                    .on_mouse_down(MouseButton::Right, {
+                        // The row menu is armed only where a machine is behind
+                        // it — the live Recent group. A drawn group's rows
+                        // stay inert rather than opening a menu whose Delete
+                        // has nothing to delete.
+                        let origin = explore_live::live_origin(&history.entries, &site.host);
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            if let Some(origin) = origin.clone() {
+                                this.menu_origin = Some(origin);
+                                this.menu =
+                                    Some((ContactsMenu::Recent, event.position, Anchor::TopLeft));
+                                cx.notify();
+                            }
+                        })
+                    })
                     .on_click({
                         // Where the person left off, verbatim — that is what
                         // the core stores the whole URL for. A row that opened
@@ -8078,6 +8113,63 @@ impl WalletPage {
                     cx.notify();
                 })) as contacts_components::MenuAction),
             ],
+            // A row in Recent: open it in a new tab, pin it, or forget it.
+            // All three belong to a core — the tabs', the favourites' and the
+            // history's — which is why this menu could be armed the day it
+            // was drawn.
+            ContactsMenu::Recent => vec![
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    let entry = this.take_menu_entry(cx);
+                    this.menu = None;
+                    if let Some((url, title)) = entry {
+                        resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::explore_sites::Event::TabOpened {
+                                    url: Some(url.clone()),
+                                    title: Some(title),
+                                    now_ms: crate::executor::now_ms(),
+                                },
+                                cx,
+                            );
+                        });
+                        this.browsing = true;
+                        this.browser_home = url.clone();
+                        #[cfg(not(target_os = "linux"))]
+                        crate::webview::navigate(&url);
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    let entry = this.take_menu_entry(cx);
+                    this.menu = None;
+                    if let Some((url, title)) = entry {
+                        resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::explore_sites::Event::FavoriteAdded {
+                                    url,
+                                    title: Some(title),
+                                    now_ms: crate::executor::now_ms(),
+                                },
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    let origin = this.menu_origin.take();
+                    this.menu = None;
+                    if let Some(origin) = origin {
+                        resident::resident::<BrowserHistory>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::browser_history::Event::DeleteOrigin { origin },
+                                cx,
+                            );
+                        });
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+            ],
             // The favourite tile's menu, in the order it is drawn: open in a
             // new tab, rename, move to a group, remove.
             //
@@ -8113,6 +8205,7 @@ impl WalletPage {
             ContactsMenu::Header => contacts_fixtures::header_dropdown(&self.contacts),
             ContactsMenu::Group => contacts_fixtures::group_context(&self.contacts),
             ContactsMenu::Site => explore_fixtures::site_menu(&self.explore),
+            ContactsMenu::Recent => explore_fixtures::recent_menu(&self.explore),
             ContactsMenu::Tile => explore_fixtures::tile_menu(&self.explore),
         };
         let actions = self.menu_actions(kind, cx);

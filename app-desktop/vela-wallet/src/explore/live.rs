@@ -130,6 +130,20 @@ pub fn tab_models(view: &ExploreView, strings: &ExploreStrings) -> Vec<TabModel>
         .collect()
 }
 
+/// The origin of the history row a screen row was drawn from.
+///
+/// Rows are keyed on screen by HOST, and every rule in the core is written
+/// about the ORIGIN, so this is the one place the two meet. `None` for a row
+/// the history does not have — a drawn one — which is what keeps a menu off
+/// the gallery's rows.
+#[must_use]
+pub fn live_origin(entries: &[BhistEntry], host: &str) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| entry.host == host)
+        .map(|entry| entry.origin.clone())
+}
+
 /// The first letter a person would read off the host.
 fn letter_of(host: &str) -> String {
     host.chars()

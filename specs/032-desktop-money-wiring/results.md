@@ -2167,6 +2167,51 @@ web:`pnpm check` **0 errors**、`pnpm lint` 干净、`pnpm build` 成功。
 `Could not resolve 'node:module' in rolldown/runtime.js`,在任何测试文件被加载之前就失败),
 和这次改动无关——但也就意味着 web 的单测没跑过,记在这里而不是含糊过去。
 
+## Phase 40 — 第二张缺的图:历史行的菜单(`DeleteOrigin` 终于有入口了)
+
+`browser_history::DeleteOrigin`(忘掉**一个**站点,而不是清空整张单子)在核心里从
+016 就有,**四个端一个入口都没画**——手机、web、桌面的画廊里都只有"磁贴菜单"和
+"站点菜单",历史行上什么都没有。
+
+### 设计:照磁贴菜单的形状,三项
+
+| 项 | 归谁 |
+|---|---|
+| 在新标签页打开 | `explore_sites::TabOpened`(这一刀刚接的标签条) |
+| 添加到收藏 | `explore_sites::FavoriteAdded` |
+| ── 分隔线 ── | 破坏性的那项永远在线下面(和磁贴菜单同一规矩) |
+| 删除 | `browser_history::DeleteOrigin` |
+
+**三项全都有核心**,所以这个菜单画出来的当天就能接活——不像磁贴菜单里那两项
+(重命名/移到分组)还要输入框和分组选择器。
+
+用词全是现成的:`openInNewTab` / `addToFavorites` / `delete`。**新增语料 0**。
+
+### 一条只有做的时候才会想到的规矩
+
+行在屏幕上按 **host** 认,核心里所有规则按 **origin** 写,所以两者相遇只放在一个函数里
+(`explore_live::live_origin`)。而且菜单**只在活的那条 Recent 上武装**:
+画稿那些行右键什么都不弹——一个"删除"没有东西可删的菜单,比没有菜单糟。
+
+另外,菜单点下去时**重新按 origin 查当前列表**,不是用打开菜单那一刻的副本:
+两者之间可能落进一次访问,而人指的是光标下面那一行。
+
+### 两端
+
+- 桌面:`explore_fixtures::recent_menu` + `ContactsMenu::Recent`,右键 Recent 行打开。
+- web:`recentMenuItems` + `recentMenuSheet`,新画态 **E8**(手机画廊),
+  `ExploreStateId` 与 `MOBILE_STATES` 同步。web 的探索页只存在于画廊里
+  (spec 022 创始人裁决),所以那边只画不接——这是设计源,不是漏接。
+
+### 实机
+
+右键那条 Recent 行:菜单如图弹出(两项 + 分隔线 + 红色 Delete)。
+点"在新标签页打开":真的开了第三个标签并导航过去(顺带又验了一次标签条)。
+点 Delete:`vela.browserHistory` 从 1 行变 **0 行**,收藏没被动。
+
+desktop **328 / 324**,fmt clean,画廊全渲染,Windows 通过;
+web `pnpm lint` 干净、`pnpm build` 成功(单测仍起不来,见 phase 39)。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
