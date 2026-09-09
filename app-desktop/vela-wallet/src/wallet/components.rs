@@ -4,7 +4,8 @@
 
 use gpui::{
     Div, ElementId, ImageSource, InteractiveElement as _, IntoElement, ParentElement, Pixels,
-    SharedString, Stateful, Styled, canvas, div, fill as quad_fill, img, px,
+    SharedString, Stateful, StatefulInteractiveElement as _, Styled, canvas, div,
+    fill as quad_fill, img, px,
 };
 
 use crate::icons::{Icon, IconCache};
@@ -269,7 +270,36 @@ pub fn sidebar_search(theme: &Theme, icons: &mut IconCache, placeholder: SharedS
 
 /// Hero balance with its four states and optional status line (spec FR-008:
 /// masking is a render variant, not a separate screen).
-pub fn balance_display(theme: &Theme, icons: &mut IconCache, model: &BalanceModel) -> Div {
+/// The figure, with or without a press behind it.
+///
+/// One helper rather than a `when` at each state, because the hidden hero and
+/// the live one must be the SAME target: hiding is a toggle, and a gesture that
+/// only works in one direction is a trap.
+fn pressable(figure: Div, on_toggle: Option<BalanceToggle>) -> Div {
+    let Some(action) = on_toggle else {
+        return figure;
+    };
+    div().child(
+        figure
+            .id("balance-hero-toggle")
+            .cursor_pointer()
+            // No hover tint and no ripple: this is a 40-pixel numeral, and a
+            // box drawn around money to say "clickable" is the containerised
+            // look this design language spent its budget removing.
+            .on_click(move |event, window, cx| action(event, window, cx)),
+    )
+}
+
+/// What a tap on the figure does. `None` draws the same hero with nothing to
+/// press — the gallery, and any window with no session behind it.
+pub type BalanceToggle = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
+
+pub fn balance_display(
+    theme: &Theme,
+    icons: &mut IconCache,
+    model: &BalanceModel,
+    on_toggle: Option<BalanceToggle>,
+) -> Div {
     let mut root = div().flex().flex_col().gap(px(8.)).child(
         div()
             .text_size(theme::text_label())
@@ -286,7 +316,7 @@ pub fn balance_display(theme: &Theme, icons: &mut IconCache, model: &BalanceMode
                 .rounded(px(8.))
                 .bg(theme.bg_sunken),
         ),
-        BalanceState::Hidden => root.child(
+        BalanceState::Hidden => root.child(pressable(
             div()
                 .flex()
                 .items_center()
@@ -298,8 +328,12 @@ pub fn balance_display(theme: &Theme, icons: &mut IconCache, model: &BalanceMode
                         .text_color(theme.fg_base)
                         .child(model.integer.clone()),
                 )
+                // The way back. The dots alone would be a screen with no
+                // affordance on it, which is how a person concludes the app
+                // has lost their money rather than that they hid it.
                 .child(icon_img(icons, Icon::EyeOff, false, theme.fg_subtle, 20.)),
-        ),
+            on_toggle,
+        )),
         BalanceState::Normal | BalanceState::ZeroLive => {
             let mut amount = div().flex().items_end().child(
                 div()
@@ -318,7 +352,7 @@ pub fn balance_display(theme: &Theme, icons: &mut IconCache, model: &BalanceMode
                         .child(SharedString::from(format!(".{decimals}"))),
                 );
             }
-            root.child(amount)
+            root.child(pressable(amount, on_toggle))
         }
     };
 

@@ -1857,7 +1857,22 @@ impl WalletPage {
             .pt(px(WALLET_PAD_TOP))
             .flex()
             .flex_col()
-            .child(balance_display(theme, &mut self.icons, &balance))
+            .child(balance_display(
+                theme,
+                &mut self.icons,
+                &balance,
+                // Tap-to-hide, spec 025's gesture — the figure IS the control,
+                // as it is on the phone and on the web. A session is what makes
+                // it real: the fixture hero has no privacy to keep.
+                self.identity.is_some().then(|| {
+                    Box::new(|_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                        crate::executor::balance_dashboard::dispatch(
+                            vela_core::app::balance_dashboard::Event::PrivacyToggled,
+                            cx,
+                        );
+                    }) as crate::wallet::components::BalanceToggle
+                }),
+            ))
             .child(pills)
             .child(
                 div()
@@ -4177,7 +4192,7 @@ impl WalletPage {
         let s_clone = fixtures::balance_variants(&self.strings);
         let mut balances = div().flex().flex_col().gap(px(16.));
         for model in &s_clone {
-            balances = balances.child(balance_display(theme, &mut self.icons, model));
+            balances = balances.child(balance_display(theme, &mut self.icons, model, None));
         }
 
         let mut rows = div().flex().flex_col();

@@ -323,6 +323,53 @@ mod tests {
         });
     }
 
+    /// Hiding the balance outlives the process.
+    ///
+    /// Two halves that were both present and never met: the core has always
+    /// asked for `WritePrivacy`, and nothing read the file back. This drives
+    /// the real machine through the tap, performs the write it asks for, and
+    /// then reads it the way a fresh launch does.
+    ///
+    /// Only the privacy operation is performed — `AccountChanged` also asks for
+    /// a twelve-chain fetch, and a unit test has no business making one.
+    #[test]
+    fn hiding_the_balance_survives_a_restart() {
+        use crate::core_host::CoreHost;
+
+        storage::tests::with_temp_state("balance-privacy-roundtrip", || {
+            let mut host = CoreHost::<BalanceDashboard>::new();
+            let _ = host.dispatch(Event::AccountChanged {
+                address: "0xabc".to_owned(),
+            });
+
+            let mut toggle = |host: &mut CoreHost<BalanceDashboard>| {
+                for next in host.dispatch(Event::PrivacyToggled) {
+                    if matches!(next.operation, BalanceOperation::WritePrivacy { .. }) {
+                        let result = perform(next.operation.clone());
+                        let _ = host.resolve(next.id, result);
+                    }
+                }
+            };
+
+            toggle(&mut host);
+            assert!(host.view().hidden, "the tap hid it");
+            assert!(
+                matches!(
+                    hydrate_privacy(),
+                    Some(Event::PrivacyHydrated { hidden: true })
+                ),
+                "and the next launch would start hidden"
+            );
+
+            toggle(&mut host);
+            assert!(!host.view().hidden, "the second tap shows it again");
+            assert!(matches!(
+                hydrate_privacy(),
+                Some(Event::PrivacyHydrated { hidden: false })
+            ));
+        });
+    }
+
     /// Invalidation is a one-shot: the frame that drains it forces one read,
     /// and the frame after it does not force another.
     #[test]
