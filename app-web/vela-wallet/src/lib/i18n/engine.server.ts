@@ -750,6 +750,7 @@ export function resolveSigningMessages(locale: Locale): SigningMessages {
 		valueUnlimited: k('componentsUi.signingApprove.unlimitedValue'),
 		valueAllNfts: k('componentsUi.signingApprove.allNfts'),
 		unlimitedDisabled: k('componentsUi.signingApprove.unlimitedDisabled'),
+		invalidAmount: k('componentsUi.signingApprove.invalidAmount'),
 		choosePrompt: k('componentsUi.signingApprove.choosePrompt'),
 		summarySend: k('componentsUi.signing.summarySend'),
 		summarySendFrom: k('componentsUi.signing.summarySendFrom'),

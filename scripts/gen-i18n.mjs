@@ -257,8 +257,15 @@ for (let i = 1; i < PATHS.length; i++) {
 // + 1 more (spec 028 US5, 6c): `contacts.batchSendNeedsMembers` — the group
 //   send's disabled CTA had no words for WHY (an empty group); the founder
 //   asked for the hint.
-if (PATHS.length !== 1627) fail(`expected 1627 paths (1543 leaf + 84 branch), got ${PATHS.length}`);
-if (leafSet.size !== 1543) fail(`expected 1543 leaf paths, got ${leafSet.size}`);
+// + 1 more (spec 032 phase 25): `signing.amountUnknown`. When a token's
+//   decimals cannot be verified the core no longer prints a number scaled by a
+//   guess — 1 USDC came out as "0" on a signing sheet — and says nothing (an
+//   em dash) instead. The corpus was searched first: `unverifiedTag`
+//   ("Unverified") and `unverifiedWarning` describe the doubt but neither is a
+//   value a row can carry, and the row the person reads is the amount itself.
+//   No new branch — it hangs off the existing `componentsUi.signing`.
+if (PATHS.length !== 1628) fail(`expected 1628 paths (1544 leaf + 84 branch), got ${PATHS.length}`);
+if (leafSet.size !== 1544) fail(`expected 1544 leaf paths, got ${leafSet.size}`);
 if (branchSet.size !== 84) fail(`expected 84 branch paths, got ${branchSet.size}`);
 
 /** Pack a bit-per-path bitmap, LSB first within each byte. */

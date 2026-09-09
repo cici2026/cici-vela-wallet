@@ -1250,6 +1250,7 @@
    "intentRepay": "Погасить",
    "intentRevoke": "Отозвать",
    "labelAmount": "Сумма",
+   "amountUnknown": "Сумма неизвестна",
    "labelTo": "Кому",
    "labelFrom": "От кого",
    "labelOwner": "Владелец",

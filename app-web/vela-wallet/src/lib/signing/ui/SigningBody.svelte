@@ -16,10 +16,11 @@
 		model: SigningModel;
 		onconfirm?: () => void;
 		onchip?: (id: string) => void;
+		oncustom?: (text: string) => void;
 		onfee?: () => void;
 	}
 
-	let { model, onconfirm, onchip, onfee }: Props = $props();
+	let { model, onconfirm, onchip, oncustom, onfee }: Props = $props();
 
 	// cs29 ships the disclosure open; anything after that is the person's call.
 	let techOverride = $state<boolean | undefined>();
@@ -27,7 +28,7 @@
 </script>
 
 <div class="blocks">
-	<BlockList blocks={model.blocks} {onchip} />
+	<BlockList blocks={model.blocks} {onchip} {oncustom} />
 </div>
 
 <div class="footer">

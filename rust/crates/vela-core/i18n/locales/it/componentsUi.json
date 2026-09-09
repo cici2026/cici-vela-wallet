@@ -133,6 +133,7 @@
       "intentRepay": "Rimborsa",
       "intentRevoke": "Revoca",
       "labelAmount": "Importo",
+      "amountUnknown": "Importo sconosciuto",
       "labelTo": "A",
       "labelFrom": "Da",
       "labelOwner": "Proprietario",

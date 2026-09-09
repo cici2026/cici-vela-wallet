@@ -230,6 +230,49 @@ pub fn best_native_dex_price(groups: &[NativeQuoteGroup]) -> Option<f64> {
     best
 }
 
+/// `firstGroupedQuotePrice` (`wallet-api.ts:648-662`): the first usable price
+/// across quote groups, each scaled by ITS OWN quote token's decimals.
+///
+/// The CUSTOM-token counterpart of [`best_native_dex_price`], and deliberately
+/// a different rule. The native path takes the maximum because every group
+/// prices the same coin and the deepest pool is the least distorted. A custom
+/// token's groups are tried in a stated ORDER — the preferred stablecoin first
+/// (`pickQuoteToken`), then the rest in chain order — so the first pool that
+/// answers is the one the caller asked for, and taking a maximum would silently
+/// promote whichever stable happened to quote highest.
+///
+/// The rule this replaced took the first surviving quote out of a FLAT list
+/// that mixed quote tokens and divided it by ONE token's `decimals()`. On any
+/// chain whose stablecoin list holds both a 6-decimal (USDC/USDT) and an
+/// 18-decimal (DAI/WXDAI) entry, a custom token with no USDC pool but a live
+/// DAI pool was priced 10^12 times too high — and that number is what the
+/// portfolio total, the sort order and the ingest valuation all consume.
+///
+/// `quote_decimals: None` falls back to [`DEFAULT_QUOTE_DECIMALS`] — the SAME
+/// group's fallback, never a neighbour's real value. A zero amount does not
+/// price: a zero-output quote is a dead pool, not a free token.
+#[must_use]
+pub fn first_grouped_quote_price(groups: &[NativeQuoteGroup]) -> Option<f64> {
+    for group in groups {
+        let decimals = group.quote_decimals.unwrap_or(DEFAULT_QUOTE_DECIMALS);
+        let scale = 10f64.powi(i32::try_from(decimals).unwrap_or(i32::MAX));
+        for amount in &group.amounts_out {
+            // The TS calls `BigInt(raw)`, which THROWS on a malformed string
+            // and would abort the whole lookup. Nothing malformed can reach it
+            // there (the decoder only emits digits), so skipping is the same
+            // behaviour on every input that actually occurs — and a safer one
+            // on the input that does not.
+            let Ok(value) = amount.trim().parse::<f64>() else {
+                continue;
+            };
+            if value > 0.0 && value.is_finite() {
+                return Some(value / scale);
+            }
+        }
+    }
+    None
+}
+
 /// Where the chosen native price came from — mirrors `nativePriceSource`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativePriceSource {

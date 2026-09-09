@@ -1247,6 +1247,7 @@
    "intentRepay": "Rembourser",
    "intentRevoke": "Révoquer",
    "labelAmount": "Montant",
+   "amountUnknown": "Montant inconnu",
    "labelTo": "À",
    "labelFrom": "De",
    "labelOwner": "Propriétaire",

@@ -133,6 +133,18 @@ jobs:
         run: |
           node scripts/lint-lottie-assets.mjs --self-test
           node scripts/lint-lottie-assets.mjs
+      # Every screen family a native client ships must be reachable from that
+      # client's navigation root. Spec 022 shipped 9,695 lines of drawn UI across
+      # three clients that no person could open, and every gate here stayed green
+      # — because on each platform the COMPILER was happy: rustc never reads a
+      # directory nobody declared, and Kotlin/Swift happily compile a screen
+      # nothing routes to. Only navigation can see it.
+      #
+      # Static on purpose: no cargo, no gradle, no xcodebuild, well under a
+      # second. A guard that needs a 25-minute toolchain is a guard somebody
+      # eventually skips — which is the failure mode it exists to prevent.
+      - name: Native screens are reachable
+        run: node scripts/check-native-reachability.mjs
       # Byte-parity between the Rust core and the JS library the app still ships on
       # native — over every address literal in the repo plus 200k random seeds.
       - name: Identicon parity (Rust core vs the shipped JS library)
@@ -214,15 +226,20 @@ jobs:
           workspaces: rust
       - name: Format
         run: cargo fmt --all --check
+      # `vela-core/dev-fixtures` is on for the LINT and the TEST steps only:
+      # the parallel space's software signer (spec 032) is compiled by no
+      # shipping crate, so this is the one place its golden addresses are
+      # locked and its bytes are checked against the real authenticator
+      # parsers. The wasm canary below deliberately does not enable it.
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings
       # `--features vela-core/i18n-all` is REQUIRED, not a nicety. vela-core's
       # default feature set is empty, so the compiled-in catalogs are absent and
       # 1,516 of the 3,554 conformance cases fail with `I18nCatalogUnavailable`.
       # A bare `cargo test --workspace` is red — spec 004 was verified locally
       # with the features on and this step was not updated to match.
       - name: Tests (conformance corpus + proptests)
-        run: cargo test --workspace --features vela-core/i18n-all
+        run: cargo test --workspace --features vela-core/i18n-all,vela-core/dev-fixtures
       - name: Wasm build (getrandom canary)
         run: cargo build --target wasm32-unknown-unknown -p vela-core-wasm
       # The Windows passkey path. It cannot be built by any job that builds the
@@ -293,3 +310,177 @@ jobs:
           workspaces: rust
       - name: Conformance corpus through the Swift bindings
         run: ./scripts/smoke-swift.sh
+
+  # ---------------------------------------------------------------------------
+  # The three native clients (spec 029).
+  #
+  # Until this feature nothing in CI built any of them. The only `app-desktop`
+  # reference in this file was `check-windows.sh`, which type-checks a DIFFERENT,
+  # C-free crate standalone — and whose own header records having missed exactly
+  # this class of bug once before ("left the Windows path unlinked, with this
+  # gate green throughout"). The desktop app crate is also not a member of the
+  # `rust/` workspace, so `cargo test --workspace` cannot reach it.
+  #
+  # What that cost: 9,695 lines of drawn, translated, fixture-complete UI shipped
+  # on three clients that no person could open, and every gate here stayed green.
+  #
+  # These three jobs are the compile half. The reachability half is static and
+  # runs in `app` above, because a screen nothing routes to still COMPILES on all
+  # three platforms — only navigation can see that, and only a toolchain-free
+  # check is cheap enough to never be skipped.
+  # ---------------------------------------------------------------------------
+
+  desktop:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: app-desktop/vela-wallet
+    steps:
+      # Checkout FIRST. Every `run` in this job inherits the working-directory
+      # above, and a step that runs before the checkout has no directory to
+      # start bash in — the job died on step 2 with "No such file or directory"
+      # and never reached a single line of Rust. apt does not care where it is
+      # run from, so the fix is the order, not an override.
+      - uses: actions/checkout@v4
+      - name: Install the gpui build dependencies
+        # Lifted from desktop-linux-packages.yml minus the packaging tools. The
+        # app cannot be cross-checked (its tree compiles ThorVG, resvg and
+        # hidapi C), so this is a native Linux build, not a `--target` check.
+        #
+        # libdbus-1-dev is not gpui's: BLE (the caBLE passkey channel) goes
+        # through btleplug, and on Linux that is BlueZ, and BlueZ is a D-Bus
+        # service — so libdbus-sys' build script wants dbus-1.pc. It has been
+        # missing since the list was written; nothing noticed, because the job
+        # never got as far as compiling.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev cmake pkg-config \
+            git ca-certificates curl file \
+            libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libfontconfig-dev libasound2-dev libssl-dev libzstd-dev \
+            libdbus-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app-desktop/vela-wallet
+          # gpui and gpui_platform are git dependencies on the whole Zed
+          # repository; without caching, every run re-clones it.
+          cache-all-crates: true
+      - name: Format
+        run: cargo fmt --all --check
+      # NOT `-D warnings`, and the reason is recorded rather than hidden: the
+      # BASELINE carries ten clippy warnings in caBLE/Noise transport code
+      # (7 in src/ctap/cable.rs, 1 in cable/l2cap.rs, 1 in hardware.rs, 1 in
+      # onboarding.rs), because nothing has ever run clippy on this crate. Fixing
+      # transport code is not spec 029's business (AI-CODING-RULES §2), and a
+      # gate that starts red is a gate somebody disables. Raising this to
+      # `-D warnings` is a task for whoever clears those ten.
+      - name: Clippy
+        run: cargo clippy --all-targets
+      - name: Tests
+        # `sweep-gallery.sh` is deliberately NOT here: it opens real windows and
+        # a CI runner has no display. It stays a local gate, and saying so keeps
+        # the next reader from assuming a coverage that does not exist.
+        run: cargo test
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: gradle/actions/setup-gradle@v4
+      # A fresh checkout CANNOT build this app: `rust/bindings/kotlin/` is
+      # gitignored and consumed in place as a `kotlin.srcDir`, so the bindings
+      # have to be generated before Gradle runs. The JVM unit tests then load the
+      # HOST dylib through `jna.library.path`, which is the same artifact.
+      - name: Generate the Kotlin bindings
+        working-directory: rust
+        run: |
+          cargo build --release -p vela-core-uniffi
+          cargo run --release -p vela-core-uniffi --bin uniffi-bindgen -- generate \
+            --library target/release/libvela_core_uniffi.so \
+            --language kotlin --out-dir bindings/kotlin --no-format
+      # `-PvelaSkipRustBuild` skips the three-ABI NDK cross-compile, which the
+      # app's build.gradle.kts measures at ~6 minutes. Compiling and unit-testing
+      # is what catches an unrouted screen; producing an installable APK is not.
+      - name: Compile and unit-test
+        working-directory: app-android/vela-wallet
+        run: ./gradlew :app:assembleDebug :app:testDebugUnitTest -PvelaSkipRustBuild
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-ios-sim,aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      # Same story as Android: `app-ios/VelaCoreKit/Artifacts/` is gitignored, so
+      # the xcframework must be built before Xcode can resolve the local package.
+      # macos-15 minutes bill at ten times linux, so this is the step that decides
+      # the job's cost — cache it on the core's own sources, and it is a
+      # ~6-minute job rather than a ~25-minute one.
+      - name: Cache the xcframework
+        id: xcframework
+        uses: actions/cache@v4
+        with:
+          path: app-ios/VelaCoreKit/Artifacts
+          key: xcframework-${{ hashFiles('rust/crates/**', 'rust/Cargo.lock') }}
+      - name: Build the xcframework
+        if: steps.xcframework.outputs.cache-hit != 'true'
+        run: ./rust/scripts/build-ios-xcframework.sh
+      # The destination is RESOLVED, not spelled. Two traps, both hit while
+      # writing this job:
+      #   - `name=iPhone 16` is ambiguous the moment a machine has that device
+      #     under two runtimes, and xcodebuild answers by printing every
+      #     simulator it knows rather than picking one.
+      #   - `OS=latest` does not mean "newest runtime that has this device"; it
+      #     means the newest runtime, which may not offer that device at all.
+      # Asking simctl for a device that actually exists sidesteps both.
+      - name: Resolve a simulator that actually exists
+        id: sim
+        run: |
+          udid=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          best=None
+          for runtime, devices in d.items():
+              if "iOS" not in runtime: continue
+              ver=tuple(int(x) for x in runtime.split(".iOS-")[-1].split("-"))
+              for dev in devices:
+                  if dev.get("isAvailable") and dev["name"].startswith("iPhone"):
+                      if best is None or ver > best[0]: best=(ver, dev["udid"], dev["name"], runtime)
+          if best is None: sys.exit("no available iPhone simulator")
+          print(best[1])
+          print(f"using {best[2]} on {best[3]}", file=sys.stderr)
+          ')
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+      # NOTE on reading this job's output: the XCTest reporter prints
+      # "Executed 0 tests" here and it is NOT a failure. VelaWalletTests uses
+      # Swift Testing (`@Test`), which reports on its own line — "Test run with
+      # 130 tests in 13 suites passed". Anything that greps this log for a pass
+      # signal must look for the second line, not the first.
+      - name: Build and test
+        working-directory: app-ios/VelaWallet
+        run: |
+          xcodebuild test \
+            -project VelaWallet.xcodeproj \
+            -scheme VelaWallet \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            CODE_SIGNING_ALLOWED=NO

@@ -4,9 +4,20 @@
 //! `components` the reusable visuals (theme + resolved strings in, `Div` out),
 //! `page` the one entity that owns state and interaction.
 
+pub mod browser_host;
 pub mod components;
 pub mod fixtures;
+pub mod live;
+pub mod money;
 pub mod page;
+/// The signing panel's four machines as one journey.
+///
+/// Unwired until the browser's ipc handler can reach the page to open one —
+/// the last hop, and the one that needs a gpui handle inside a wry callback.
+/// Marked rather than left to make the warning count meaningless, and **taken
+/// off when that hop lands**: an allow marks callees live too (spec 032
+/// lesson 1).
+pub mod signing_host;
 
 use gpui::SharedString;
 
@@ -46,6 +57,10 @@ pub struct WalletStrings {
     /// Templates carrying `{{name}}`.
     pub to_name: String,
     pub from_name: String,
+    /// The money-in celebration, `{{amount}} {{token}}` — the toast the core
+    /// arms and expires. A template, so the number and the coin are the
+    /// core's and only the sentence around them is the corpus's.
+    pub toast_received: String,
     pub empty_activity_title: SharedString,
     pub empty_activity_caption: SharedString,
     pub empty_assets_title: SharedString,
@@ -112,6 +127,7 @@ impl WalletStrings {
             yesterday: s("componentsUi.dayGroup.yesterday"),
             to_name: raw("history.toName"),
             from_name: raw("history.fromName"),
+            toast_received: raw("home.toastReceived"),
             empty_activity_title: s("home.emptyNoActivity"),
             empty_activity_caption: s("home.emptySubtitle"),
             empty_assets_title: s("assets.emptyTitle"),
@@ -181,6 +197,10 @@ mod tests {
             assert_ne!(value, key, "`{key}` echoed the key");
         }
         assert!(s.to_name.contains("{{name}}"), "toName must be a template");
+        assert!(
+            s.toast_received.contains("{{amount}}") && s.toast_received.contains("{{token}}"),
+            "toastReceived must carry both vars: a celebration that names one              of them is a sentence with a hole in it"
+        );
         assert!(
             s.networks_line.contains("{{count}}"),
             "networksLine must be a template"

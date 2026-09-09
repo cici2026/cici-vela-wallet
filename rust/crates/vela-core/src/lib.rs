@@ -26,6 +26,12 @@ pub mod cable;
 /// transport belongs to a platform shell; what is identical on every one of
 /// them lives here. See `specs/019-onboarding-live-wiring/research.md` D4.
 pub mod ctap;
+/// The parallel space's fixed keyset: a software P-256 signer that produces
+/// the exact WebAuthn bytes a real authenticator would. Feature-gated
+/// (`--features dev-fixtures`), DEFAULT OFF, never enabled by the uniffi or
+/// wasm crates — see the module note for why the scalars live here at all.
+#[cfg(feature = "dev-fixtures")]
+pub mod dev_fixtures;
 pub mod eip712;
 pub mod error;
 pub mod i18n;
