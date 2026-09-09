@@ -109,8 +109,8 @@ core raises is drawn, and dismissing it dispatches `DismissTreasurySheet`.
   screen with per-token rows from `multi_specs` and one fee for the batch.
 - **SC-332**: off-chain-filter rows are dimmed, not hidden, and the master tick
   covers exactly the visible ∩ valuable set.
-- **SC-333**: a stale quote is visible and re-quotable; the confirm gate never
-  opens on a stale quote by the shell's own judgement.
+- ~~**SC-333**: a stale quote is visible and re-quotable~~ — retired with User
+  Story 2 (neither shell reaches it).
 - **SC-334**: the treasury-empty sheet renders from the core's presentation and
   dismisses through its event.
 - **SC-335**: `cargo test` counts strictly increase; fmt, gallery sweep and the
