@@ -225,6 +225,33 @@ pub fn submit(
     sign: SignFn<'_>,
     quoted_fee: Option<QuotedFee>,
 ) -> Result<String, SubmitFailure> {
+    let outcome = submit_inner(chain_id, safe, calls, gas_fee_token, keys, sign, quoted_fee);
+    // The SCREEN gets the core's sentence — SC-305: no relay text reaches a
+    // person. The OPERATOR gets the detail, because a submit that failed
+    // before the relay leaves no other trace at all: the log showed the quote
+    // being signed and then nothing, and "your funds are safe, try again" is
+    // the same words whether the passkey was refused, the hash would not
+    // compute, or the account is undeployed. One line, at the one place every
+    // failure passes through.
+    if let Err(failure) = &outcome {
+        eprintln!("[vela-wallet] submit failed: {failure:?}");
+    }
+    outcome
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call site; the arguments are the operation"
+)]
+fn submit_inner(
+    chain_id: u32,
+    safe: &str,
+    calls: &[FeeCall],
+    gas_fee_token: Option<&str>,
+    keys: &[WalletKey],
+    sign: SignFn<'_>,
+    quoted_fee: Option<QuotedFee>,
+) -> Result<String, SubmitFailure> {
     let inner: Vec<MultiSendCall> = calls
         .iter()
         .map(to_multi_send_call)

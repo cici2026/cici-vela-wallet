@@ -82,3 +82,33 @@ hop, spec 032 phase 19")]` —— 那一跳**已经落地了**(wry 的 ipc → `
 只暴露了我自己 033 留下的一个没人调用的包装函数(一并删掉)。
 
 desktop **366 / 362**,fmt clean,画廊全渲染。
+
+---
+
+## Phase 3 — 真的发了两笔(创始人授权)
+
+### 结果
+
+| 路径 | 金额 | 结果 |
+|---|---|---|
+| 无头(`VELA_LIVE_SEND=1`,仓库自带的那条) | 0.001 xDAI → fixture #2 | ✅ `tx_status=Confirmed`,hash `0xde88237b…` |
+| **GUI 全程** | 0.01 xDAI 自转 | ✅ 屏幕上 `Sent 0.01 xDAI · To MultiTest · Gnosis` + hash |
+
+GUI 那笔走完了整条链路:扫码开单 → 表单 → 真报价 → 确认页 → `Confirm & Send` →
+固定密钥集签名 → 中继受理 → 回执页 → 回到首页,**活动流里出现「Sent · To MultiTest」**
+(这也顺带证明了 032 phase 44 那条重读节奏在跑)。
+
+### 中间有过一次失败,值得记下来
+
+第一次 GUI 尝试报了「The transaction couldn't be submitted. Your funds are safe」,
+而日志里**只有"签名了这个报价"一行,之后什么都没有** —— 连中继那句
+`relay: submitting` 都没有。之后两次(一次无头、一次 GUI)都成功,复现不出来。
+
+**真正的问题不是那次失败,是它什么都没留下。** 屏幕按 SC-305 只说核心那句通用话
+(中继的原文永远不上屏),而这句话对"通行密钥被拒""哈希算不出来""账户未部署"
+是同一句。所以在**每一次失败都会经过的那一处**加了一行日志:
+`submit failed: {failure:?}` —— 屏幕给人,日志给运维。
+
+诊断用的临时 `eprintln` 全部删掉了,只留这一条。
+
+desktop **367 / 363**,fmt clean,画廊全渲染。
