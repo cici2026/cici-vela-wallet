@@ -346,13 +346,20 @@ jobs:
         # Lifted from desktop-linux-packages.yml minus the packaging tools. The
         # app cannot be cross-checked (its tree compiles ThorVG, resvg and
         # hidapi C), so this is a native Linux build, not a `--target` check.
+        #
+        # libdbus-1-dev is not gpui's: BLE (the caBLE passkey channel) goes
+        # through btleplug, and on Linux that is BlueZ, and BlueZ is a D-Bus
+        # service — so libdbus-sys' build script wants dbus-1.pc. It has been
+        # missing since the list was written; nothing noticed, because the job
+        # never got as far as compiling.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang libclang-dev cmake pkg-config \
             git ca-certificates curl file \
             libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
-            libfontconfig-dev libasound2-dev libssl-dev libzstd-dev
+            libfontconfig-dev libasound2-dev libssl-dev libzstd-dev \
+            libdbus-1-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
