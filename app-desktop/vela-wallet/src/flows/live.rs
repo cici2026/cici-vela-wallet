@@ -825,6 +825,19 @@ fn send_token_row(
 /// DSD1L — which token to send. The rows are the core's holdings.
 #[must_use]
 pub fn send_pick(i: &SendInputs<'_>) -> SendPick {
+    send_pick_with(i, false)
+}
+
+/// The picker, in one of its two modes.
+///
+/// `sweeping` is the SHELL's flag, and deliberately: the core's
+/// `multi_select_mode` flips only when a selection is CONFIRMED, so before
+/// that there is nothing in the view that says whether the checkboxes are
+/// showing. Which tokens may be picked, what "all valuable" means and what a
+/// sweep moves are all still the core's — the web's port records the same
+/// split in the same words (`live-send.ts` `sweepPicking`).
+#[must_use]
+pub fn send_pick_with(i: &SendInputs<'_>, sweeping: bool) -> SendPick {
     let s = i.s;
     let mut dots = Vec::new();
     for token in &i.send.tokens {
@@ -840,7 +853,9 @@ pub fn send_pick(i: &SendInputs<'_>) -> SendPick {
         label: label.clone(),
         selected,
     };
-    SendPick {
+    let mut pick = SendPick {
+        selection: None,
+        cta_accent: false,
         search_placeholder: s.send_search.clone(),
         pill: (dots, s.pill_all.clone()),
         filters: vec![
@@ -856,6 +871,165 @@ pub fn send_pick(i: &SendInputs<'_>) -> SendPick {
             .map(|token| send_token_row(token, i.wallet, i.locale))
             .collect(),
         cta: s.multi_send_title.clone(),
+    };
+    if !sweeping {
+        return pick;
+    }
+
+    let chain = i.send.multi_chain_id;
+    let picked = &i.send.multi_selected_ids;
+    pick.selection = Some(crate::flows::fixtures::SendSelection {
+        selected: i
+            .send
+            .tokens
+            .iter()
+            .map(|token| picked.contains(&token.id()))
+            .collect(),
+        // Dimmed, not dropped: a batch is one chain, and the tokens on the
+        // others are still this person's.
+        dimmed: i
+            .send
+            .tokens
+            .iter()
+            .map(|token| chain.is_some_and(|id| token.chain_id != id))
+            .collect(),
+        select_all: s.select_all_valuable.clone(),
+        notice: chain.map(|chain_id| {
+            let name = crate::executor::custom_tokens::network_name(chain_id);
+            (
+                crate::settings::model::chain_tint(u64::from(chain_id)).unwrap_or(0x8A_8F_98),
+                SharedString::from(crate::settings::model::lettermark(&name)),
+                SharedString::from(crate::wallet::fill(
+                    &s.multi_send_chain_notice,
+                    "network",
+                    &name,
+                )),
+            )
+        }),
+    });
+    if !picked.is_empty() {
+        pick.cta_accent = true;
+        pick.cta = SharedString::from(crate::wallet::fill(
+            &crate::wallet::fill(&s.multi_send_continue, "n", &picked.len().to_string()),
+            "chain",
+            &chain.map_or_else(String::new, crate::executor::custom_tokens::network_name),
+        ));
+    }
+    pick
+}
+
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use crate::core_host::CoreHost;
+    use vela_core::app::send::{Send as SendMachine, SendToken, SendView};
+
+    fn token(chain_id: u32, symbol: &str, address: Option<&str>) -> SendToken {
+        SendToken {
+            network: format!("chain-{chain_id}"),
+            chain_id,
+            symbol: symbol.to_owned(),
+            balance: "10".to_owned(),
+            decimals: 18,
+            token_address: address.map(str::to_owned),
+            price_usd: Some(1.0),
+            logo_urls: Vec::new(),
+            spam: false,
+        }
+    }
+
+    /// A real `SendView` with the sweep fields substituted — the same shape
+    /// `wallet::live`'s tests use, and for the same reason: this view has
+    /// dozens of fields with their own invariants, and a literal I typed would
+    /// be a guess about them.
+    fn view_with(tokens: Vec<SendToken>, picked: Vec<String>, chain: Option<u32>) -> SendView {
+        let host = CoreHost::<SendMachine>::new();
+        SendView {
+            tokens,
+            multi_selected_ids: picked,
+            multi_chain_id: chain,
+            ..host.view()
+        }
+    }
+
+    fn inputs<'a>(
+        send: &'a SendView,
+        fee: &'a vela_core::app::fee_policy::FeeView,
+        s: &'a FlowStrings,
+        wallet: &'a crate::wallet::WalletStrings,
+    ) -> SendInputs<'a> {
+        SendInputs {
+            send,
+            fee,
+            s,
+            wallet,
+            locale: "en-US",
+            identity_name: "MultiTest",
+            identity_address: "0x88cCA0EeDbF2C4426110bbFc998F048689266894",
+        }
+    }
+
+    /// The sweep picker says which rows are ticked, which are on the wrong
+    /// chain, and how many are going — all of it read from the core's view.
+    ///
+    /// The greying is the part worth a test: a batch is one chain, and the
+    /// rows on the others stay ON SCREEN. A list that silently shortened when
+    /// somebody ticked a token would read as a bug, and it is the person's own
+    /// money that would appear to have gone.
+    #[test]
+    fn a_sweep_ticks_what_is_picked_and_greys_the_other_chains() {
+        crate::executor::storage::tests::with_temp_state("send-sweep", || {
+            let s = FlowStrings::resolve(&crate::loc::Loc::from_env());
+            let wallet = crate::wallet::WalletStrings::resolve(&crate::loc::Loc::from_env());
+            let fee = CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
+            let tokens = vec![
+                token(100, "xDAI", None),
+                token(100, "USDC", Some("0xdd")),
+                token(1, "ETH", None),
+            ];
+            let ids: Vec<String> = tokens.iter().map(SendToken::id).collect();
+
+            // Not sweeping: the one-token list, and no selection at all.
+            let plain = view_with(tokens.clone(), Vec::new(), None);
+            let pick = send_pick_with(&inputs(&plain, &fee, &s, &wallet), false);
+            assert!(pick.selection.is_none());
+            assert!(!pick.cta_accent);
+            assert_eq!(pick.cta, s.multi_send_title);
+
+            // Sweeping, nothing picked yet: ticks are showing, nothing is
+            // dimmed (no chain is pinned), and the CTA is still the quiet one.
+            let empty = view_with(tokens.clone(), Vec::new(), None);
+            let pick = send_pick_with(&inputs(&empty, &fee, &s, &wallet), true);
+            let selection = pick
+                .selection
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("sweeping"));
+            assert_eq!(selection.selected, vec![false, false, false]);
+            assert_eq!(selection.dimmed, vec![false, false, false]);
+            assert!(selection.notice.is_none(), "no chain named yet");
+            assert!(!pick.cta_accent);
+
+            // Two picked on Gnosis: those two ticked, Ethereum's row dimmed
+            // (still listed), the chain named, and the CTA counting.
+            let picked = view_with(tokens, vec![ids[0].clone(), ids[1].clone()], Some(100));
+            let pick = send_pick_with(&inputs(&picked, &fee, &s, &wallet), true);
+            let selection = pick
+                .selection
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("sweeping"));
+            assert_eq!(selection.selected, vec![true, true, false]);
+            assert_eq!(selection.dimmed, vec![false, false, true]);
+            let (_, letter, text) = selection
+                .notice
+                .clone()
+                .unwrap_or_else(|| unreachable!("a chain is pinned"));
+            assert_eq!(letter, "G");
+            assert!(text.contains("Gnosis"), "{text}");
+            assert!(!text.contains("{{"), "unfilled template: {text}");
+            assert!(pick.cta_accent);
+            assert!(pick.cta.contains('2'), "the count: {}", pick.cta);
+            assert!(pick.cta.contains("Gnosis"), "the chain: {}", pick.cta);
+        });
     }
 }
 

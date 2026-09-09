@@ -9,6 +9,8 @@ use gpui::{
     ParentElement, SharedString, StatefulInteractiveElement as _, Styled, Window, div, px,
 };
 
+use gpui::prelude::FluentBuilder as _;
+
 use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
 use crate::theme::{self, Theme};
@@ -82,6 +84,10 @@ pub struct PanelActions {
     /// DSD1L, live: one listener per token row. Empty falls back to
     /// `open_send_form`, which the fixture gives to its first row.
     pub open_send_rows: Vec<Click>,
+    /// SD1b, live: "select all valuable", and the CTA that either enters the
+    /// sweep or confirms the tokens ticked in it.
+    pub sweep_select_all: Option<Click>,
+    pub send_pick_cta: Option<Click>,
     /// DSD2L, live: the amount and the recipient, editable. `None` draws the
     /// mock's static figures.
     pub amount_field: Option<AddressField>,
@@ -194,6 +200,8 @@ pub fn render(
             icons,
             actions.open_send_form,
             actions.open_send_rows,
+            actions.sweep_select_all,
+            actions.send_pick_cta,
         ),
         FlowBody::SendForm(model) => send_form(model, theme, icons, identicons, window, actions),
         FlowBody::ContactPick(model) => contact_pick(
@@ -848,6 +856,8 @@ fn send_pick(
     icons: &mut IconCache,
     mut open_form: Option<Click>,
     per_row: Vec<Click>,
+    select_all: Option<Click>,
+    cta: Option<Click>,
 ) -> Div {
     let (dots, pill_label) = &model.pill;
     let mut col = column()
@@ -861,6 +871,36 @@ fn send_pick(
                 .child(filter_chips(theme, &model.filters))
                 .child(network_pill(theme, icons, dots, pill_label.clone()).flex_none()),
         );
+
+    // SD1b's chain lock, in the corpus's own sentence: the first pick names
+    // the network and the greying that follows is explained rather than left
+    // to be guessed at.
+    if let Some((colour, letter, text)) = model
+        .selection
+        .as_ref()
+        .and_then(|selection| selection.notice.clone())
+    {
+        col = col.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .p(px(12.))
+                .rounded(px(10.))
+                .bg(theme.bg_well)
+                .child(crate::settings::components::chain_mark(letter, colour, 20.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .text_size(theme::text_row_sub())
+                        .line_height(px(18.))
+                        .text_color(theme.fg_muted)
+                        .child(text),
+                ),
+        );
+    }
+
     // A live panel binds one listener per row; the fixture binds one and
     // gives it to the first, because every mock row opens the same drawing.
     let mut per_row = per_row.into_iter();
@@ -868,23 +908,72 @@ fn send_pick(
         let action = per_row
             .next()
             .or_else(|| if i == 0 { open_form.take() } else { None });
+        let selected = model
+            .selection
+            .as_ref()
+            .and_then(|s| s.selected.get(i).copied())
+            .unwrap_or(false);
+        let dimmed = model
+            .selection
+            .as_ref()
+            .and_then(|s| s.dimmed.get(i).copied())
+            .unwrap_or(false);
+        let drawn = asset_row(ElementId::from(("flow-send", i)), theme, icons, row);
+        let mut wrapper = div().when(selected, |el| {
+            el.rounded(px(10.)).bg(theme.accent.opacity(0.10))
+        });
+        wrapper = wrapper.child(if dimmed {
+            // Off-network rows are readable and inert. The core refuses them
+            // anyway; drawing them as pressable would be an offer it declines.
+            drawn.opacity(0.4).into_any_element()
+        } else {
+            clickable(ElementId::from(("flow-send-row", i)), action, drawn).into_any_element()
+        });
+        col = col.child(wrapper);
+    }
+
+    if let Some(selection) = model.selection.as_ref() {
         col = col.child(clickable(
-            ElementId::from(("flow-send-row", i)),
-            action,
-            asset_row(ElementId::from(("flow-send", i)), theme, icons, row),
+            "flow-send-select-all",
+            select_all,
+            div()
+                .py(px(8.))
+                .text_size(theme::text_row_sub())
+                .text_color(theme.fg_muted)
+                .child(selection.select_all.clone()),
         ));
     }
+
     // DSD1L sets this as a quiet centred link, not a button: sending several
     // tokens at once is a different journey, not the main one on this panel.
-    col.child(
-        div()
-            .flex()
-            .justify_center()
-            .py(px(8.))
-            .text_size(theme::text_row_sub())
-            .text_color(theme.fg_muted)
-            .child(model.cta.clone()),
-    )
+    // Once tokens ARE ticked it becomes the accent action, because then it is.
+    let label = div()
+        .flex()
+        .justify_center()
+        .py(px(8.))
+        .text_size(theme::text_row_sub())
+        .text_color(if model.cta_accent {
+            theme.fg_inverse
+        } else {
+            theme.fg_muted
+        })
+        .child(model.cta.clone());
+    col.child(clickable(
+        "flow-send-cta",
+        cta,
+        if model.cta_accent {
+            div()
+                .h(px(44.))
+                .rounded(px(12.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.accent)
+                .child(label)
+        } else {
+            label
+        },
+    ))
 }
 
 fn send_form(

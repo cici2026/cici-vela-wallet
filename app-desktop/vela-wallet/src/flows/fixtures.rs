@@ -333,6 +333,26 @@ pub struct SendPick {
     pub filters: Vec<FilterChip>,
     pub rows: Vec<AssetRowModel>,
     pub cta: SharedString,
+    /// Spec 033 — the sweep picker (SD1b). `None` is the ordinary
+    /// one-token list, which is what the mock draws.
+    pub selection: Option<SendSelection>,
+    /// The sweep CTA carries a count and wears the accent; the plain one is a
+    /// quiet centred link. Two looks, one slot.
+    pub cta_accent: bool,
+}
+
+/// Which rows a sweep has ticked, and which are on the wrong chain.
+///
+/// Off-chain rows are DIMMED rather than removed: the person still owns them,
+/// and a list that silently shortened would read as a bug (SD1b's own note).
+#[derive(Clone)]
+pub struct SendSelection {
+    pub selected: Vec<bool>,
+    pub dimmed: Vec<bool>,
+    pub select_all: SharedString,
+    /// "Gnosis selected — a multi-token send stays on one network…", with the
+    /// chain's own mark beside it. `None` until the first pick names a chain.
+    pub notice: Option<(u32, SharedString, SharedString)>,
 }
 
 #[derive(Clone)]
@@ -881,6 +901,9 @@ fn add_token(s: &FlowStrings, native: bool) -> AddToken {
 
 fn send_pick(s: &FlowStrings) -> SendPick {
     SendPick {
+        // The mock is the one-token list; the sweep is a live-only state.
+        selection: None,
+        cta_accent: false,
         search_placeholder: s.send_search.clone(),
         filters: vec![
             FilterChip {

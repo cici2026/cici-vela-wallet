@@ -284,6 +284,11 @@ pub struct FlowStrings {
     pub filter_gas: SharedString,
     pub filter_other: SharedString,
     pub multi_send_title: SharedString,
+    /// The sweep picker's three sentences. `chain_notice` and `continue` are
+    /// templates (`{{network}}`, `{{n}}` + `{{chain}}`) — the phone drew this
+    /// screen, so every word is already translated.
+    pub multi_send_chain_notice: String,
+    pub multi_send_continue: String,
     pub select_all_valuable: SharedString,
     /// Templates carrying `{{symbol}}` / `{{amount}}` / `{{n}}` / `{{count}}`.
     pub send_title: String,
@@ -502,6 +507,8 @@ impl FlowStrings {
             filter_gas: s("send.filterGas"),
             filter_other: s("send.filterOther"),
             multi_send_title: s("send.multiSendTitle"),
+            multi_send_chain_notice: raw("send.multiSendChainNotice"),
+            multi_send_continue: raw("send.multiSendContinue"),
             select_all_valuable: s("send.selectAllValuable"),
             send_title: raw("send.sendTitle"),
             balance_label: raw("send.balanceLabel"),

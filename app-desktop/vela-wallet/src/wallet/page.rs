@@ -448,6 +448,10 @@ pub struct WalletPage {
     send_rate_focus: gpui::FocusHandle,
     /// DSD2fL is the page's own overlay: the core has no flag for it.
     send_fee_picker: bool,
+    /// SD1b: the token picker is in sweep mode. The page's, not the core's —
+    /// `multi_select_mode` turns on when the selection is CONFIRMED, so before
+    /// that nothing in the view says whether the ticks are showing.
+    send_sweeping: bool,
     /// The native window, for the one platform whose passkey dialog is the
     /// OS's; captured once, because a ceremony runs off the main thread and
     /// cannot reach `Window` from there.
@@ -571,6 +575,12 @@ struct SendBindings {
     rate_focus: gpui::FocusHandle,
     /// DSD2eL: each group's member addresses, in drawn order.
     group_members: Vec<Vec<String>>,
+    /// SD1b: the picker is choosing SEVERAL tokens. A shell flag — the core's
+    /// `multi_select_mode` flips only once a selection is confirmed — and the
+    /// chain each row is on, so the first pick can name the network.
+    sweeping: bool,
+    token_chain_ids: Vec<u32>,
+    multi_chain_id: Option<u32>,
     /// What the notice's way-out means on THIS panel — derived by the same
     /// traversal that wrote the sentence, so the button and the words cannot
     /// disagree about what they are offering.
@@ -781,6 +791,7 @@ impl WalletPage {
             send_recipient_focus: cx.focus_handle(),
             send_rate_focus: cx.focus_handle(),
             send_fee_picker: false,
+            send_sweeping: false,
             window_handle: crate::onboarding::native_window_handle(window),
             endpoint_focuses: Vec::new(),
             settings_probed_network: None,
@@ -3144,6 +3155,9 @@ impl WalletPage {
         self.send_host = None;
         self.send_fee_picker = false;
         if entry == FlowEntry::Send && self.identity.is_some() {
+            // A fresh journey starts on the one-token list, whatever the last
+            // one ended in.
+            self.send_sweeping = false;
             self.open_send(SendOpenParams::default(), cx);
         }
         // A person looking at one network who presses 收款 means THAT network.
@@ -3291,6 +3305,9 @@ impl WalletPage {
             rate_focus: self.send_rate_focus.clone(),
             group_members,
             way_out,
+            sweeping: self.send_sweeping,
+            token_chain_ids: view.tokens.iter().map(|token| token.chain_id).collect(),
+            multi_chain_id: view.multi_chain_id,
         })
     }
 
@@ -3570,9 +3587,9 @@ impl WalletPage {
                         identity_address: &identity.address,
                     };
                     match panel {
-                        FlowPanel::Dsd1 => {
-                            flow_fixtures::FlowBody::SendPick(flows_live::send_pick(&inputs))
-                        }
+                        FlowPanel::Dsd1 => flow_fixtures::FlowBody::SendPick(
+                            flows_live::send_pick_with(&inputs, self.send_sweeping),
+                        ),
                         FlowPanel::Dsd2 | FlowPanel::Dsd2b => {
                             flow_fixtures::FlowBody::SendForm(flows_live::send_form(&inputs))
                         }
@@ -3686,6 +3703,8 @@ impl WalletPage {
             address_field: None,
             add_to_wallet: None,
             open_send_rows: Vec::new(),
+            sweep_select_all: None,
+            send_pick_cta: None,
             amount_field: None,
             recipient_field: None,
             tap_max: None,
@@ -3829,11 +3848,76 @@ impl WalletPage {
             match panel {
                 FlowPanel::Dsd1 => {
                     actions.open_send_form = None;
+                    let sweeping = send.sweeping;
+                    let chain_ids = send.token_chain_ids.clone();
+                    let pinned = send.multi_chain_id;
                     actions.open_send_rows = send
                         .token_ids
-                        .into_iter()
-                        .map(|token_id| to_host(SendEvent::SelectToken { token_id }))
+                        .iter()
+                        .cloned()
+                        .zip(chain_ids)
+                        .map(|(token_id, chain_id)| -> panels::Click {
+                            if !sweeping {
+                                return to_host(SendEvent::SelectToken { token_id });
+                            }
+                            let host = host.clone();
+                            Box::new(
+                                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                    host.update(cx, |host, cx| {
+                                        // A batch is one chain, and the FIRST
+                                        // pick is what names it — after that
+                                        // the core refuses every other chain.
+                                        // Emptying the selection unpins it, so
+                                        // starting over needs no way out of
+                                        // the screen.
+                                        if pinned.is_none() {
+                                            host.dispatch(
+                                                SendEvent::SetMultiNetwork {
+                                                    chain_id: Some(chain_id),
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                        host.dispatch(
+                                            SendEvent::ToggleMultiToken {
+                                                token_id: token_id.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    });
+                                },
+                            )
+                        })
                         .collect();
+                    // The scope is what the picker is SHOWING; which of those
+                    // count as valuable stays the core's answer.
+                    let visible_ids = send.token_ids.clone();
+                    actions.sweep_select_all = sweeping.then(|| {
+                        let host = host.clone();
+                        Box::new(
+                            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                host.update(cx, |host, cx| {
+                                    host.dispatch(
+                                        SendEvent::ToggleAllMultiTokens {
+                                            visible_ids: visible_ids.clone(),
+                                        },
+                                        cx,
+                                    );
+                                });
+                            },
+                        ) as panels::Click
+                    });
+                    // One slot, two jobs: enter the sweep, or confirm what it
+                    // has ticked. Which one it is, is what the label already
+                    // says.
+                    actions.send_pick_cta = Some(if sweeping {
+                        to_host(SendEvent::ConfirmMultiSelection)
+                    } else {
+                        Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                            this.send_sweeping = true;
+                            cx.notify();
+                        })) as panels::Click
+                    });
                 }
                 FlowPanel::Dsd2 | FlowPanel::Dsd2b => {
                     actions.amount_field = Some(panels::AddressField {
