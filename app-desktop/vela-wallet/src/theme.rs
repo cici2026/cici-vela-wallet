@@ -297,6 +297,11 @@ pub const WALLET_ROW_ICON: f32 = 40.;
 pub const WALLET_BADGE: f32 = 12.;
 pub const WALLET_NAV_ROW_H: f32 = 40.;
 pub const WALLET_CONTROL_H: f32 = 44.;
+/// The money-in toast (D1b): the glyph disc, and how far below the top of the
+/// window the pill floats. Measured against the phone's own banner — same
+/// gesture, a desktop's distance from the eye.
+pub const WALLET_TOAST_DISC: f32 = 28.;
+pub const WALLET_TOAST_TOP: f32 = 16.;
 
 // ---------------------------------------------------------------------------
 // Contacts (spec 018). Geometry measured on the DC1–DC6/M1/M2 mocks at their

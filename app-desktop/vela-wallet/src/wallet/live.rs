@@ -204,6 +204,130 @@ mod tests {
         }
     }
 
+    /// A celebration, produced the way the machine produces one: a first pass
+    /// that spends the backlog gate, then a tick whose scan found something.
+    ///
+    /// Hand-writing a `FeedView` with a toast in it would prove only that this
+    /// module can read a struct I filled in. What has to be true is that the
+    /// toast a REAL sequence arms says what the row says, and the sequence is
+    /// four steps long for reasons the core is emphatic about (the first pass
+    /// never celebrates; only the read the sync named may).
+    fn celebrated(value: &str, symbol: &str) -> CoreHost<ActivityFeed> {
+        use vela_core::app::activity_feed::{FeedOperation, FeedShellResult, FeedTxRecord};
+
+        const ME: &str = "0xme";
+        let record = FeedTxRecord {
+            id: "r1".to_owned(),
+            user_op_hash: String::new(),
+            tx_hash: "0xdead".to_owned(),
+            from: "0xAbCdEf0000000000000000000000000000000001".to_owned(),
+            to: ME.to_owned(),
+            to_name: None,
+            value: value.to_owned(),
+            symbol: symbol.to_owned(),
+            decimals: 6,
+            logo_urls: None,
+            chain_id: 100,
+            timestamp: 1_756_000_000.0,
+            day_start_ms: 0.0,
+            status: vela_core::app::activity_feed::FeedTxStatus::Confirmed,
+            kind: Some(vela_core::app::activity_feed::FeedTxKind::Receive),
+            usd: None,
+        };
+
+        let mut host = CoreHost::<ActivityFeed>::new();
+        let mut pending = host.dispatch(FeedEvent::AccountSwitched {
+            address: ME.to_owned(),
+        });
+        // Two passes: the first spends the backlog gate (nothing new), the
+        // second finds one receipt and is therefore allowed to celebrate.
+        for (pass, new_count) in [(0, 0u32), (1, 1u32)] {
+            if pass == 1 {
+                pending.extend(host.dispatch(FeedEvent::FocusTick));
+            }
+            for _ in 0..16 {
+                let Some(next) = pending.pop() else {
+                    break;
+                };
+                let result = match &next.operation {
+                    FeedOperation::ReadTxStore { read_id, .. } => FeedShellResult::StoreLoaded {
+                        records: if pass == 0 {
+                            Vec::new()
+                        } else {
+                            vec![record.clone()]
+                        },
+                        now_ms: 1_756_000_000_000.0,
+                        read_id: *read_id,
+                    },
+                    FeedOperation::ScanIncomingTransfers { .. } => {
+                        FeedShellResult::SyncCompleted { new_count }
+                    }
+                    FeedOperation::ResolveRecipientIdentity { addr } => {
+                        FeedShellResult::AliasResolved {
+                            addr: addr.clone(),
+                            name: None,
+                        }
+                    }
+                    // The countdown is NOT run: answering it here would expire
+                    // the toast inside the fixture that exists to look at it.
+                    FeedOperation::Timer { .. } => continue,
+                    FeedOperation::DeleteTxRecord { id } => {
+                        FeedShellResult::DeleteCommitted { id: id.clone() }
+                    }
+                    FeedOperation::Haptic => FeedShellResult::HapticPlayed,
+                };
+                pending.extend(host.resolve(next.id, result));
+            }
+        }
+        host
+    }
+
+    /// The celebration says what landed, in the corpus's sentence, with the
+    /// same number formatter the row underneath it uses.
+    #[test]
+    fn a_landed_receipt_is_celebrated_with_its_own_amount() {
+        let host = celebrated("120", "USDT");
+        let view = host.view();
+        let s = strings();
+
+        let toast = receipt_toast(&view, &s).unwrap_or_else(|| unreachable!("a toast was armed"));
+        assert!(toast.contains("120"), "the amount: {toast}");
+        assert!(toast.contains("USDT"), "the coin: {toast}");
+        assert!(!toast.contains("{{"), "an unfilled template: {toast}");
+
+        // And the row it is about is the one the glow names, so the two
+        // surfaces cannot celebrate different transactions.
+        assert_eq!(view.new_item_id.as_deref(), Some("r1"));
+        assert_eq!(
+            history_item_ids(&view).first().map(String::as_str),
+            Some("r1")
+        );
+    }
+
+    /// Privacy is the one case where the shell must draw NOTHING — and the
+    /// core is what withholds it, so this is really a test that the shell
+    /// asked. A masked hero beside a pill reading "120 USDT received" would
+    /// undo the mask on the surface that spells the number out in full.
+    #[test]
+    fn a_masked_hero_gets_no_celebration() {
+        let mut host = celebrated("120", "USDT");
+        let _ = host.dispatch(FeedEvent::PrivacyChanged { hidden: true });
+        let view = host.view();
+        assert!(receipt_toast(&view, &strings()).is_none());
+        // The glow survives it: the core withholds the NUMBER, not the news
+        // that something landed.
+        assert_eq!(view.new_item_id.as_deref(), Some("r1"));
+    }
+
+    /// An amount that will not parse is no celebration at all — never a pill
+    /// with a hole where the money goes.
+    #[test]
+    fn an_unreadable_amount_is_not_celebrated() {
+        let host = celebrated("not-a-number", "USDT");
+        assert!(host.view().toast.is_some(), "the core armed one");
+        assert!(receipt_toast(&host.view(), &strings()).is_none());
+    }
+
     fn item(id: &str, incoming: bool, value: Option<&str>, symbol: &str) -> FeedItem {
         FeedItem {
             id: id.to_owned(),
@@ -795,6 +919,31 @@ pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
         });
     }
     rows
+}
+
+/// The celebration sentence — "120 USDT received" — or nothing.
+///
+/// Everything about WHETHER to celebrate is already decided: the core arms the
+/// toast only on a post-first-pass sync that persisted a genuinely new receipt,
+/// withholds it entirely while balance privacy is on (invariant ④ — a toast
+/// would print the number the hero is masking), and expires it on its own
+/// 2.8-second timer. This reads what survived all that and formats it with the
+/// SAME number formatter the feed row beneath it uses, so the row and the
+/// celebration cannot disagree about the amount.
+///
+/// A value that will not parse answers `None`. The core's own words for the
+/// same corner: "fail closed: no toast rather than a wrong one" — and the wrong
+/// one here would be a celebration with an empty space where the money goes.
+#[must_use]
+pub fn receipt_toast(view: &FeedView, s: &WalletStrings) -> Option<SharedString> {
+    let toast = view.toast.as_ref()?;
+    let amount = toast.value.parse::<f64>().ok()?;
+    let amount = format_token_amount(amount, NumberPreset::CommaDot, false);
+    Some(SharedString::from(crate::wallet::fill(
+        &crate::wallet::fill(&s.toast_received, "amount", &amount),
+        "token",
+        &toast.symbol,
+    )))
 }
 
 /// The ids of the feed ITEMS, in the order the home preview draws them.

@@ -11,6 +11,7 @@ use crate::icons::{Icon, IconCache};
 use crate::identicon::IdenticonCache;
 use crate::theme::{
     self, Theme, WALLET_AVATAR, WALLET_BADGE, WALLET_CONTROL_H, WALLET_NAV_ROW_H, WALLET_ROW_ICON,
+    WALLET_TOAST_DISC,
 };
 
 use super::fixtures::{
@@ -774,5 +775,60 @@ pub fn qr_placeholder(theme: &Theme, caption: SharedString, side: Pixels) -> Div
                 .text_size(theme::text_label())
                 .text_color(ink.opacity(0.5))
                 .child(caption),
+        )
+}
+
+/// The money-in celebration (D1b): a floating pill saying what landed.
+///
+/// The phone's version is a solid green banner with white words on it. This is
+/// not that, for a reason that is about the palette rather than about taste:
+/// the dark palette's success green (`#3da872`) under white text is a contrast
+/// ratio of about three to one, which passes for a 28-pixel glyph and fails for
+/// a sentence. So the colour lives in the disc — a small area, a shape rather
+/// than a word — and the sentence sits on the raised surface every other
+/// floating thing in this shell uses, at full contrast in both palettes.
+///
+/// Nothing here is interactive, and deliberately: it is over the middle of the
+/// window for 2.8 seconds and a person who reaches for what is underneath must
+/// get what is underneath. `menu_card`'s `occlude` is what a menu needs and
+/// what this must never have.
+pub fn receipt_toast(theme: &Theme, icons: &mut IconCache, text: SharedString) -> Div {
+    let height = WALLET_TOAST_DISC + 20.;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .pl(px(10.))
+        .pr(px(18.))
+        .py(px(10.))
+        .rounded(px(height / 2.))
+        .bg(theme.bg_raised)
+        .border_1()
+        .border_color(theme.divider)
+        .shadow_lg()
+        .child(
+            div()
+                .w(px(WALLET_TOAST_DISC))
+                .h(px(WALLET_TOAST_DISC))
+                .flex_none()
+                .rounded(px(WALLET_TOAST_DISC / 2.))
+                .bg(theme.success)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon_img(
+                    icons,
+                    Icon::ArrowDownLeft,
+                    false,
+                    theme.fg_inverse,
+                    16.,
+                )),
+        )
+        .child(
+            div()
+                .text_size(theme::text_row_title())
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(theme.fg_base)
+                .child(text),
         )
 }

@@ -14,6 +14,7 @@
 //! York under *today* when it should be yesterday — wrong for part of every day
 //! for everybody who is not in Greenwich.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::App;
@@ -24,7 +25,7 @@ use vela_core::app::activity_feed::{
 };
 
 use crate::executor::{identity, storage};
-use crate::resident::{Answer, Machine};
+use crate::resident::{self, Answer, Machine};
 use crate::session;
 
 /// `vela.transactionHistory` — the shared local store.
@@ -118,6 +119,23 @@ fn to_record(row: &Value) -> Option<FeedTxRecord> {
 /// run found nothing, which is a true statement, and it is not a reason to
 /// show an error over a feed that is otherwise correct.
 fn sync_received(address: &str) -> u32 {
+    // One scan at a time. Ticks are 30 s apart and a twelve-chain discovery on
+    // a bad network can outlive that; two of them overlapping would read the
+    // same store, both find the same receipt missing, and both write it —
+    // which is two rows and two celebrations for one payment. A scan that
+    // could not run found nothing, which is the answer this function already
+    // gives for every other way it can fail to run.
+    if SCANNING.swap(true, Ordering::SeqCst) {
+        return 0;
+    }
+    let added = scan(address);
+    SCANNING.store(false, Ordering::SeqCst);
+    added
+}
+
+static SCANNING: AtomicBool = AtomicBool::new(false);
+
+fn scan(address: &str) -> u32 {
     let incoming = crate::executor::token_trust::poll(address);
     if incoming.is_empty() {
         return 0;
@@ -302,6 +320,64 @@ impl Machine for ActivityFeed {
     }
 }
 
+static TICKING: AtomicBool = AtomicBool::new(false);
+
+/// The cadence the core does NOT own.
+///
+/// Its words: "`FocusTick`/`LiveTick` cadence (focus + 30s auto-refresh, 10s
+/// while the Activity tab is visible) stays in the shell: which tab is visible
+/// is render-domain state the core never sees." A desktop window has one
+/// screen, always mounted, and no tab that comes and goes — so it takes the
+/// slower of the two and takes it always.
+///
+/// Thirty seconds is also the honest ceiling for what a tick costs here: each
+/// one is a receipt discovery across every chain the person holds on, not a
+/// local read.
+const TICK: Duration = Duration::from_secs(30);
+
+/// Boot the feed and keep it re-reading for the life of the process.
+///
+/// **This is the celebration's only way in.** Without it the machine performs
+/// its boot pipeline once and never again, and the one path that arms a toast
+/// — a sync that persisted a genuinely new receipt, AFTER the first pass —
+/// cannot be reached even in principle: the first pass is spent at boot, and no
+/// second pass ever happens. A pending send would also stay pending on screen
+/// until the next launch, because the re-read that notices the tracker's patch
+/// is the same re-read.
+///
+/// Called by the wallet page on sign-in, beside the tracker's own; a second
+/// call is a no-op.
+pub fn start_ticks(cx: &mut App) {
+    let _ = resident::resident::<ActivityFeed>(cx);
+    if TICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(TICK).await;
+            // Re-fetched each tick, for the reason the tracker's loop states:
+            // a sign-out drops every resident, and the next sign-in's feed is
+            // the one that must get the ticks.
+            let feed = cx.update(|cx| resident::resident::<ActivityFeed>(cx));
+            feed.update(cx, |resident, cx| resident.dispatch(Event::FocusTick, cx));
+        }
+    })
+    .detach();
+}
+
+/// Tell the feed what the balance hero is doing about privacy.
+///
+/// The core suppresses the toast while balances are hidden (invariant ④), and
+/// it can only do that if somebody tells it — the flag lives in
+/// `balance_dashboard` and the feed has no way to read another machine. Nobody
+/// told it until this cut, which means the celebration would have printed the
+/// number the hero beside it was masking.
+pub fn privacy_changed(hidden: bool, cx: &mut App) {
+    resident::resident::<ActivityFeed>(cx).update(cx, |resident, cx| {
+        resident.dispatch(Event::PrivacyChanged { hidden }, cx);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +437,24 @@ mod tests {
             let usd = vela_core::app::activity_feed::tx_usd_value(&records[0]);
             assert!((usd - 1.5).abs() < 1e-9, "{usd}");
         });
+    }
+
+    /// A scan that arrives while one is already running answers zero rather
+    /// than joining in.
+    ///
+    /// Both would read the same store, both would find the same receipt
+    /// missing from it, and both would write it back — two rows for one
+    /// payment, and two celebrations. Nothing else in the pipeline would
+    /// notice: the core counts what the shell reports, and the shell would be
+    /// reporting the truth twice.
+    #[test]
+    fn a_second_scan_does_not_run_beside_the_first() {
+        // Standing in for the in-flight one. Never touches the network: the
+        // guard is the first thing `sync_received` does, before the poll.
+        SCANNING.store(true, Ordering::SeqCst);
+        let answered = sync_received("0x88cCA0EeDbF2C4426110bbFc998F048689266894");
+        SCANNING.store(false, Ordering::SeqCst);
+        assert_eq!(answered, 0, "a scan that could not run found nothing");
     }
 
     /// A record another client wrote reads back, camelCase and all.

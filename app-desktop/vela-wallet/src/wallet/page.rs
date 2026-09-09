@@ -9,6 +9,7 @@
 //! the sidebar, third column, Esc handling and gallery chrome already exist,
 //! so contacts is a `Section` switch on the content column (research.md D1).
 
+use gpui::AnimationExt as _;
 use gpui::AppContext as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -233,6 +234,9 @@ impl ShareCardFacts {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GalleryTab {
     D1,
+    /// Spec 032 phase 43 — the money-in celebration, drawn: the toast the core
+    /// arms and the row it is about, glowing under it.
+    D1b,
     D2,
     D3,
     Dc1,
@@ -260,8 +264,9 @@ enum GalleryTab {
 impl GalleryTab {
     /// The chip strip, in order. One array so the bar and the inventory test
     /// can never disagree about which states the gallery exposes.
-    const ALL: [(GalleryTab, &'static str); 22] = [
+    const ALL: [(GalleryTab, &'static str); 23] = [
         (GalleryTab::D1, "D1"),
+        (GalleryTab::D1b, "D1b"),
         (GalleryTab::D2, "D2"),
         (GalleryTab::D3, "D3"),
         (GalleryTab::Dc1, "DC1"),
@@ -300,6 +305,21 @@ impl GalleryTab {
         GalleryTab::ALL
             .into_iter()
             .find_map(|(tab, _)| (tab.settings_state()? == want).then_some(tab))
+    }
+
+    /// The chip `VELA_GALLERY_TAB` names, by its own label.
+    ///
+    /// `VELA_SETTINGS_STATE` opens a settings chip and nothing else, so a state
+    /// outside that section — D1b, which is the whole reason this exists — can
+    /// only be reached by clicking, and a headless screenshot pass cannot
+    /// click. Same env-pin family, same case-insensitive label match
+    /// `FlowPanel::from_env` uses.
+    fn from_gallery_env() -> Option<GalleryTab> {
+        let want = std::env::var("VELA_GALLERY_TAB").ok()?;
+        GalleryTab::ALL
+            .into_iter()
+            .find(|(_, label)| label.eq_ignore_ascii_case(want.trim()))
+            .map(|(tab, _)| tab)
     }
 
     /// The settings state code this chip reproduces, if any (spec 023).
@@ -471,6 +491,18 @@ pub struct WalletPage {
     /// must not be shown "Ethereum". Defaults to Gnosis, the chain this wallet
     /// is cheapest to be paid on.
     receive_chain: u32,
+    /// D1b: the drawn celebration, with no core behind it.
+    ///
+    /// A LIVE celebration comes from `FeedView::toast` and lasts the core's
+    /// 2.8 seconds; this one holds still, because a drawing a reviewer cannot
+    /// look at for longer than three seconds is not a drawing.
+    celebrating: bool,
+    /// What the feed was last told about balance privacy.
+    ///
+    /// The flag itself belongs to `balance_dashboard`; the feed suppresses its
+    /// toast on the core's own invariant ④ and can only do that if it is told.
+    /// `None` = never told, so the first frame tells it.
+    feed_privacy: Option<bool>,
     /// `None` = 全部联系人; `Some(i)` = the group view for `GROUPS[i]` (DC4).
     group: Option<usize>,
     /// Which contact the third column shows (index into the canon roster).
@@ -542,7 +574,11 @@ impl Identity {
 
 impl WalletPage {
     pub fn new(gallery: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::with_section(Section::Wallet, gallery, window, cx)
+        let mut page = Self::with_section(Section::Wallet, gallery, window, cx);
+        if gallery && let Some(tab) = GalleryTab::from_gallery_env() {
+            page.select_tab(tab, window);
+        }
+        page
     }
 
     /// The wallet as a signed-in person sees it.
@@ -566,6 +602,11 @@ impl WalletPage {
         // Money in flight outlives every screen: the tracker runs from the
         // moment somebody is signed in, not from the moment a send opens.
         crate::executor::tracker::start(cx);
+        // And the feed's own 30 s pass, for the same reason in the other
+        // direction: money ARRIVING is noticed by a scan nobody asked for, and
+        // without this tick the machine performs its boot pipeline once and
+        // never celebrates anything, because the first pass never celebrates.
+        crate::executor::activity_feed::start_ticks(cx);
         // `VELA_SETTINGS_STATE` picks WHICH panel, on this path too. Without it
         // `VELA_SECTION=settings` can only ever open 账户, so the live 网络 and
         // 本地化 surfaces would still have no way to be screenshotted.
@@ -665,6 +706,8 @@ impl WalletPage {
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
             receive_chain: 100,
+            celebrating: false,
+            feed_privacy: None,
             tx_detail: None,
             asset_detail: None,
             add_token_focus: cx.focus_handle(),
@@ -1728,12 +1771,23 @@ impl WalletPage {
         } else {
             Vec::new()
         };
+        // The row that just landed, still glowing. `new_item_id` outlives the
+        // toast on purpose — the core clears the toast on its timer and never
+        // the glow — so after the pill has gone there is still something on
+        // screen that says WHICH row was the news.
+        let fresh = self.celebrated_row(&home_tx_ids, cx);
         let mut activity_col = div().flex().flex_col();
         for (i, row) in activity.iter().enumerate() {
             activity_col = activity_col.child(
                 div()
                     .id(ElementId::from(("activity", i)))
                     .cursor_pointer()
+                    .when(fresh == Some(i), |el| {
+                        // A tint behind the row, not a border or a badge:
+                        // nothing moves, so the list does not reflow when the
+                        // glow lands or when it eventually stops mattering.
+                        el.rounded(px(10.)).bg(theme.success_soft)
+                    })
                     .child(activity_row(theme, &mut self.icons, row))
                     .on_click({
                         let id = home_tx_ids.get(i).cloned();
@@ -2099,6 +2153,37 @@ impl WalletPage {
             .hidden;
         let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
         wallet_live::activity_rows(&feed, &self.strings, hidden)
+    }
+
+    /// Tell the feed what the hero is doing about privacy, when it changes.
+    ///
+    /// The core withholds the toast while balances are hidden — but only if it
+    /// knows, and the flag lives in another machine. Called from the one place
+    /// that would leak (the toast overlay), and only on a change, so the tell
+    /// costs a dispatch per toggle rather than one per frame.
+    fn sync_feed_privacy(&mut self, cx: &mut Context<Self>) -> bool {
+        let hidden = resident::resident::<BalanceDashboard>(cx)
+            .read(cx)
+            .view()
+            .hidden;
+        if self.feed_privacy != Some(hidden) {
+            self.feed_privacy = Some(hidden);
+            crate::executor::activity_feed::privacy_changed(hidden, cx);
+        }
+        hidden
+    }
+
+    /// Which home row is the one that just landed, as an index into the drawn
+    /// preview — `None` when nothing is being celebrated.
+    fn celebrated_row(&mut self, home_tx_ids: &[String], cx: &mut Context<Self>) -> Option<usize> {
+        if self.identity.is_none() {
+            return self.celebrating.then_some(fixtures::CELEBRATED_ROW);
+        }
+        let new_item_id = resident::resident::<ActivityFeed>(cx)
+            .read(cx)
+            .view()
+            .new_item_id?;
+        home_tx_ids.iter().position(|id| *id == new_item_id)
     }
 
     /// The home's asset strip: the person's holdings, or the mocks'.
@@ -3950,6 +4035,10 @@ impl WalletPage {
             GalleryTab::Dc2 => PanelId::ContactDetail,
             _ => PanelId::None,
         };
+        // D1b is D1 with the celebration up. Set here rather than read from a
+        // core, because the drawing has none — and cleared by every other chip,
+        // so a toast cannot leak onto the state next door.
+        self.celebrating = tab == GalleryTab::D1b;
         self.contact = 0;
         self.contacts_empty = tab == GalleryTab::Dc3;
         self.group = match tab {
@@ -8131,6 +8220,65 @@ impl WalletPage {
     /// The one flow the third column does not host: a scanner is a viewfinder,
     /// and a 400px column is the wrong shape for one. Same scrim idiom as the
     /// sign-out dialog.
+    /// The money-in celebration, floating over whatever is on screen.
+    ///
+    /// Over the WINDOW rather than over the wallet column, because money
+    /// landing is not news about the screen somebody happens to be on: the
+    /// address book and the settings panel are as good a place to be told as
+    /// the home is. It clears the caption strip where the page draws one, and
+    /// the gallery chip bar where that is up, so it never covers chrome.
+    ///
+    /// The entrance is the phone's, in the phone's numbers: 320 ms, fading up
+    /// through twelve pixels. What follows is the core's — the toast leaves
+    /// when `FeedView::toast` goes, which is 2.8 s later on the machine's own
+    /// timer, and this shell has no opinion about when that is.
+    fn receipt_toast(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let text = if self.identity.is_some() {
+            // Reading privacy here is what ARMS the suppression: the core
+            // withholds the toast while the hero is masked, and it only knows
+            // to because of this call.
+            self.sync_feed_privacy(cx);
+            let feed = resident::resident::<ActivityFeed>(cx).read(cx).view();
+            wallet_live::receipt_toast(&feed, &self.strings)?
+        } else {
+            self.celebrating
+                .then(|| fixtures::receipt_toast(&self.strings))?
+        };
+
+        let top = theme::WALLET_TOAST_TOP
+            + if self.gallery {
+                GALLERY_BAR_H + gallery_bar_caption_pad(owns_titlebar(window))
+            } else if owns_titlebar(window) {
+                CAPTION_H
+            } else {
+                0.
+            };
+        let pill = crate::wallet::components::receipt_toast(theme, &mut self.icons, text);
+        Some(
+            div()
+                .absolute()
+                .top(px(top))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    pill.with_animation(
+                        "receipt-toast",
+                        gpui::Animation::new(std::time::Duration::from_millis(320))
+                            .with_easing(gpui::ease_out_quint()),
+                        |pill, delta| pill.opacity(delta).top(px((delta - 1.) * 12.)),
+                    ),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn scan_overlay(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.flows.last() != Some(&FlowPanel::Ds1) {
             return None;
@@ -8743,6 +8891,7 @@ impl Render for WalletPage {
         };
 
         let scan = self.scan_overlay(&theme, cx);
+        let toast = self.receipt_toast(&theme, window, cx);
         let send_prompt = self.send_prompts(&theme, window, cx);
         let menu = self.menu_overlay(&theme, cx);
         let sign_out = self.sign_out_dialog(&theme, cx);
@@ -8759,6 +8908,11 @@ impl Render for WalletPage {
             .child(body);
         if let Some(scan) = scan {
             root = root.child(scan);
+        }
+        // Above the columns and below every dialog: a celebration must not
+        // land on top of a question somebody is being asked.
+        if let Some(toast) = toast {
+            root = root.child(toast);
         }
         // The cable's dialogs and the core's alert, over the send flow.
         if let Some(prompt) = send_prompt {
@@ -8903,6 +9057,7 @@ mod tests {
             labels,
             [
                 "D1",
+                "D1b",
                 "D2",
                 "D3",
                 "DC1",

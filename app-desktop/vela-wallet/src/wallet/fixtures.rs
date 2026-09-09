@@ -168,6 +168,26 @@ pub fn balance_variants(s: &WalletStrings) -> Vec<BalanceModel> {
     ]
 }
 
+/// Which D1 row the celebration is about: the `+120 USDT` receipt at index 1.
+///
+/// The drawn state and the live one must be about the same thing — a glow on a
+/// row the toast is not about would teach the drawing's reader the wrong rule
+/// — so the index and the sentence below are two halves of one fixture.
+pub const CELEBRATED_ROW: usize = 1;
+
+/// D1b's celebration, in the words the corpus uses for the live one.
+///
+/// `+120 USDT` is what the row at [`CELEBRATED_ROW`] says, so the pill and the
+/// row underneath it agree; formatted here rather than parsed back out of that
+/// row's amount string, which is the reverse-parse the core removed.
+pub fn receipt_toast(s: &WalletStrings) -> SharedString {
+    SharedString::from(fill(
+        &fill(&s.toast_received, "amount", "120"),
+        "token",
+        "USDT",
+    ))
+}
+
 fn row(
     s: &WalletStrings,
     kind: ActivityKind,
