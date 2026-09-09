@@ -2484,11 +2484,62 @@ desktop **339 / 335**(+1 测试),fmt clean。
 
 desktop **340 / 336**(+1 测试),fmt clean,画廊全渲染,Windows 通过。
 
+## Phase 47 — 先复核清单,再动手:三个"删除"里只有一个是真欠账
+
+本来要做"删除三处:历史行 / 自定义代币 / 自定义网络"。动手前按方法回查了一遍
+**web 那边够不够得着**,结果两条不成立:
+
+- **删除历史行**:`TxDetailModel.deleteLabel` 在 web 里**没有任何地方赋值**,
+  而按钮是 `{#if model.deleteLabel !== undefined}` 才画 —— 所以 web 自己也点不到。
+- **删除自定义代币**:web 只 dispatch 过 `address_input` / `save_requested` /
+  `detect_requested`,`delete_requested` 一次也没发过。
+
+**方法要补一句**:差集里的每一条,还要看 web 那边**是不是真能点到** ——
+一个没人调用的函数里 dispatch 的事件,不是能力。顺带 `payment_request::AmountChanged`
+同样不成立(`/request` 那条路由是扩展的 dApp 请求页,不是"收款要个金额"),
+所以"收款指定金额"从清单里撤下:**两端都没有**,要做就是新功能,不是对齐。
+
+于是这一刀改做**网络设置这一簇**,五件都验过 web 真能点到:
+
+### 删除自定义网络
+
+垃圾桶图标从 spec 023 起就画在自定义网络行上 —— 而它在**行自己的点击区里面**,
+所以按下去干的是行的事:展开卡片。**这屏上唯一画成"销毁"的控件,干的是另一件事。**
+现在它是自己的目标(`stop_propagation`)、是红的,并且**先问一句**。
+
+web 是从垃圾桶直接 dispatch 的,不问。这里问,理由和这只壳里其他destructive 一样:
+那一行背后是某人手填过端点的一条链,而它离"展开"只有一个像素。
+话是语料里现成的(`settingsModals.network.remove*`,手机早画过这个对话框,十五种语言齐全),
+**零新键**;后面补一句网络名,因为对话框盖住了它说的那一行。删完强制读一次余额 ——
+刚才还在数那条链。
+
+### 另外四件
+
+- **供应商"测试"按钮**(`ProviderTestRequested`):键 blur 本来就会测,这个是给
+  "我什么都没改,就想知道现在还行不行"的人 —— 而这是这一页唯一会被打开来问的问题。
+  放在标题行上,挨着它要改写的那句结论。
+- **"恢复默认"**(`ResetEndpointsToDefaults`):原来是一个刷新图标 + 一行灰字,没有监听器。
+  **这是最坏的一种可供性**:一个把端点填坏了的人,读到的是一条不存在的出路。
+- **打开面板即探测**(`EndpointsOpened` / `ProvidersOpened`):web 在同一个手势上发这两个事件,
+  桌面一次也没发过。一次访问只发一次(面板每帧都画,探测不能每帧都跑),
+  离开面板清标记,回来重测 —— 实机截图里四个端点各有各的真延迟(546ms / 1.1s / 1.3s / 1.8s)。
+- **关掉添加网络对话框时 `WizardReset`**:核心会一直留着搜索词、选中的链和检查结果,
+  所以再打开是别人没做完的一半。这个事件还会把在飞的探测作废,所以它是核心的事件,
+  不是这里清个字段。
+
+### 实机
+
+parallel space 里手写一条自定义网络进 state,重开:X Layer 行带 `Custom` 标签和红垃圾桶;
+点它 —— **行没有展开**,弹出 `Remove Network / Remove this custom network? · X Layer`;
+按 Remove,行没了,`wallet.json` 里 `vela.customNetworks` 变成 `[]`。
+
+desktop **341 / 337**(+1 测试),fmt clean,画廊全渲染,Windows 通过。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop**(安卓/iOS/web 是别人的)。分支 `032-desktop-money-wiring`
 (叠在 031 → 030 → 029 上,均未合并;028 已并进来)。工作区
-`/Volumes/data/production/vela-wallet-native`,**46 个 phase,103 个提交**(`049617f5..`)。
+`/Volumes/data/production/vela-wallet-native`,**47 个 phase,104 个提交**(`049617f5..`)。
 
 ## 一句话状态
 
@@ -2512,7 +2563,7 @@ cd ../../rust && cargo fmt --all --check \
 cd ../app-web/vela-wallet && pnpm check && pnpm lint && pnpm build
 ```
 
-**当前基线**:desktop **340 passed(feature on)/ 336(off)· 36 ignored**;
+**当前基线**:desktop **341 passed(feature on)/ 337(off)· 36 ignored**;
 vela-core **1,304**;web `pnpm check` 0 errors、lint 干净、build 成功。
 **web 的 `pnpm test:unit` 在这棵树里起不来**(vitest 项目初始化阶段
 `Could not resolve 'node:module' in rolldown/runtime.js`,任何测试文件加载之前就失败)
@@ -2531,11 +2582,11 @@ vela-core **1,304**;web `pnpm check` 0 errors、lint 干净、build 成功。
 
 | # | 事 | 卡在 |
 |---|---|---|
-| 1 | **删除三处**:历史行 / 自定义代币 / 自定义网络 | 纯接线(web 都有) |
-| 2 | **设置**:供应商测试、恢复默认端点、向导重置 | 纯接线(web 都有) |
-| 3 | **发送**:多币归集 sweep(五个事件)、报价过期 `Requote`、中继金库空的那张单 | 接线 + 一张图 |
-| 4 | **收款指定金额**(`payment_request::AmountChanged` + EIP-681) | 接线 + 一张图 |
-| 5 | **签名**:交易模拟余额变化(桌面连 `sim/` 模块都没有)、收款人风险 `InspectRecipient` | 中等新功能 |
+| 1 | **发送**:多币归集 sweep(五个事件)、报价过期 `Requote`、中继金库空的那张单 | 接线 + 一张图 |
+| 2 | **签名**:交易模拟余额变化(桌面连 `sim/` 模块都没有)、收款人风险 `InspectRecipient` | 中等新功能 |
+| 3 | **账户切换器里各账户的总额**(`SwitcherOpened/Closed`) | 纯接线(web 有) |
+| 4 | 联系人 `SetGroupMembers` / `SetContactGroups`(批量设置分组) | 纯接线(web 有) |
+| 5 | **删除历史行 / 删除自定义代币 / 收款指定金额** | ⚠️ **两端都没有**,做就是新功能不是对齐(phase 47 复核) |
 | 6 | 批量授权的**逐腿编辑器**(`GuardView.batch`) | 缺图(两端都没有) |
 | 7 | 设置里**新建/登录另一个账户** | 要导航决策(产品) |
 | 8 | **扫码 DS1** | 桌面没有相机管线(新功能,不是接线) |

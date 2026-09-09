@@ -157,6 +157,13 @@ pub enum Section {
 /// The desktop SPEC's rule is that every phone 弹框 becomes either a section of
 /// the panel it belongs to or a centred dialog. The account switcher took the
 /// first road — it IS the 账户 panel — and these two took the second.
+/// Which service panel has announced itself to the core this visit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SettingsProbe {
+    Endpoints,
+    Providers,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SettingsDialog {
     /// DST4b — search a chain, check it, add it.
@@ -453,8 +460,14 @@ pub struct WalletPage {
     /// Which network card's probes have been asked for, so opening one asks
     /// once rather than on every frame.
     settings_probed_network: Option<u32>,
+    /// Which of the two service panels has already announced itself this
+    /// visit. A panel is drawn every frame; its probes must run once.
+    settings_probed_panel: Option<SettingsProbe>,
     /// DSR1, live: WHICH unreachable chain the rescue dialog is about.
     settings_fix_chain: Option<u32>,
+    /// The custom network the remove confirmation is about: its id and the
+    /// name to say back to the person.
+    network_remove: Option<(String, SharedString)>,
     /// What the last address-book import did, as a title and a line. Cleared
     /// by acknowledging it.
     import_result: Option<(SharedString, SharedString)>,
@@ -771,7 +784,9 @@ impl WalletPage {
             window_handle: crate::onboarding::native_window_handle(window),
             endpoint_focuses: Vec::new(),
             settings_probed_network: None,
+            settings_probed_panel: None,
             settings_fix_chain: None,
+            network_remove: None,
             import_result: None,
             contact_form: None,
             group_form: None,
@@ -1641,6 +1656,144 @@ impl WalletPage {
         )
     }
 
+    /// "Remove this custom network?" — the confirmation the core hands to the
+    /// shell in so many words.
+    ///
+    /// The web dispatches the delete straight off the trash icon. This asks
+    /// first, for the reason every other destructive action in this shell asks:
+    /// the row carries a chain someone typed an endpoint for, one press away
+    /// from a glyph they may have meant to open the card with. The words are
+    /// the corpus's own (`settingsModals.network.remove*`), translated in every
+    /// locale since the phone drew this dialog.
+    fn network_remove_dialog(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let (id, name) = self.network_remove.clone()?;
+        let s = &self.settings;
+        let hover_confirm = theme.error_base;
+        let hover_cancel = theme.bg_sunken;
+        let card = div()
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(28.))
+            .rounded(px(20.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border_card)
+            .child(
+                div()
+                    .text_size(theme::text_panel_title())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_base)
+                    .child(s.network_remove_title.clone()),
+            )
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .line_height(px(20.))
+                    .text_color(theme.fg_muted)
+                    // The corpus asks "Remove this custom network?"; the name
+                    // says WHICH, because the dialog covers the row it is about.
+                    .child(SharedString::from(format!(
+                        "{} · {name}",
+                        s.network_remove_body
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .id("network-remove-confirm")
+                            .h(px(44.))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(theme.error_soft)
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.error_base)
+                            .hover(move |style| {
+                                style.bg(hover_confirm).text_color(theme.fg_inverse)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                resident::resident::<NetworkAdmin>(cx).update(
+                                    cx,
+                                    |resident, cx| {
+                                        resident.dispatch(
+                                            NetEvent::DeleteConfirmed { id: id.clone() },
+                                            cx,
+                                        );
+                                    },
+                                );
+                                // The hero was counting that chain a moment ago.
+                                crate::executor::balance_dashboard::refresh(cx);
+                                this.network_remove = None;
+                                this.settings_expanded_network = None;
+                                cx.notify();
+                            }))
+                            .child(s.network_remove_confirm.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("network-remove-cancel")
+                            .h(px(44.))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .hover(move |style| style.bg(hover_cancel))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.network_remove = None;
+                                cx.notify();
+                            }))
+                            .child(s.network_remove_cancel.clone()),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("network-remove-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.backdrop)
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// Close the settings dialog, and forget what the add-network wizard was
+    /// doing.
+    ///
+    /// The core keeps the search text, the chosen chain and its check results
+    /// until told otherwise — so reopening 添加网络 came back to somebody else's
+    /// half-finished search. The web resets on the same gesture; the reset also
+    /// orphans any probe still in flight, which is why it is the core's event
+    /// and not a field cleared here.
+    fn close_settings_dialog(&mut self, cx: &mut Context<Self>) {
+        let was_add = self.settings_dialog == Some(SettingsDialog::AddNetwork);
+        self.settings_dialog = None;
+        if was_add && self.identity.is_some() {
+            resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                resident.dispatch(NetEvent::WizardReset, cx);
+            });
+        }
+    }
+
     fn theme_mode(&self) -> ThemeMode {
         self.override_mode.unwrap_or(self.mode)
     }
@@ -2319,6 +2472,27 @@ impl WalletPage {
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
         wallet_live::chain_rows(&view, &self.strings, self.chain_filter)
+    }
+
+    /// Tell the core a service panel is on screen — once per visit.
+    ///
+    /// Both events start probes, and a probe per frame would be a network
+    /// request per frame. Cleared when the section changes, so coming back
+    /// re-checks rather than showing whatever the last visit measured.
+    fn settings_opened(&mut self, panel: SettingsProbe, cx: &mut Context<Self>) {
+        if self.settings_probed_panel == Some(panel) {
+            return;
+        }
+        self.settings_probed_panel = Some(panel);
+        resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+            resident.dispatch(
+                match panel {
+                    SettingsProbe::Endpoints => NetEvent::EndpointsOpened,
+                    SettingsProbe::Providers => NetEvent::ProvidersOpened,
+                },
+                cx,
+            );
+        });
     }
 
     /// The focus handle for one editable settings field, made on first use.
@@ -4668,6 +4842,10 @@ impl WalletPage {
             col = col.child(row.on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_page = page;
                 this.settings_dialog = None;
+                // Leaving a service panel forgets that it announced itself, so
+                // coming back re-probes rather than showing what the last visit
+                // measured.
+                this.settings_probed_panel = None;
                 cx.notify();
             })));
         }
@@ -5368,6 +5546,7 @@ impl WalletPage {
     }
 
     fn settings_networks(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
+        let page = cx.entity();
         let expanded = self.settings_expanded_network.clone();
         let rows = self.network_rows(cx);
         let mut col = div().flex().flex_col();
@@ -5388,6 +5567,23 @@ impl WalletPage {
                 tag,
                 n.custom,
                 is_expanded,
+                // A custom network can be removed; a built-in one has no trash
+                // to press. The page asks before it happens — the core's own
+                // note says the confirm dialog is the shell's, and this shell
+                // already has that dialog four times over.
+                (n.custom && self.identity.is_some()).then(|| {
+                    let page = page.clone();
+                    let id = n.id.clone();
+                    let name = n.name.clone();
+                    Box::new(
+                        move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                            page.update(cx, |this, cx| {
+                                this.network_remove = Some((id.to_string(), name.clone()));
+                                cx.notify();
+                            });
+                        },
+                    ) as crate::contacts::components::MenuAction
+                }),
             );
             let id = n.id.clone();
             col = col
@@ -5598,6 +5794,10 @@ impl WalletPage {
         // was read-only until now — so a person with a paid Alchemy plan had no
         // way to use it.
         if self.identity.is_some() {
+            // Same gesture, same event: opening the panel tests the keys the
+            // person already has, so the pills are about now and not about the
+            // last time somebody typed.
+            self.settings_opened(SettingsProbe::Providers, cx);
             let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
             for (i, provider) in view.providers.iter().enumerate() {
                 let badge = if provider.has_key {
@@ -5618,16 +5818,51 @@ impl WalletPage {
                             div()
                                 .flex()
                                 .items_center()
-                                .justify_between()
                                 .gap(px(8.))
                                 .child(
                                     div()
+                                        .flex_1()
+                                        .min_w(px(0.))
                                         .text_size(theme::text_panel_title())
                                         .font_weight(gpui::FontWeight::BOLD)
                                         .text_color(theme.fg_base)
                                         .child(settings_live::provider_name(id)),
                                 )
-                                .child(status_pill(theme, &badge)),
+                                .child(status_pill(theme, &badge))
+                                // The explicit re-run, on the row that carries
+                                // the verdict it rewrites. A key blur already
+                                // tests; this is for the person who changed
+                                // nothing and wants to know whether it works
+                                // NOW — the only question this page is ever
+                                // opened to answer.
+                                .child(
+                                    div()
+                                        .id(ElementId::from(("provider-test", i)))
+                                        .px(px(12.))
+                                        .py(px(6.))
+                                        .rounded(px(8.))
+                                        .cursor_pointer()
+                                        .border_1()
+                                        .border_color(theme.divider)
+                                        .hover(|el| el.border_color(theme.outline_strong))
+                                        .text_size(theme::text_row_sub())
+                                        .text_color(theme.fg_base)
+                                        .child(self.settings.provider_test.clone())
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            resident::resident::<NetworkAdmin>(cx).update(
+                                                cx,
+                                                |resident, cx| {
+                                                    resident.dispatch(
+                                                        NetEvent::ProviderTestRequested {
+                                                            provider: id,
+                                                        },
+                                                        cx,
+                                                    );
+                                                },
+                                            );
+                                            cx.notify();
+                                        })),
+                                ),
                         )
                         .child(editable_url_field(
                             ElementId::from(("provider", i)),
@@ -5744,6 +5979,11 @@ impl WalletPage {
         // holds the drafts and persists them on blur behind its own gate. What
         // was missing was a field somebody could type in.
         if self.identity.is_some() {
+            // Opening the panel is what starts the four probes — the web
+            // dispatches the same event on the same gesture. Nobody ever sent
+            // it here, so every endpoint badge said "checking" until a
+            // keystroke re-probed it.
+            self.settings_opened(SettingsProbe::Endpoints, cx);
             let view = resident::resident::<NetworkAdmin>(cx).read(cx).view();
             for (i, endpoint) in view.endpoints.iter().enumerate() {
                 let (label, hint) = copy.get(i).cloned().unwrap_or_default();
@@ -5785,7 +6025,7 @@ impl WalletPage {
                     },
                 ));
             }
-            return self.endpoints_footer(col, theme);
+            return self.endpoints_footer(col, theme, cx);
         }
 
         for (i, endpoint) in settings_fixtures::ENDPOINTS.iter().enumerate() {
@@ -5808,36 +6048,55 @@ impl WalletPage {
                 None,
             ));
         }
-        self.endpoints_footer(col, theme)
+        self.endpoints_footer(col, theme, cx)
     }
 
     /// The reset / self-host row under the endpoint fields.
-    fn endpoints_footer(&mut self, col: Div, theme: &Theme) -> Div {
+    ///
+    /// "恢复默认" was drawn as a label with a refresh glyph beside it and no
+    /// listener — which is the worst version of an affordance: a person who has
+    /// typed a bad endpoint reads a way out that does nothing. Live now, and
+    /// only where there is a core to reset (the mock has no endpoints to
+    /// restore).
+    fn endpoints_footer(&mut self, col: Div, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        let live = self.identity.is_some();
+        let reset = div()
+            .id("settings-endpoints-reset")
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .when(live, |el| el.cursor_pointer())
+            .child(icon_img(
+                &mut self.icons,
+                Icon::RefreshCw,
+                false,
+                if live { theme.accent } else { theme.fg_muted },
+                14.,
+            ))
+            .child(
+                div()
+                    .text_size(theme::text_row_sub())
+                    .text_color(if live { theme.accent } else { theme.fg_muted })
+                    .child(self.settings.endpoints_reset.clone()),
+            );
         col.child(
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .pt(px(16.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(icon_img(
-                            &mut self.icons,
-                            Icon::RefreshCw,
-                            false,
-                            theme.fg_muted,
-                            14.,
-                        ))
-                        .child(
-                            div()
-                                .text_size(theme::text_row_sub())
-                                .text_color(theme.fg_muted)
-                                .child(self.settings.endpoints_reset.clone()),
-                        ),
-                )
+                .child(if live {
+                    reset
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                                resident.dispatch(NetEvent::ResetEndpointsToDefaults, cx);
+                            });
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                } else {
+                    reset.into_any_element()
+                })
                 .child(
                     div()
                         .text_size(theme::text_row_sub())
@@ -6085,7 +6344,7 @@ impl WalletPage {
                 .justify_center()
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.settings_dialog = None;
+                    this.close_settings_dialog(cx);
                     cx.notify();
                 }))
                 .child(icon_img(
@@ -6370,7 +6629,7 @@ impl WalletPage {
                                 resident.view().last_added_chain_id != before
                             });
                         if added {
-                            this.settings_dialog = None;
+                            this.close_settings_dialog(cx);
                             // A chain the person just added is a chain nobody
                             // has counted yet. The web forces the same read at
                             // the same moment; without it the new network sits
@@ -9049,6 +9308,7 @@ impl Render for WalletPage {
         let send_prompt = self.send_prompts(&theme, window, cx);
         let menu = self.menu_overlay(&theme, cx);
         let sign_out = self.sign_out_dialog(&theme, cx);
+        let network_remove = self.network_remove_dialog(&theme, cx);
         let settings_dialog = self.settings_dialog_overlay(&theme, window, cx);
         let import_result = self.import_result_dialog(&theme, cx);
         let contact_form = self.contact_form_dialog(&theme, window, cx);
@@ -9096,6 +9356,9 @@ impl Render for WalletPage {
         if let Some(sign_out) = sign_out {
             root = root.child(sign_out);
         }
+        if let Some(network_remove) = network_remove {
+            root = root.child(network_remove);
+        }
         let root = root
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -9108,8 +9371,13 @@ impl Render for WalletPage {
                     cx.notify();
                     return;
                 }
+                if ks.key == "escape" && this.network_remove.is_some() {
+                    this.network_remove = None;
+                    cx.notify();
+                    return;
+                }
                 if ks.key == "escape" && this.settings_dialog.is_some() {
-                    this.settings_dialog = None;
+                    this.close_settings_dialog(cx);
                     cx.notify();
                     return;
                 }

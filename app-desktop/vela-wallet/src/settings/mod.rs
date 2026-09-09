@@ -73,6 +73,12 @@ pub struct SettingsStrings {
     pub rpc_url: SharedString,
     pub explorer: SharedString,
     pub network_custom: SharedString,
+    /// The custom-network delete, and the confirmation the core leaves to the
+    /// shell in so many words.
+    pub network_remove_title: SharedString,
+    pub network_remove_body: SharedString,
+    pub network_remove_cancel: SharedString,
+    pub network_remove_confirm: SharedString,
     /// The prefix a slow endpoint's pill wears: "Slower · 1.2s".
     pub network_slow: SharedString,
     pub network_save_hint: SharedString,
@@ -94,6 +100,9 @@ pub struct SettingsStrings {
     pub provider_connected: SharedString,
     pub provider_not_set: SharedString,
     pub provider_check_key: SharedString,
+    /// The explicit re-run. A key blur already tests, so this is for the
+    /// person who changed nothing and wants to know whether it works NOW.
+    pub provider_test: SharedString,
     pub provider_get_key: SharedString,
     pub provider_supports: String,
     pub provider_avg_latency: String,
@@ -237,6 +246,10 @@ impl SettingsStrings {
             rpc_url: s("settingsModals.network.fieldRpcUrl"),
             explorer: s("settingsModals.network.fieldExplorer"),
             network_custom: s("settings.networks.custom"),
+            network_remove_title: s("settingsModals.network.removeTitle"),
+            network_remove_body: s("settingsModals.network.removeBody"),
+            network_remove_cancel: s("settingsModals.network.removeCancel"),
+            network_remove_confirm: s("settingsModals.network.removeConfirm"),
             network_slow: s("settings.networks.slow"),
             network_save_hint: s("settings.networks.saveHint"),
             network_save_checking: s("componentsUi.funding.checking"),
@@ -251,6 +264,7 @@ impl SettingsStrings {
             providers_desc: s("settingsModals.rpcProviders.description"),
             provider_connected: s("activity.connected"),
             provider_not_set: s("settingsModals.rpcProviders.notSet"),
+            provider_test: s("settingsModals.rpcProviders.test"),
             provider_check_key: s("settingsModals.rpcProviders.checkKey"),
             provider_get_key: s("settingsModals.rpcProviders.getKey"),
             provider_supports: raw("settingsModals.rpcProviders.supportsCount"),
@@ -324,6 +338,47 @@ impl SettingsStrings {
             rpc_fix_action: s("assets.rpcFix"),
             rpc_wrong_chain: raw("assets.rpcFixWrongChain"),
             offline: s("settingsModals.health.offline"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The words this cut newly reads.
+    ///
+    /// All five already existed — the phone drew this dialog and this button
+    /// years ago, so the corpus carries them in fifteen languages and the
+    /// desktop's half of the feature costs zero new keys. What a test can still
+    /// catch is a key that does not resolve, which is how a confirm dialog ends
+    /// up with `settingsModals.network.removeTitle` as its title.
+    #[test]
+    fn the_remove_and_test_words_resolve() {
+        {
+            // `Loc::from_env` honours VELA_LANG; the env-independent check is
+            // that the resolved strings differ from their keys, which is the
+            // same shape `wallet_strings_resolve_without_echo` uses.
+            let s = SettingsStrings::resolve(&crate::loc::Loc::from_env());
+            for (value, key) in [
+                (
+                    &s.network_remove_title,
+                    "settingsModals.network.removeTitle",
+                ),
+                (&s.network_remove_body, "settingsModals.network.removeBody"),
+                (
+                    &s.network_remove_cancel,
+                    "settingsModals.network.removeCancel",
+                ),
+                (
+                    &s.network_remove_confirm,
+                    "settingsModals.network.removeConfirm",
+                ),
+                (&s.provider_test, "settingsModals.rpcProviders.test"),
+            ] {
+                assert_ne!(value.as_ref(), key, "`{key}` echoed the key");
+                assert!(!value.is_empty(), "`{key}` resolved empty");
+            }
         }
     }
 }

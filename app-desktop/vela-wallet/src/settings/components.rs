@@ -417,6 +417,7 @@ pub fn network_row(
     tag: Option<gpui::SharedString>,
     removable: bool,
     expanded: bool,
+    on_remove: Option<crate::contacts::components::MenuAction>,
 ) -> Stateful<Div> {
     let mut name_row = div().flex().items_center().gap(px(8.)).child(
         div()
@@ -466,13 +467,29 @@ pub fn network_row(
         row = row.child(status_pill(theme, badge));
     }
     if removable {
-        row = row.child(icon_img(
-            icons,
-            Icon::Trash2,
-            false,
-            theme.fg_subtle,
-            GLYPH_SM,
-        ));
+        // Its OWN target, and it stops there. Inside the row's own click this
+        // glyph did what the row does — expand the card — so the one control
+        // on this screen drawn as a destruction was the one control that did
+        // something else entirely.
+        row = row.child(
+            div()
+                .id("network-remove")
+                .p(px(4.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|el| el.bg(theme.error_soft))
+                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(icon_img(
+                    icons,
+                    Icon::Trash2,
+                    false,
+                    theme.error_base,
+                    GLYPH_SM,
+                ))
+                .when_some(on_remove, |el, action| {
+                    el.on_click(move |event, window, cx| action(event, window, cx))
+                }),
+        );
     }
     // The caret says what the tap DOES, which is why it flips rather than
     // pointing at the row: down opens this network's editor, up closes it. A
