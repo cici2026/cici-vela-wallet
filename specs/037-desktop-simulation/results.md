@@ -45,3 +45,40 @@ deltas: [TrustAssetDelta { kind: Native, token: None, delta: "-1000000000000000"
 
 desktop **366 / 362**(+9 测试,外加一条 `#[ignore]` 的真网),
 fmt clean,画廊全渲染,Windows 通过。
+
+---
+
+## Phase 2 — 创始人问"首屏转账都正常吗",于是查出一个真缺陷
+
+先答验的那部分:**发送这条路是健康的**。用扫码把一张
+`ethereum:0x88cCA0…6894@100?value=0.01 xDAI` 的图喂进去,一路到确认页:
+金额 `0.01 xDAI ≈ $0.01`、From/To、Chain Gnosis、**真报价 Est. Fee 0.01 xDAI**、
+`Confirm & Send` 亮着(核心的 `can_confirm` 开了,意味着费用已结算、无同资产冲突、空闲)。
+**没有按下去** —— 那要花真钱,等你点头。
+
+### 一个字段,两个互不相干的意思
+
+顺着"dApp 是不是走内置浏览器注入"去核对接线,发现 `receive_chain` 同时是:
+
+- **收款屏的链**(收款网络行、收款二维码、侧栏筛选带进来的那条);
+- **浏览器会话的链**(`eth_chainId` 告诉站点的那条、`wallet_switchEthereumChain` 改的那条、
+  **以及这个站点要签名时,报价/路由/提交所用的那条**)。
+
+也就是说:**打开收款、点一下"Ethereum",一个已连接 dApp 的下一次签名就被悄悄改到以太坊上**
+—— 报价、RPC、提交全都跟着走。反过来,站点自己切链会悄悄改掉你收款二维码是哪条链的。
+
+最能说明问题的是 8649 行自己的注释:"**这个浏览器实际所在的链** —— `wallet_switchEthereumChain`
+把它移到的那条,也是这个站点的签名会被问的那条" —— 意图写的是浏览器的链,读的却是收款的那个字段。
+
+拆成两个字段(`browser_chain`,同样默认 Gnosis),并且钉一条测试:
+**切链只动浏览器那个,收款行只动收款那个**。
+
+### 顺手清掉一个过期的 allow
+
+`pub mod signing_host` 上的 `#[allow(dead_code, reason = "opened by the browser's request
+hop, spec 032 phase 19")]` —— 那一跳**已经落地了**(wry 的 ipc → `browser_request` →
+`SigningHost::open` → 签名列)。模块自己的注释写着"**那一跳落地时就把它摘掉**:
+一个 allow 会把被调用者也标成活的"。摘掉之后没有暴露出任何死代码,
+只暴露了我自己 033 留下的一个没人调用的包装函数(一并删掉)。
+
+desktop **366 / 362**,fmt clean,画廊全渲染。

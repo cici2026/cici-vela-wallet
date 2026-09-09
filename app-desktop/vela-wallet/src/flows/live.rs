@@ -826,10 +826,6 @@ fn send_token_row(
 
 /// DSD1L — which token to send. The rows are the core's holdings.
 #[must_use]
-pub fn send_pick(i: &SendInputs<'_>) -> SendPick {
-    send_pick_with(i, false)
-}
-
 /// The picker, in one of its two modes.
 ///
 /// `sweeping` is the SHELL's flag, and deliberately: the core's

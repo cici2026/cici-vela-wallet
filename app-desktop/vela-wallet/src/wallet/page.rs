@@ -553,6 +553,17 @@ pub struct WalletPage {
     /// must not be shown "Ethereum". Defaults to Gnosis, the chain this wallet
     /// is cheapest to be paid on.
     receive_chain: u32,
+    /// The chain the in-app BROWSER is on: what a connected site was told by
+    /// `eth_chainId`, what `wallet_switchEthereumChain` moves, and the chain a
+    /// signature from that site is quoted, routed and submitted on.
+    ///
+    /// Its own field since spec 037. It used to BE `receive_chain`, and the
+    /// two meanings had nothing to do with each other: tapping "Ethereum" on
+    /// the receive screen silently retargeted a connected dApp's next
+    /// signature to Ethereum, and a site's chain switch silently changed which
+    /// chain your receive QR was for. Same default — Gnosis, the chain this
+    /// wallet is cheapest on — and nothing else shared.
+    browser_chain: u32,
     /// The sidebar's network filter: one chain, or `None` for every network.
     ///
     /// Render state, not a preference — the phone keeps it in component state
@@ -826,6 +837,7 @@ impl WalletPage {
                 .unwrap_or_default(),
             flow_strings: FlowStrings::resolve(&loc),
             receive_chain: 100,
+            browser_chain: 100,
             celebrating: false,
             chain_filter: None,
             feed_privacy: None,
@@ -7916,7 +7928,7 @@ impl WalletPage {
         // the machine judges against every address this wallet has, not the
         // one that happens to be active.
         let addresses = money::account_addresses();
-        let chain_id = self.receive_chain;
+        let chain_id = self.browser_chain;
         let host = cx.new(|cx| {
             crate::wallet::browser_host::BrowserHost::new(
                 addresses,
@@ -7991,7 +8003,7 @@ impl WalletPage {
     ) {
         use crate::executor::dapp_rpc::{self, Route};
 
-        let chain_id = self.receive_chain;
+        let chain_id = self.browser_chain;
         match dapp_rpc::classify(&request.method) {
             Route::Sign => self.open_signing(request, cx),
             Route::State => {
@@ -8043,7 +8055,7 @@ impl WalletPage {
             self.answered(&request.id, cx);
             return;
         }
-        self.receive_chain = chain_id;
+        self.browser_chain = chain_id;
         // `null` is the success answer EIP-3326 specifies, and the
         // `chainChanged` event is the CORE's to emit — it owns what a
         // connected page is told, and a shell that emitted its own could
@@ -8158,7 +8170,7 @@ impl WalletPage {
             // transports when there is more than one, and it must be stable
             // for the life of this one.
             transport_id: "browser".to_owned(),
-            chain_id: self.receive_chain,
+            chain_id: self.browser_chain,
         };
         let window_handle = self.window_handle;
         let host = cx.new(|cx| {
@@ -8646,7 +8658,7 @@ impl WalletPage {
                                     // the contradiction phase 22 found on the
                                     // signing sheet.
                                     .child(SharedString::from(crate::flows::live::chain_name(
-                                        self.receive_chain,
+                                        self.browser_chain,
                                     ))),
                             ),
                     ),
@@ -10348,6 +10360,45 @@ mod tests {
         // "0.5 KB" of 512 is noise where "512 B" is exact.
         let (amount, unit) = super::human_bytes(0);
         assert_eq!((amount.as_ref(), unit.as_ref()), ("0", "B"));
+    }
+
+    /// The receive screen's chain and the browser's chain are not the same
+    /// thing, and for one commit they were one field.
+    ///
+    /// This is a defence against the shape of that bug rather than a test of a
+    /// function: a page holding both defaults to Gnosis for each, and moving
+    /// one must not move the other. Tapping "Ethereum" on the receive screen
+    /// used to retarget a connected dApp's next signature — its quote, its
+    /// RPC, its submit — to Ethereum, and a site's own `wallet_switchEthereumChain`
+    /// used to change which chain your receive QR was for.
+    #[test]
+    fn the_receive_chain_and_the_browser_chain_are_two_fields() {
+        let source = include_str!("page.rs");
+        // The browser's chain is what a signing request is opened on.
+        assert!(
+            source.contains("chain_id: self.browser_chain,"),
+            "a dApp request must be raised on the chain the BROWSER is on"
+        );
+        // And the receive screen's rows still write their own.
+        assert!(
+            source.contains("this.receive_chain = chain_id;"),
+            "the receive rows still choose the receive chain"
+        );
+        // Neither name may appear in the other's job. `switch_browser_chain`
+        // is the one place a site can move a chain, and it moves the browser's.
+        let switch = source
+            .split("fn switch_browser_chain")
+            .nth(1)
+            .unwrap_or_default();
+        let body = switch.split("\n    fn ").next().unwrap_or_default();
+        assert!(
+            body.contains("self.browser_chain = chain_id;"),
+            "a chain switch moves the browser"
+        );
+        assert!(
+            !body.contains("self.receive_chain"),
+            "a chain switch must not touch the receive screen"
+        );
     }
 
     /// FR-004 / data-model.md §Screen states: the gallery chip strip exposes
