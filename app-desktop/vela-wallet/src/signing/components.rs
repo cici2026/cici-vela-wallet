@@ -105,12 +105,14 @@ pub fn block_with_actions(
     icons: &mut IconCache,
     item: &Block,
     actions: Vec<Option<crate::flows::panels::Click>>,
+    field: Option<crate::flows::panels::AddressField>,
+    window: &gpui::Window,
 ) -> Div {
-    block_inner(theme, icons, item, actions)
+    block_inner(theme, icons, item, actions, field, Some(window))
 }
 
 pub fn block(theme: &Theme, icons: &mut IconCache, item: &Block) -> Div {
-    block_inner(theme, icons, item, Vec::new())
+    block_inner(theme, icons, item, Vec::new(), None, None)
 }
 
 fn block_inner(
@@ -118,6 +120,8 @@ fn block_inner(
     icons: &mut IconCache,
     item: &Block,
     mut actions: Vec<Option<crate::flows::panels::Click>>,
+    mut input: Option<crate::flows::panels::AddressField>,
+    window: Option<&gpui::Window>,
 ) -> Div {
     let _ = &mut actions;
     match item {
@@ -278,6 +282,7 @@ fn block_inner(
             chips,
             note,
             resulting_total,
+            custom,
         } => {
             let mut chip_row = div().flex().flex_wrap().gap(px(8.));
             let mut chip_actions = actions.into_iter();
@@ -320,6 +325,89 @@ fn block_inner(
                     None => chip_row.child(chip),
                 };
             }
+            // The typed cap, under the chips. A field with no input bound —
+            // the gallery's — still shows what is there and what is wrong
+            // with it, because that is the state being reviewed.
+            let live = input.take().zip(window);
+            let field = custom.as_ref().map(|input| {
+                // A real input when the page bound one; the drawn field
+                // otherwise, which is what the gallery reviews. Same
+                // primitive as the send screen's amount, so a cap and an
+                // amount are typed into the same-looking thing.
+                if let Some((field, window)) = live {
+                    let strings = crate::ui::NameFieldStrings {
+                        label: input.symbol.clone(),
+                        placeholder: input.placeholder.clone(),
+                        helper: SharedString::from(""),
+                        too_long_hint: SharedString::from(""),
+                    };
+                    let mut col = div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(crate::ui::text_field(
+                            "allowance-cap",
+                            theme,
+                            &strings,
+                            &field.value,
+                            false,
+                            false,
+                            &field.focus,
+                            window,
+                            field.on_change,
+                        ));
+                    if let Some(error) = &input.error {
+                        col = col.child(
+                            div()
+                                .text_size(theme::text_row_sub())
+                                .text_color(tone_color(theme, Tone::Danger))
+                                .child(error.clone()),
+                        );
+                    }
+                    return col;
+                }
+                let mut col = div().flex().flex_col().gap(px(6.)).child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(8.))
+                        .p(px(12.))
+                        .rounded(px(12.))
+                        .bg(theme.bg_sunken)
+                        .child(
+                            div()
+                                .font_family(theme::font_mono())
+                                .text_size(theme::text_mono_address())
+                                .text_color(if input.value.is_empty() {
+                                    theme.fg_subtle
+                                } else {
+                                    theme.fg_base
+                                })
+                                .child(if input.value.is_empty() {
+                                    input.placeholder.clone()
+                                } else {
+                                    input.value.clone()
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme::text_row_sub())
+                                .text_color(theme.fg_muted)
+                                .child(input.symbol.clone()),
+                        ),
+                );
+                if let Some(error) = &input.error {
+                    col = col.child(
+                        div()
+                            .text_size(theme::text_row_sub())
+                            .text_color(tone_color(theme, Tone::Danger))
+                            .child(error.clone()),
+                    );
+                }
+                col
+            });
+
             let mut card = div()
                 .p(px(16.))
                 .rounded(px(16.))
@@ -352,6 +440,9 @@ fn block_inner(
                         ),
                 )
                 .child(chip_row);
+            if let Some(field) = field {
+                card = card.child(field);
+            }
             if let Some(note) = note {
                 card = card.child(
                     div()

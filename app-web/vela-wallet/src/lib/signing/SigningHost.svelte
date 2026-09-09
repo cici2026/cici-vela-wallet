@@ -100,6 +100,17 @@
 			signingSheet.dispatchGuard({ type: 'preset_selected', mode: id });
 		}
 	}
+
+	/**
+	 * Every keystroke in the cap field, back to the machine that validates it.
+	 *
+	 * The core owns the parse (`custom_amount_changed` is already dot-normalized
+	 * by the shell, as payment_request's amount is), so nothing here decides
+	 * whether what was typed is a number — it only carries it.
+	 */
+	function guardCustom(text: string): void {
+		signingSheet.dispatchGuard({ type: 'custom_amount_changed', text });
+	}
 </script>
 
 {#if model}
@@ -112,6 +123,7 @@
 		onclose={() => signRequest.dispatch({ type: 'reject_tapped' })}
 		onconfirm={() => signRequest.dispatch({ type: 'approve_tapped', opts: approveOpts() })}
 		onchip={guardChip}
+		oncustom={guardCustom}
 		{onfee}
 	/>
 {/if}

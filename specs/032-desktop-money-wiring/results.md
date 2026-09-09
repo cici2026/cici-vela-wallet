@@ -2119,6 +2119,54 @@ desktop **327 / 323**,fmt clean,画廊 36 态(画稿标签条一个像素没动:
 
 desktop **328 / 324**,fmt clean,画廊 36 态(画稿的 `gate: None`,一个像素没动),Windows 通过。
 
+## Phase 39 — 缺的那张图,我自己画:上限输入,两端都画了也都接了
+
+创始人:"如果画廊里也没有,就按好的 UI/UX、遵循当前风格和功能设计,
+在 web 和 desktop 上画出来,然后集成。"
+
+先核实"确实没有":两端画廊都只画了 `Custom` 那颗 chip,
+**没有任何一态画"点下去之后"**——web 的 `AllowanceEditor.svelte` 里也没有输入框,
+整个 web 仓库从来没有派发过 `custom_amount_changed`。所以不是桌面欠 web 一块,
+是**两端都欠核心那个早就准备好的事件一个输入框**。
+
+### 设计:跟发送页的金额栏是同一个东西
+
+- 字段**画在 chips 下面、note 上面**,阅读顺序因此是"上限是多少 · 怎么改 · 它哪里不对"。
+- 用**发送页那同一个 `ui::text_field` 原语**(web 上是同一套 token):
+  一个人输上限和输金额,输进去的应该是长得一样的东西。
+- 币种当作字段的标签/后缀(`USDC` 贴右),数字用等宽/数值字体。
+- **上面那个大数字继续跟着走**——边打边看着上限长出来,这个反馈才是"打一个上限"敢用的原因。
+- 值是**核心的 `custom_text`**,不是本地回显:被机器拒掉的那一下,不该在屏幕上像是被接受了。
+- 错误(`invalid_amount` / `unlimited_disabled`)画在字段下面,danger 墨色;
+  这时上面的大数字**退回它仍然为真的那个值**——`Unlimited`,红的,
+  因为"解析不出来的上限"不是上限。
+
+### 两个新画态,两端同号
+
+- **cs34**:打了 `500`,`Custom` 亮着,大数字 `500 USDC`,滑块**武装**。
+- **cs35**:打了 `12.3.4`,字段下面 `Enter a valid amount`,大数字回到红色 `Unlimited`,
+  两行提示还在,滑块**关着**。
+
+桌面 `ALL_STATES` 33→35、`DESKTOP_STATES` 9→10;web 的 `SigningStateId` 与 `ALL_STATES` 同步,
+两个画态都在 `/[locale]/gallery/cs34|cs35` 预渲染出来了(HTML 里逐字核对过)。
+
+### 接线
+
+- 桌面:`Block::Allowance` 多一个 `custom` 数据字段;`block_with_actions` 现在也收一个
+  `AddressField`——**有绑定就是真输入框,没有就是画稿那一版**,和滑块、chip 同一条规矩,
+  所以 33 个老画态一个像素没动。每一次击键 `CustomAmountChanged` 回核心。
+- web:`AllowanceEditor` 收 `custom` + `oncustom`,`SigningHost` 把击键派发成
+  `custom_amount_changed`,`live.ts` 从 `editor.mode === 'custom'` 建这个字段。
+- **新增语料键 0**:`invalidAmount` 早就在 `componentsUi.signingApprove` 里。
+
+### 闸门
+
+desktop **328 / 324**,fmt clean,画廊全渲染,Windows 通过。
+web:`pnpm check` **0 errors**、`pnpm lint` 干净、`pnpm build` 成功。
+**`pnpm test:unit` 在这棵工作树里起不来**(vitest 项目初始化阶段
+`Could not resolve 'node:module' in rolldown/runtime.js`,在任何测试文件被加载之前就失败),
+和这次改动无关——但也就意味着 web 的单测没跑过,记在这里而不是含糊过去。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。

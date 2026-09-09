@@ -12,7 +12,7 @@
 
 use gpui::SharedString;
 
-use vela_core::app::approval_guard::{GuardEditorMode, GuardSurface, GuardView};
+use vela_core::app::approval_guard::{GuardAmountError, GuardEditorMode, GuardSurface, GuardView};
 use vela_core::app::clear_signing::{
     ClearBlindTyped, ClearDangerClass, ClearMessageView, ClearRisk, ClearSignField,
     ClearSignResult, ClearSigningView, ClearSiweBinding, ClearSurface, UNKNOWN_AMOUNT,
@@ -20,7 +20,7 @@ use vela_core::app::clear_signing::{
 use vela_core::app::fee_policy::FeeView;
 use vela_core::app::sign_request::{SignErrorKind, SignFundingPresentation, SignSurface, SignView};
 
-use crate::signing::fixtures::{Block, ChipState, FeeModel};
+use crate::signing::fixtures::{AllowanceInput, Block, ChipState, FeeModel};
 use crate::signing::{SigningStrings, Tone};
 
 /// The core's risk grade in the drawn vocabulary.
@@ -295,6 +295,20 @@ pub fn guard_editor(
             chips,
             note: (!notes.is_empty()).then(|| SharedString::from(notes.join("\n"))),
             resulting_total,
+            // The field appears only on the chip that needs one. Drawn from
+            // the core's own `custom_text`, so a keystroke it rejected never
+            // shows up on screen as though it had been taken.
+            custom: (editor.mode == Some(GuardEditorMode::Custom)).then(|| AllowanceInput {
+                value: SharedString::from(editor.custom_text.clone()),
+                symbol: SharedString::from(guard.meta.symbol.clone()),
+                placeholder: SharedString::from("0"),
+                error: editor.error.map(|error| match error {
+                    GuardAmountError::InvalidAmount => s.invalid_amount.clone(),
+                    // Typing 2^256-1 by hand is still an unlimited approval,
+                    // and it is refused with the same sentence the chip is.
+                    GuardAmountError::UnlimitedDisabled => s.unlimited_disabled.clone(),
+                }),
+            }),
         },
         modes,
     ))

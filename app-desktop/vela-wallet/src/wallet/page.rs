@@ -340,6 +340,8 @@ pub struct WalletPage {
     signing_host: Option<gpui::Entity<crate::wallet::signing_host::SigningHost>>,
     /// Which favourite the open tile menu is about.
     menu_origin: Option<String>,
+    /// The cap field's focus, kept on the page so typing survives a redraw.
+    cap_focus: FocusHandle,
     /// What the open page last called itself, from the bridge's own report.
     /// The star pins with THIS rather than the host, because the host is what
     /// a tile falls back to and a page's title is what a person recognises.
@@ -610,6 +612,7 @@ impl WalletPage {
             signing_host: None,
             menu_origin: None,
             browser_title: None,
+            cap_focus: cx.focus_handle(),
             #[cfg(not(target_os = "linux"))]
             browser_host: None,
             #[cfg(not(target_os = "linux"))]
@@ -7399,7 +7402,7 @@ impl WalletPage {
     }
 
     /// DE4 / DCS1–8's third column — the signing request itself.
-    fn signing_body(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+    fn signing_body(&mut self, theme: &Theme, window: &Window, cx: &mut Context<Self>) -> Div {
         // The live sheet when a request is open, the mock otherwise — the same
         // fork every other surface takes, and what keeps the 33 drawn
         // scenarios reviewable after real requests arrive.
@@ -7502,6 +7505,18 @@ impl WalletPage {
             .gap(px(16.))
             .child(signing_components::header(theme, &model));
 
+        // What is typed in the cap field, from the core. Read before the
+        // block loop borrows `self`.
+        #[cfg(not(target_os = "linux"))]
+        let cap_text: String = self
+            .signing_host
+            .as_ref()
+            .and_then(|host| host.read(cx).guard_view.editor.clone())
+            .map(|editor| editor.custom_text)
+            .unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let cap_text = String::new();
+
         // The allowance chips are a control when a machine is behind them.
         // One dispatch per chip, in the order the block lists them; the mock
         // gets none and draws exactly what the gallery has always drawn.
@@ -7519,6 +7534,39 @@ impl WalletPage {
             let armed =
                 matches!(item, signing_fixtures::Block::Allowance { .. }) && !chip_modes.is_empty();
             if armed {
+                // The cap field, live: the value is the CORE's `custom_text`,
+                // so a keystroke it rejected never appears as though it had
+                // been taken, and every keystroke goes back to the machine
+                // that validates it.
+                let field = matches!(
+                    item,
+                    signing_fixtures::Block::Allowance {
+                        custom: Some(_),
+                        ..
+                    }
+                )
+                .then(|| {
+                    let host = self.signing_host.clone();
+                    panels::AddressField {
+                        focus: self.cap_focus.clone(),
+                        value: cap_text.clone(),
+                        placeholder: SharedString::from("0"),
+                        on_change: Box::new(
+                            move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                                if let Some(host) = host.as_ref() {
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch_guard(
+                                        vela_core::app::approval_guard::Event::CustomAmountChanged {
+                                            text,
+                                        },
+                                        cx,
+                                    );
+                                    });
+                                }
+                            },
+                        ),
+                    }
+                });
                 let actions = chip_modes
                     .iter()
                     .map(|mode| {
@@ -7546,6 +7594,8 @@ impl WalletPage {
                     &mut self.icons,
                     item,
                     actions,
+                    field,
+                    window,
                 ));
             } else {
                 column = column.child(signing_components::block(theme, &mut self.icons, item));
@@ -7642,7 +7692,7 @@ impl WalletPage {
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }
             PanelId::Signing => {
-                let body = self.signing_body(theme, cx);
+                let body = self.signing_body(theme, window, cx);
                 let title = self.signing.panel_title.clone();
                 columns.child(self.panel_scaffold(theme, title, body, cx))
             }

@@ -98,6 +98,8 @@ pub struct SigningStrings {
     pub value_unlimited: SharedString,
     pub value_all_nfts: SharedString,
     pub unlimited_disabled: SharedString,
+    /// What a typed cap that is not a number gets told.
+    pub invalid_amount: SharedString,
     pub choose_prompt: SharedString,
     pub balances_title: SharedString,
     pub balances_match_hero: SharedString,
@@ -261,6 +263,7 @@ impl SigningStrings {
             value_unlimited: a("unlimitedValue"),
             value_all_nfts: a("allNfts"),
             unlimited_disabled: a("unlimitedDisabled"),
+            invalid_amount: a("invalidAmount"),
             choose_prompt: a("choosePrompt"),
             balances_title: s("balanceChangesTitle"),
             balances_match_hero: s("balanceMatchesHero"),
