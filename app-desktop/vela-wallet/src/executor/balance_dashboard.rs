@@ -342,7 +342,7 @@ mod tests {
                 address: "0xabc".to_owned(),
             });
 
-            let mut toggle = |host: &mut CoreHost<BalanceDashboard>| {
+            let toggle = |host: &mut CoreHost<BalanceDashboard>| {
                 for next in host.dispatch(Event::PrivacyToggled) {
                     if matches!(next.operation, BalanceOperation::WritePrivacy { .. }) {
                         let result = perform(next.operation.clone());

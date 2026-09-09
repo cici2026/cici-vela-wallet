@@ -491,6 +491,13 @@ pub struct WalletPage {
     /// must not be shown "Ethereum". Defaults to Gnosis, the chain this wallet
     /// is cheapest to be paid on.
     receive_chain: u32,
+    /// The sidebar's network filter: one chain, or `None` for every network.
+    ///
+    /// Render state, not a preference — the phone keeps it in component state
+    /// and forgets it on relaunch, and so does this. On the page rather than in
+    /// a module because ONE page draws the sidebar on every section here: a
+    /// chain chosen on 设置 is the one 钱包 then shows.
+    chain_filter: Option<u32>,
     /// D1b: the drawn celebration, with no core behind it.
     ///
     /// A LIVE celebration comes from `FeedView::toast` and lasts the core's
@@ -740,6 +747,7 @@ impl WalletPage {
             flow_strings: FlowStrings::resolve(&loc),
             receive_chain: 100,
             celebrating: false,
+            chain_filter: None,
             feed_privacy: None,
             tx_detail: None,
             asset_detail: None,
@@ -1688,13 +1696,23 @@ impl WalletPage {
 
         let mut networks = div().flex().flex_col().gap(px(2.)).flex_1().min_h(px(0.));
         let chain_rows = self.chain_models(cx);
+        let live = self.identity.is_some();
         for (i, row) in chain_rows.iter().enumerate() {
-            networks = networks.child(chain_row(
-                ElementId::from(("chain", i)),
-                theme,
-                &mut self.icons,
-                row,
-            ));
+            let drawn = chain_row(ElementId::from(("chain", i)), theme, &mut self.icons, row);
+            // The rows have looked pressable since spec 015 — pointer cursor,
+            // hover tint, a check on the selected one — and nothing was
+            // listening. The chain rides on the row rather than on its index:
+            // the list re-sorts whenever a holding does.
+            let chain_id = row.chain_id;
+            networks = networks.child(if live {
+                drawn
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_chain(chain_id, cx);
+                    }))
+                    .into_any_element()
+            } else {
+                drawn.into_any_element()
+            });
         }
 
         div()
@@ -1833,14 +1851,21 @@ impl WalletPage {
             );
         }
 
+        // The strip is narrowed by the sidebar's filter, and the panel it opens
+        // is addressed by index into the UNFILTERED list. Row 0 of "Gnosis" is
+        // not holding 0 — so the mapping is carried, not assumed. Getting this
+        // wrong opens somebody's ETH panel from their USDC row, and the next
+        // thing that panel offers is 转账.
+        let asset_indices = self.visible_assets(cx);
         let mut assets_col = div().flex().flex_col();
         for (i, row) in assets.iter().enumerate() {
+            let index = asset_indices.get(i).copied();
             assets_col = assets_col.child(
                 asset_row(ElementId::from(("asset", i)), theme, &mut self.icons, row).on_click(
                     cx.listener(move |this, _, _, cx| {
                         // WHICH holding, so the panel is about the row that was
                         // clicked rather than about the first one.
-                        this.asset_detail = this.identity.is_some().then_some(i);
+                        this.asset_detail = this.identity.is_some().then_some(()).and(index);
                         this.panel = PanelId::AssetDetail;
                         cx.notify();
                     }),
@@ -2203,6 +2228,45 @@ impl WalletPage {
         wallet_live::activity_rows(&feed, &self.strings, hidden)
     }
 
+    /// The core-list indices behind the home's asset strip, in drawn order.
+    ///
+    /// The fixture strip has no core behind it, so it maps to nothing — which
+    /// is the same `None` the asset panel already falls back on.
+    fn visible_assets(&mut self, cx: &mut Context<Self>) -> Vec<usize> {
+        if self.identity.is_none() {
+            return Vec::new();
+        }
+        let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
+        wallet_live::visible_token_indices(&view, self.chain_filter)
+    }
+
+    /// Pick a network — or `None` for all of them.
+    ///
+    /// Holdings and the feed narrow; the hero total does not. That is the
+    /// phone's `selectedChainId` semantics, ported word for word by the web,
+    /// and it is a deliberate asymmetry: the filter is about looking through a
+    /// list, not about pretending the money on other chains is gone.
+    ///
+    /// The FEED's half belongs to the core (`ChainFilterChanged`), which
+    /// re-emits the day headers around what survives — filtering the drawn rows
+    /// instead would leave a date heading over an empty day.
+    fn select_chain(&mut self, chain_id: Option<u32>, cx: &mut Context<Self>) {
+        if self.chain_filter == chain_id {
+            return;
+        }
+        self.chain_filter = chain_id;
+        // An open asset panel was opened by index into the UNFILTERED list, and
+        // the list it indexes is about to change shape.
+        self.asset_detail = None;
+        resident::resident::<ActivityFeed>(cx).update(cx, |resident, cx| {
+            resident.dispatch(
+                vela_core::app::activity_feed::Event::ChainFilterChanged { chain_id },
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
     /// Tell the feed what the hero is doing about privacy, when it changes.
     ///
     /// The core withholds the toast while balances are hidden — but only if it
@@ -2245,7 +2309,7 @@ impl WalletPage {
             return fixtures::assets_default(&self.strings);
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
-        wallet_live::asset_rows(&view, &self.strings, &self.locale)
+        wallet_live::asset_rows(&view, &self.strings, &self.locale, self.chain_filter)
     }
 
     /// The home's network list: the chains this person actually holds on.
@@ -2254,7 +2318,7 @@ impl WalletPage {
             return fixtures::chains(&self.strings);
         }
         let view = resident::resident::<BalanceDashboard>(cx).read(cx).view();
-        wallet_live::chain_rows(&view, &self.strings)
+        wallet_live::chain_rows(&view, &self.strings, self.chain_filter)
     }
 
     /// The focus handle for one editable settings field, made on first use.
@@ -2908,6 +2972,14 @@ impl WalletPage {
         if entry == FlowEntry::Send && self.identity.is_some() {
             self.open_send(SendOpenParams::default(), cx);
         }
+        // A person looking at one network who presses 收款 means THAT network.
+        // The web makes the same jump for the same reason; without it the
+        // filter says Gnosis and the code that opens is Ethereum's.
+        if entry == FlowEntry::Receive
+            && let Some(chain_id) = self.chain_filter
+        {
+            self.receive_chain = chain_id;
+        }
     }
 
     /// Spec 032: the send journey's machines, born with the flow. The mocks
@@ -3232,6 +3304,7 @@ impl WalletPage {
                     &self.flow_strings,
                     &self.strings,
                     &self.locale,
+                    self.chain_filter,
                 ))
             }
             FlowPanel::Da1 => {

@@ -80,6 +80,11 @@ pub struct ChainRowModel {
     pub dot: Option<Hsla>,
     pub count: u32,
     pub selected: bool,
+    /// Which chain this row IS — `None` on the all-networks row, which is the
+    /// same `None` the filter itself uses. Carried on the row rather than
+    /// derived from its position, because a click has to name a chain and a
+    /// position is only a chain until the list re-sorts.
+    pub chain_id: Option<u32>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -348,11 +353,12 @@ pub fn assets_variants(s: &WalletStrings) -> Vec<AssetRowModel> {
 }
 
 pub fn chains(s: &WalletStrings) -> Vec<ChainRowModel> {
-    let chain = |name: &str, dot: Hsla, count: u32| ChainRowModel {
+    let chain = |name: &str, chain_id: u32, dot: Hsla, count: u32| ChainRowModel {
         name: name.into(),
         dot: Some(dot),
         count,
         selected: false,
+        chain_id: Some(chain_id),
     };
     vec![
         ChainRowModel {
@@ -360,13 +366,14 @@ pub fn chains(s: &WalletStrings) -> Vec<ChainRowModel> {
             dot: None,
             count: NETWORK_COUNT,
             selected: true,
+            chain_id: None,
         },
-        chain("BNB Chain", chain_bnb(), 1),
-        chain("Ethereum", chain_ethereum(), 3),
-        chain("Arbitrum", chain_arbitrum(), 1),
-        chain("Gnosis", chain_gnosis(), 1),
-        chain("Base", chain_base(), 1),
-        chain("Polygon", chain_polygon(), 1),
+        chain("BNB Chain", 56, chain_bnb(), 1),
+        chain("Ethereum", 1, chain_ethereum(), 3),
+        chain("Arbitrum", 42_161, chain_arbitrum(), 1),
+        chain("Gnosis", 100, chain_gnosis(), 1),
+        chain("Base", 8_453, chain_base(), 1),
+        chain("Polygon", 137, chain_polygon(), 1),
     ]
 }
 

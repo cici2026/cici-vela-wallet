@@ -627,14 +627,14 @@ mod tests {
             ];
             let s = strings();
 
-            let assets = asset_rows(&held, &s, "en-US");
+            let assets = asset_rows(&held, &s, "en-US", None);
             assert_eq!(assets.len(), 3);
             // The core's order, kept: it already sorted by value.
             assert_eq!(assets[0].ticker, "ETH");
             assert_eq!(assets[0].chain, "Ethereum");
             assert!(matches!(&assets[0].fiat, Fiat::Value(v) if v.as_ref() == "$100.00"));
 
-            let chains = chain_rows(&held, &s);
+            let chains = chain_rows(&held, &s, None);
             // "All networks" plus the TWO chains held on — not the twelve the
             // wallet knows about.
             assert_eq!(chains.len(), 3);
@@ -649,8 +649,71 @@ mod tests {
 
             // Still counting: an empty strip, never somebody else's tokens.
             let counting = view(None);
-            assert!(asset_rows(&counting, &s, "en-US").is_empty());
-            assert_eq!(chain_rows(&counting, &s).len(), 1, "only the all row");
+            assert!(asset_rows(&counting, &s, "en-US", None).is_empty());
+            assert_eq!(chain_rows(&counting, &s, None).len(), 1, "only the all row");
+        });
+    }
+
+    /// Narrowing to one network: the strip shows that chain's holdings, the
+    /// check moves to its row, and — the part that would be a money bug — the
+    /// drawn rows still MAP to the core's own list.
+    ///
+    /// Row 0 of "Gnosis" is not holding 0. The asset panel is addressed by
+    /// index into the unfiltered list, so a lost mapping opens the wrong
+    /// holding, on a panel whose next button is 转账.
+    #[test]
+    fn narrowing_to_a_chain_keeps_the_rows_pointing_at_the_right_holdings() {
+        crate::executor::storage::tests::with_temp_state("chain-filter", || {
+            use vela_core::app::balance_dashboard::BalanceToken;
+            let token = |chain_id: u32, symbol: &str| BalanceToken {
+                chain_id,
+                symbol: symbol.to_owned(),
+                name: symbol.to_owned(),
+                balance: "1".to_owned(),
+                decimals: 18,
+                token_address: None,
+                price_usd: Some(1.0),
+                spam: false,
+            };
+            let mut held = view(Some(3.0));
+            held.tokens = vec![
+                token(1, "ETH"),
+                token(100, "xDAI"),
+                token(100, "USDC"),
+                token(56, "BNB"),
+            ];
+            let s = strings();
+
+            let gnosis = Some(100);
+            let rows = asset_rows(&held, &s, "en-US", gnosis);
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0].ticker, "xDAI");
+            assert_eq!(rows[1].ticker, "USDC");
+            // The mapping: drawn row 0 is the core's holding 1, not 0.
+            assert_eq!(visible_token_indices(&held, gnosis), vec![1, 2]);
+            assert_eq!(
+                visible_token_indices(&held, None),
+                vec![0, 1, 2, 3],
+                "no filter maps to itself"
+            );
+
+            // The check moves; the list of chains does not.
+            let chains = chain_rows(&held, &s, gnosis);
+            assert_eq!(chains.len(), 4);
+            assert!(!chains[0].selected, "all networks is no longer the one");
+            assert_eq!(chains[0].chain_id, None);
+            let picked = chains
+                .iter()
+                .find(|row| row.chain_id == Some(100))
+                .unwrap_or_else(|| unreachable!("Gnosis is held on"));
+            assert!(picked.selected);
+            assert_eq!(picked.count, 2);
+
+            // A chain held on with nothing else: still a real, if short, list.
+            assert_eq!(asset_rows(&held, &s, "en-US", Some(56)).len(), 1);
+            // And a chain nothing is held on narrows to nothing rather than
+            // falling back to everything.
+            assert!(asset_rows(&held, &s, "en-US", Some(137)).is_empty());
         });
     }
 
@@ -834,7 +897,12 @@ pub fn unreachable_chips(view: &BalanceView) -> Vec<(SharedString, u32, SharedSt
 /// simply has no rows yet. The hero next to it is already saying "counting" in
 /// the one place that can say it without inventing a figure.
 #[must_use]
-pub fn asset_rows(view: &BalanceView, s: &WalletStrings, locale: &str) -> Vec<AssetRowModel> {
+pub fn asset_rows(
+    view: &BalanceView,
+    s: &WalletStrings,
+    locale: &str,
+    filter: Option<u32>,
+) -> Vec<AssetRowModel> {
     let unpriced: std::collections::BTreeSet<(u32, String)> = view
         .unpriced_tokens
         .iter()
@@ -845,8 +913,9 @@ pub fn asset_rows(view: &BalanceView, s: &WalletStrings, locale: &str) -> Vec<As
             )
         })
         .collect();
-    view.tokens
-        .iter()
+    visible_token_indices(view, filter)
+        .into_iter()
+        .filter_map(|index| view.tokens.get(index))
         .map(|token| {
             let key = (
                 token.chain_id,
@@ -890,7 +959,11 @@ pub fn asset_rows(view: &BalanceView, s: &WalletStrings, locale: &str) -> Vec<As
 /// count on the "all" row is the number of chains listed, so the two halves of
 /// the strip cannot disagree.
 #[must_use]
-pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
+pub fn chain_rows(
+    view: &BalanceView,
+    s: &WalletStrings,
+    filter: Option<u32>,
+) -> Vec<ChainRowModel> {
     let mut order: Vec<u32> = Vec::new();
     for token in &view.tokens {
         if !order.contains(&token.chain_id) {
@@ -902,7 +975,8 @@ pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
         // The neutral dot: "all" is not a chain and must not wear one's colour.
         dot: None,
         count: u32::try_from(order.len()).unwrap_or(u32::MAX),
-        selected: true,
+        selected: filter.is_none(),
+        chain_id: None,
     }];
     for chain_id in order {
         rows.push(ChainRowModel {
@@ -915,10 +989,31 @@ pub fn chain_rows(view: &BalanceView, s: &WalletStrings) -> Vec<ChainRowModel> {
                     .count(),
             )
             .unwrap_or(u32::MAX),
-            selected: false,
+            selected: filter == Some(chain_id),
+            chain_id: Some(chain_id),
         });
     }
     rows
+}
+
+/// Which holdings the network filter leaves on screen, as indices into the
+/// core's own `tokens` order.
+///
+/// INDICES, not rows, because the asset panel is opened by index into that same
+/// list: filtering the drawn rows without carrying the mapping would open the
+/// wrong asset, and the next thing somebody does on that panel is send it.
+///
+/// The hero total deliberately does NOT narrow — the phone's `selectedChainId`
+/// semantics, which the web ported in the same words: holdings and feed narrow,
+/// the total stays the total.
+#[must_use]
+pub fn visible_token_indices(view: &BalanceView, filter: Option<u32>) -> Vec<usize> {
+    view.tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| filter.is_none_or(|chain_id| token.chain_id == chain_id))
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// The celebration sentence — "120 USDT received" — or nothing.

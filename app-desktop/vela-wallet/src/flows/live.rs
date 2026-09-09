@@ -124,6 +124,7 @@ pub fn assets(
     s: &FlowStrings,
     wallet: &crate::wallet::WalletStrings,
     locale: &str,
+    filter: Option<u32>,
 ) -> AssetsPanel {
     let unpriced: std::collections::BTreeSet<(u32, String)> = view
         .unpriced_tokens
@@ -136,9 +137,9 @@ pub fn assets(
         })
         .collect();
 
-    let rows: Vec<AssetRowModel> = view
-        .tokens
-        .iter()
+    let rows: Vec<AssetRowModel> = crate::wallet::live::visible_token_indices(view, filter)
+        .into_iter()
+        .filter_map(|index| view.tokens.get(index))
         .map(|token| {
             let key = (
                 token.chain_id,
@@ -149,19 +150,32 @@ pub fn assets(
         .collect();
 
     let settled = !view.holdings_loading && !view.balance_unknown;
+    // Narrowed to a chain that holds nothing is NOT the empty wallet: the
+    // guided "add a token" body would be answering a question nobody asked.
+    let filtered_empty = rows.is_empty() && !view.tokens.is_empty();
     AssetsPanel {
         // The chain filter's dots: the chains this person actually holds on,
         // in the order the core sorted them. A filter offering chains with
         // nothing on them is a filter that does nothing.
         filter: Some((
-            chain_dots(&view.tokens),
-            s.pill_all.clone(),
+            // Narrowed: this chain's own dot and its name, so the panel says
+            // WHICH list this is. The web puts the same fact in the same pill.
+            match filter {
+                Some(chain_id) => vec![tint(chain_id)],
+                None => chain_dots(&view.tokens),
+            },
+            match filter {
+                Some(chain_id) => {
+                    SharedString::from(crate::executor::custom_tokens::network_name(chain_id))
+                }
+                None => s.pill_all.clone(),
+            },
             s.assets_add.clone(),
         )),
         search_placeholder: s.assets_search.clone(),
         rows: rows.clone(),
         add_by_address: s.add_by_address.clone(),
-        empty: (rows.is_empty() && settled).then(|| AssetsEmpty {
+        empty: (rows.is_empty() && settled && !filtered_empty).then(|| AssetsEmpty {
             title: s.assets_empty_title.clone(),
             caption: s.assets_empty_caption.clone(),
             cta: s.add_token_title.clone(),
@@ -1896,7 +1910,7 @@ mod tests {
         ];
         view.unpriced_tokens = vec![token(143, "MON", "12.5", None)];
 
-        let panel = assets(&view, &strings(), &wallet_strings(), "en-US");
+        let panel = assets(&view, &strings(), &wallet_strings(), "en-US", None);
         assert_eq!(panel.rows.len(), 2);
         assert_eq!(panel.rows[0].ticker, "xDAI");
         assert_eq!(panel.rows[0].chain, "Gnosis");
@@ -1917,7 +1931,7 @@ mod tests {
         view.tokens = vec![token(100, "xDAI", "0.75897", Some(1.0))];
         view.hidden = true;
 
-        let panel = assets(&view, &strings(), &wallet_strings(), "en-US");
+        let panel = assets(&view, &strings(), &wallet_strings(), "en-US", None);
         assert_eq!(panel.rows[0].balance, MASK);
         assert!(matches!(panel.rows[0].fiat, Fiat::Masked));
         // The unit survives — H5's rule. The figure is what goes.
@@ -1931,7 +1945,7 @@ mod tests {
         counting.tokens = Vec::new();
         counting.balance_unknown = true;
         assert!(
-            assets(&counting, &strings(), &wallet_strings(), "en-US")
+            assets(&counting, &strings(), &wallet_strings(), "en-US", None)
                 .empty
                 .is_none(),
             "still counting: no 'your wallet is empty'"
@@ -1942,7 +1956,7 @@ mod tests {
         loading.balance_unknown = false;
         loading.holdings_loading = true;
         assert!(
-            assets(&loading, &strings(), &wallet_strings(), "en-US")
+            assets(&loading, &strings(), &wallet_strings(), "en-US", None)
                 .empty
                 .is_none()
         );
@@ -1952,7 +1966,7 @@ mod tests {
         settled.balance_unknown = false;
         settled.holdings_loading = false;
         assert!(
-            assets(&settled, &strings(), &wallet_strings(), "en-US")
+            assets(&settled, &strings(), &wallet_strings(), "en-US", None)
                 .empty
                 .is_some(),
             "the core ruled: genuinely empty"
@@ -1970,7 +1984,7 @@ mod tests {
             token(56, "BNB", "1", Some(700.0)),
             token(137, "POL", "1", Some(0.4)),
         ];
-        let panel = assets(&view, &strings(), &wallet_strings(), "en-US");
+        let panel = assets(&view, &strings(), &wallet_strings(), "en-US", None);
         let dots = panel
             .filter
             .as_ref()
@@ -2353,7 +2367,7 @@ mod tests {
                 pending.extend(host.resolve(next.id, result));
             }
             let view = host.view();
-            let panel = assets(&view, &strings(), &wallet_strings(), "en-US");
+            let panel = assets(&view, &strings(), &wallet_strings(), "en-US", None);
 
             for row in &panel.rows {
                 println!(
