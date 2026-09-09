@@ -365,6 +365,31 @@ pub fn start_ticks(cx: &mut App) {
     .detach();
 }
 
+/// The window came back, or something changed the store under it.
+///
+/// `FocusTick` is the core's own "look again now" — the same event the 30 s
+/// loop sends, which is why there is one function and not two policies.
+pub fn focus_tick(cx: &mut App) {
+    resident::resident::<ActivityFeed>(cx).update(cx, |resident, cx| {
+        resident.dispatch(Event::FocusTick, cx);
+    });
+}
+
+/// The tracker converged `resolved_count` pending submissions.
+///
+/// The core re-reads the store and — pointedly — **never celebrates** for this
+/// one: a send of your own that finally confirmed is not money arriving. Wiring
+/// it is what takes a just-confirmed transfer off "pending" the moment it
+/// lands, rather than at the next 30 s tick.
+pub fn reconciled(resolved_count: u32, cx: &mut App) {
+    if resolved_count == 0 {
+        return;
+    }
+    resident::resident::<ActivityFeed>(cx).update(cx, |resident, cx| {
+        resident.dispatch(Event::ReconcileCompleted { resolved_count }, cx);
+    });
+}
+
 /// Tell the feed what the balance hero is doing about privacy.
 ///
 /// The core suppresses the toast while balances are hidden (invariant ④), and

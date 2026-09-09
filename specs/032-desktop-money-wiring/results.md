@@ -2375,11 +2375,54 @@ desktop **332 / 328**(+4 测试),fmt clean,画廊全渲染,Windows 通过。
 
 desktop **336 / 332**(+4 测试),fmt clean,画廊全渲染,Windows 通过。
 
+## Phase 44 — 拿 web 当清单:第一条对照发现"首页的数字停在启动那一刻"
+
+创始人:"web 版本也有桌面网页版呀,现在 native 和 web 相比还差什么。"
+于是做了一次**逐事件对照**:把每台核心机器的 `Event` 变体列出来,两个壳各 grep 一遍,
+差集就是"web 会做而 native 不会"的动作。**42 个**。这一 phase 先修其中最要命的一组。
+
+### 桌面这辈子只给余额机器发过一个事件
+
+`AccountChanged`,开机那一次。**屏幕上的总额就是启动那一刻的总额** ——
+钱到了、发的钱结算了,数字都不动,重启是唯一的办法。核心把两条节奏点名划给壳
+(`AUTO_REFRESH_MS` 十分钟、窗口回到前台时的 `AppFocused`),两条都没接。
+
+顺带发现两件同科的事:
+
+- **`vela.balanceHidden` 从 spec 030 起一直在写,从来没人读回来。** 隐藏余额只活到进程结束。
+  现在开机 hydrate 一次(先写先赢是核心的不变量⑧,所以是事件不是字段)。
+- **`ReconcileCompleted` 也没接**:tracker 把 pending 改成 confirmed 是写在同一份 store 里的,
+  而屏幕上那一行要等下一次重读才会变。现在 tracker 自己的 3 秒心跳把"刚补过几条"交给 feed,
+  ≤3 秒,而不是 30 秒或者下次启动。
+
+### 四个"我知道答案变了"的时刻,照 web 那份接
+
+web 在四个地方强制读一次,桌面一个都没有:加了代币、加了网络、修好了 RPC、窗口回前台。
+
+- **加代币**:核心在写落盘之后才要 `InvalidateTokenCache`,所以标记打在那个操作里
+  (`perform` 没有 `cx`,够不着另一台机器),由页面下一帧取走 —— 而下一帧正是这次改动引起的那一帧。
+- **加网络**:`AddConfirmed` 真的记上了才刷(核心拒绝时 `added` 为假,不刷)。
+- **修 RPC**:`FixChainResolved` + 强制读。**被拒绝的端点不算修好** ——
+  `rpc_chain_mismatch` 是核心对"这个节点自称是另一条链"的判决,拿它当门。
+
+### 一条测试之外的事实
+
+聚焦刷新在屏幕上**是静默的**,这不是缺陷:`refreshing` 只在 `pending_pulls > 0` 时为真,
+也就是只有下拉刷新才转圈,web 同理。所以这一条是靠日志和真机验的,不是靠截图。
+
+### 实机(parallel space,金标 Safe)
+
+固定密钥集登录 → `$0.75`(Gnosis 上的 xDAI,真网真读)。
+临时打了两行日志,看到:开窗一次 focus、切到 Finder 一次 blur、点回来又一次 focus,
+三次都对上;验完把日志删了。
+
+desktop **338 / 334**(+2 测试),fmt clean,画廊全渲染,Windows 通过。
+
 # 交接:下一个会话从这里开始
 
 **范围:只做 desktop**(安卓/iOS/web 是别人的)。分支 `032-desktop-money-wiring`
 (叠在 031 → 030 → 029 上,均未合并;028 已并进来)。工作区
-`/Volumes/data/production/vela-wallet-native`,**43 个 phase,100 个提交**(`049617f5..`)。
+`/Volumes/data/production/vela-wallet-native`,**44 个 phase,101 个提交**(`049617f5..`)。
 
 ## 一句话状态
 
@@ -2403,7 +2446,7 @@ cd ../../rust && cargo fmt --all --check \
 cd ../app-web/vela-wallet && pnpm check && pnpm lint && pnpm build
 ```
 
-**当前基线**:desktop **336 passed(feature on)/ 332(off)· 36 ignored**;
+**当前基线**:desktop **338 passed(feature on)/ 334(off)· 36 ignored**;
 vela-core **1,304**;web `pnpm check` 0 errors、lint 干净、build 成功。
 **web 的 `pnpm test:unit` 在这棵树里起不来**(vitest 项目初始化阶段
 `Could not resolve 'node:module' in rolldown/runtime.js`,任何测试文件加载之前就失败)
@@ -2432,9 +2475,10 @@ vela-core **1,304**;web `pnpm check` 0 errors、lint 干净、build 成功。
 | 8 | dApp 充值(funding)**完整流程** | 只说了一句话,没有"去充值"的那条路;发送列有一整套可抄 |
 | 9 | **真网看一次到账庆祝**(phase 43 已画已接) | 要人决定(扫描窗口 100 块 ⇒ 必须现在真收一笔) |
 
-**接线上的一处仍可收紧**:`FeedEvent::ReconcileCompleted` 没接——tracker 把 pending 改成
-confirmed 之后,屏幕靠 phase 43 的 30 秒 `FocusTick` 重读兜住,最坏晚 30 秒。
-接上是几行(tracker 的补丁落地处 dispatch 一次),不接不会错,只会慢。
+**phase 44 起,欠账清单换了来源**:不再靠"我觉得还缺什么",而是**拿 web 当清单** ——
+逐台机器列 `Event` 变体,两个壳各 grep 一遍,差集就是 web 会做而 native 不会的动作。
+第一次跑出 **42 条**,phase 44 修掉了刷新/聚焦/隐私 hydrate/reconcile 这一组。
+剩下的按屏幕分组,见下表。
 
 **判定不做**:`dapp_session`(WalletPair/远程注入)——创始人 2026-09-08 裁决,
 桌面用内置浏览器注入,不做远程配对。别再把它当欠账捡起来。

@@ -607,6 +607,12 @@ impl WalletPage {
         // without this tick the machine performs its boot pipeline once and
         // never celebrates anything, because the first pass never celebrates.
         crate::executor::activity_feed::start_ticks(cx);
+        // And the hero's own cadence. Until this call the desktop dispatched
+        // exactly one balance event ever — the boot's `AccountChanged` — so the
+        // total on screen was the total at launch, restart being the only way
+        // to move it. This also hydrates the stored privacy flag, which had
+        // been written since spec 030 and never read back.
+        crate::executor::balance_dashboard::start_ticks(cx);
         // `VELA_SETTINGS_STATE` picks WHICH panel, on this path too. Without it
         // `VELA_SECTION=settings` can only ever open 账户, so the live 网络 and
         // 本地化 surfaces would still have no way to be screenshotted.
@@ -666,6 +672,33 @@ impl WalletPage {
         let settings = SettingsStrings::resolve(&loc);
         let explore = ExploreStrings::resolve(&loc);
         let signing = SigningStrings::resolve(&loc);
+
+        // The window coming back is the desktop's `visibilitychange`: the web
+        // refreshes the hero and ticks the feed on it, and this app did
+        // neither. Registered for the life of the page; the guard is the
+        // identity, because an unsigned window has nothing to refresh.
+        cx.observe_window_activation(window, |page, window, cx| {
+            if page.identity.is_none() {
+                return;
+            }
+            if window.is_window_active() {
+                crate::executor::balance_dashboard::dispatch(
+                    vela_core::app::balance_dashboard::Event::AppFocused,
+                    cx,
+                );
+                crate::executor::activity_feed::focus_tick(cx);
+                // A reconcile sweep, not a throttled poll: coming back is
+                // exactly when a submission somebody walked away from should
+                // be settled.
+                crate::executor::tracker::focused(cx);
+            } else {
+                crate::executor::balance_dashboard::dispatch(
+                    vela_core::app::balance_dashboard::Event::AppBackgrounded,
+                    cx,
+                );
+            }
+        })
+        .detach();
 
         let page = cx.weak_entity();
         window
@@ -5344,7 +5377,7 @@ impl WalletPage {
 
         let edit = move |field: NetOverrideField| {
             move |text: String, _window: &mut Window, cx: &mut gpui::App| {
-                resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
+                let saved = resident::resident::<NetworkAdmin>(cx).update(cx, |resident, cx| {
                     resident.dispatch(
                         NetEvent::OverrideFieldEdited {
                             chain_id,
@@ -5354,7 +5387,27 @@ impl WalletPage {
                         cx,
                     );
                     resident.dispatch(NetEvent::OverrideBlurred { chain_id }, cx);
+                    // Refused endpoints do not count as a fix. `rpc_chain_mismatch`
+                    // is the core's own verdict on the one refusal that matters —
+                    // an endpoint answering for another chain.
+                    resident
+                        .view()
+                        .networks
+                        .iter()
+                        .find(|row| row.chain_id == chain_id)
+                        .is_none_or(|row| row.rpc_chain_mismatch.is_none())
                 });
+                if saved && field == NetOverrideField::Rpc {
+                    // The hero has this chain marked failed and its own retry is
+                    // throttled like any other fetch. The person just repaired
+                    // the endpoint by hand, which is the moment the web clears
+                    // the failure and forces one read.
+                    crate::executor::balance_dashboard::dispatch(
+                        vela_core::app::balance_dashboard::Event::FixChainResolved { chain_id },
+                        cx,
+                    );
+                    crate::executor::balance_dashboard::refresh(cx);
+                }
             }
         };
 
@@ -6230,6 +6283,12 @@ impl WalletPage {
                             });
                         if added {
                             this.settings_dialog = None;
+                            // A chain the person just added is a chain nobody
+                            // has counted yet. The web forces the same read at
+                            // the same moment; without it the new network sits
+                            // in the list contributing nothing until something
+                            // else happens to refresh.
+                            crate::executor::balance_dashboard::refresh(cx);
                         }
                         cx.notify();
                     })),
@@ -8889,6 +8948,13 @@ impl Render for WalletPage {
                 .flex_col()
                 .child(self.wallet_columns(&theme, caption, window, cx))
         };
+
+        // Something changed what the hero is counting — a custom token added or
+        // removed — from a place that had no way to say so. Drained here
+        // because this frame IS that moment: the change is what caused it.
+        if self.identity.is_some() && crate::executor::balance_dashboard::take_invalidation() {
+            crate::executor::balance_dashboard::refresh(cx);
+        }
 
         let scan = self.scan_overlay(&theme, cx);
         let toast = self.receipt_toast(&theme, window, cx);

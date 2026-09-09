@@ -14,17 +14,19 @@
 //! partial fetch is how a wallet remembers a number that was never true; the
 //! core refuses to ask for that write, and this file never writes uninvited.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::App;
 use serde_json::{Value, json};
 
 use vela_core::app::balance_dashboard::{
-    BalanceCacheEntry, BalanceDashboard, BalanceOperation, BalanceShellResult, Event,
+    AUTO_REFRESH_MS, BalanceCacheEntry, BalanceDashboard, BalanceOperation, BalanceShellResult,
+    Event,
 };
 
 use crate::executor::{balances, storage};
-use crate::resident::{Answer, Machine};
+use crate::resident::{self, Answer, Machine};
 use crate::session;
 
 /// `vela.balanceCache` — `{ address: { usd, at } }`, the Expo bytes.
@@ -172,6 +174,106 @@ impl Machine for BalanceDashboard {
     }
 }
 
+/// The person's stored answer to "hide my balance", read at boot.
+///
+/// `WritePrivacy` has been writing this file since spec 030 and **nothing has
+/// ever read it back**: the flag survived a restart on disk and not on screen.
+/// First-write-wins is the core's (its invariant ⑧), which is why this is an
+/// event rather than a field set before boot.
+fn hydrate_privacy() -> Option<Event> {
+    let stored = storage::read_value(PRIVACY_KEY).ok().flatten()?;
+    let hidden = match &stored {
+        Value::String(text) => text == "1",
+        Value::Bool(flag) => *flag,
+        _ => return None,
+    };
+    Some(Event::PrivacyHydrated { hidden })
+}
+
+static TICKING: AtomicBool = AtomicBool::new(false);
+/// Set when something invalidated what the hero is showing, from a place with
+/// no `cx` to say so directly (a `perform` runs without one). Drained by the
+/// page on its next frame — which is the same frame the change caused.
+static INVALIDATED: AtomicBool = AtomicBool::new(false);
+
+/// "What you are showing is out of date." Cheap, idempotent, and safe to call
+/// from an operation.
+pub fn invalidate() {
+    INVALIDATED.store(true, Ordering::SeqCst);
+}
+
+/// Drain the flag. `true` means somebody should force a read.
+pub fn take_invalidation() -> bool {
+    INVALIDATED.swap(false, Ordering::SeqCst)
+}
+
+/// Boot the hero and keep it honest for the life of the process.
+///
+/// Until this existed the desktop dispatched exactly one balance event ever —
+/// `AccountChanged` at boot — so **the total on screen was the total at launch**.
+/// Money could arrive, a send could settle, and the figure would not move until
+/// the app was restarted. The core names the two cadences it does not own
+/// (`AUTO_REFRESH_MS`, and `AppFocused` when the window comes back) and both are
+/// wired here.
+///
+/// `force: false` is deliberate: the core drops an unforced refresh while the
+/// window is in the background, which is exactly what an interval poll should
+/// do and what the web's own timer relies on.
+pub fn start_ticks(cx: &mut App) {
+    let _ = resident::resident::<BalanceDashboard>(cx);
+    if let Some(event) = hydrate_privacy() {
+        resident::resident::<BalanceDashboard>(cx)
+            .update(cx, |resident, cx| resident.dispatch(event, cx));
+    }
+    if TICKING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a ten-minute constant in f64 ms is exactly representable"
+    )]
+    let period = Duration::from_millis(AUTO_REFRESH_MS as u64);
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor().timer(period).await;
+            // Re-fetched each tick: a sign-out drops every resident, and the
+            // next sign-in's hero is the one that must get the ticks.
+            let balance = cx.update(|cx| resident::resident::<BalanceDashboard>(cx));
+            balance.update(cx, |resident, cx| {
+                resident.dispatch(
+                    Event::RefreshRequested {
+                        force: false,
+                        pull: false,
+                    },
+                    cx,
+                );
+            });
+        }
+    })
+    .detach();
+}
+
+/// One event into the hero, from a screen that made something stale.
+pub fn dispatch(event: Event, cx: &mut App) {
+    resident::resident::<BalanceDashboard>(cx).update(cx, |resident, cx| {
+        resident.dispatch(event, cx);
+    });
+}
+
+/// A forced read, for the moments a screen KNOWS the answer changed — a token
+/// added, a network added, an RPC repaired. The web forces on exactly these,
+/// and forcing matters: those all happen while somebody is looking.
+pub fn refresh(cx: &mut App) {
+    dispatch(
+        Event::RefreshRequested {
+            force: true,
+            pull: false,
+        },
+        cx,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +283,55 @@ mod tests {
             Answer::Now(result) => result,
             _ => unreachable!("this operation is local"),
         }
+    }
+
+    /// The privacy flag survives a restart on SCREEN, not only on disk.
+    ///
+    /// `WritePrivacy` has written this file since spec 030 and nothing read it
+    /// back, so hiding your balance lasted exactly as long as the process. Both
+    /// spellings are accepted because both clients have written it: the Expo
+    /// app's `'1'`/`'0'` strings, and a boolean is what a JSON store would hold
+    /// if one ever wrote it that way.
+    #[test]
+    fn the_stored_privacy_choice_is_read_back_at_boot() {
+        storage::tests::with_temp_state("balance-privacy-hydrate", || {
+            assert!(hydrate_privacy().is_none(), "nothing stored, nothing said");
+
+            if storage::write_value(PRIVACY_KEY, Value::String("1".to_owned())).is_err() {
+                unreachable!("could not seed");
+            }
+            assert!(matches!(
+                hydrate_privacy(),
+                Some(Event::PrivacyHydrated { hidden: true })
+            ));
+
+            if storage::write_value(PRIVACY_KEY, Value::String("0".to_owned())).is_err() {
+                unreachable!("could not seed");
+            }
+            assert!(matches!(
+                hydrate_privacy(),
+                Some(Event::PrivacyHydrated { hidden: false })
+            ));
+
+            if storage::write_value(PRIVACY_KEY, Value::Bool(true)).is_err() {
+                unreachable!("could not seed");
+            }
+            assert!(matches!(
+                hydrate_privacy(),
+                Some(Event::PrivacyHydrated { hidden: true })
+            ));
+        });
+    }
+
+    /// Invalidation is a one-shot: the frame that drains it forces one read,
+    /// and the frame after it does not force another.
+    #[test]
+    fn an_invalidation_is_drained_once() {
+        assert!(!take_invalidation(), "nothing to drain");
+        invalidate();
+        invalidate();
+        assert!(take_invalidation(), "one drain reports it");
+        assert!(!take_invalidation(), "and the next frame does not re-read");
     }
 
     /// A total written today comes back; one written two days ago does not.

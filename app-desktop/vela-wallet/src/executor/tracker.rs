@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use gpui::App;
@@ -241,6 +241,16 @@ impl Machine for TxTracker {
 
             TrackOperation::UpdateTxRecords { ids, patch } => {
                 patch_records(ids, patch.status, patch.tx_hash.as_deref());
+                // Records changed UNDER the feed, which is reading the same
+                // store and has no way to know. Counted here and handed over on
+                // the next tick (this function has no `cx` to reach another
+                // machine with); the feed's own event for it is
+                // `ReconcileCompleted`, and the core is explicit that it
+                // re-reads without celebrating.
+                PATCHED.fetch_add(
+                    u32::try_from(ids.len()).unwrap_or(u32::MAX),
+                    Ordering::SeqCst,
+                );
                 Answer::Now(TrackShellResult::RecordsPatched)
             }
 
@@ -268,6 +278,8 @@ impl Machine for TxTracker {
 }
 
 static TICKING: AtomicBool = AtomicBool::new(false);
+/// Records the tracker has patched since the feed was last told.
+static PATCHED: AtomicU32 = AtomicU32::new(0);
 
 /// Boot the tracker and keep it ticking for the life of the process. Called
 /// by the wallet page on every sign-in; a second call is a no-op.
@@ -283,9 +295,25 @@ pub fn start(cx: &mut App) {
             // next sign-in's tracker must be the one that gets the ticks.
             let tracker = cx.update(|cx| resident::resident::<TxTracker>(cx));
             tracker.update(cx, |resident, cx| resident.dispatch(Event::Tick, cx));
+            // Anything the sweep just converged, handed to the feed within one
+            // tick rather than at its own 30 s pass: the row a person is
+            // watching says "pending" until somebody re-reads the store.
+            let patched = PATCHED.swap(0, Ordering::SeqCst);
+            if patched > 0 {
+                let _ = cx.update(|cx| crate::executor::activity_feed::reconciled(patched, cx));
+            }
         }
     })
     .detach();
+}
+
+/// The window came back. The core turns this into a reconcile sweep — the
+/// pass that converges every pending submission, not just the throttled poll a
+/// tick would run.
+pub fn focused(cx: &mut App) {
+    resident::resident::<TxTracker>(cx).update(cx, |resident, cx| {
+        resident.dispatch(Event::HomeFocused, cx);
+    });
 }
 
 /// A user operation was accepted: hand it to the tracker, whose patches

@@ -106,7 +106,17 @@ impl Machine for ManageTokens {
             // The balance fetch reads the token list on every run, so there is
             // no separate token cache to drop on the desktop. Answered, because
             // a skipped operation leaves the core waiting.
-            MtokOperation::InvalidateTokenCache => Answer::Now(MtokShellResult::CacheInvalidated),
+            //
+            // What the desktop DOES need is the other half of the web's
+            // handler: the same moment calls `balance.refresh(true)` there,
+            // because a token that was just added is a token nobody has counted
+            // yet. The core times this operation exactly right — it asks for
+            // the invalidation once the write has landed — so the flag is set
+            // here rather than at the click.
+            MtokOperation::InvalidateTokenCache => {
+                crate::executor::balance_dashboard::invalidate();
+                Answer::Now(MtokShellResult::CacheInvalidated)
+            }
         }
     }
 }
