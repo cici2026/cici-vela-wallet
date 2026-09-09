@@ -2303,154 +2303,85 @@ desktop **332 / 328**(+4 测试),fmt clean,画廊全渲染,Windows 通过。
 
 # 交接:下一个会话从这里开始
 
-**范围:只做 desktop。** 分支 `032-desktop-money-wiring`(叠在 031 → 030 → 029 上,均未合并)。
-工作区 `/Volumes/data/production/vela-wallet-native`,七个 phase(1–5、自查的 6/6b,
-和把同一把尺子用到隔壁屏幕的 7),**十三个**提交(交接原写「十一个」,实数是 `049617f5..` 的 13)。
+**范围:只做 desktop**(安卓/iOS/web 是别人的)。分支 `032-desktop-money-wiring`
+(叠在 031 → 030 → 029 上,均未合并;028 已并进来)。工作区
+`/Volumes/data/production/vela-wallet-native`,**42 个 phase,99 个提交**(`049617f5..`)。
 
 ## 一句话状态
 
-**桌面发过钱了**(SC-303 达标,2026-09-07:`0x98c8f65c…dfc9`,`receipt.status=0x1`,
-Safe 少了 0.011000 逐位对上)。以下是那一推之前的状态,留作背景:**桌面能发钱,只差最后一推**:金标 Safe 真网走到确认页(真持仓、真报价 0.010 xDAI、
-滑块已武装),`SlideConfirm` 藏在 `VELA_LIVE_SEND=1` 后面没拉——花真钱是创始人的决定
-(SC-303)。固定密钥集签名者在 vela-core(`dev-fixtures`),4337 UserOp 装配在 vela-core
-(`user_op.rs`,与 EIP-712 哈希器和 alloy ABI 编码器交叉验证),中继/链读/提交主干、
-fee_policy 与 tx_tracker 常驻、send 宿主与七块屏(含批量导入)全接。**A 组全完。**
-
-phase 6/6b 是**对我自己 phase 4/5 的自查**:那两刀写的 live 构造器把核心十六个判断
-字段全丢了(余额不够时按钮不动、屏幕不说)。现在一个 `SendNotice` 承载全部拒绝、CTA
-三态、手续费币种按不变量⑧不可选、文件读不出与代币存不进都会说话——新增语料键 **0**
-个。方法(第二条 grep)写在本文件末尾的「每次接手仍要跑」里,普查判定表在 phase 6b。
+**桌面已经没有纯接线的活了。** 钱能发(SC-303 真网达标)、签名面板读四台核心机器、
+真 dApp 能连能读能签、浏览器有历史/收藏/分组/标签、收款有门也能出分享卡。
+剩下的每一件要么**要人动手**,要么**要产品决定**,要么**缺图**——清单在最后。
 
 ## 立刻可跑的闸门
 
-> **别把 `cargo test` 接进管道再用 `&&` 串**(比如 `| tail -3 &&`):`&&` 接的是
-> `tail` 的退出码,永远是 0,测试挂了照样报绿。要么原样跑,要么先 `set -o pipefail`。
-> phase 8 有一次真实失败就是这么被瞒过去的。
+> **别把 `cargo test` 接进管道再用 `&&` 串**(`| tail -3 &&` 接的是 tail 的退出码,
+> 永远 0,测试挂了照样报绿)。要么原样跑,要么先 `set -o pipefail`。
 
 ```bash
 cd /Volumes/data/production/vela-wallet-native/app-desktop/vela-wallet
 cargo fmt --all --check && cargo test --features dev-fixtures && cargo test \
   && scripts/sweep-gallery.sh && scripts/check-windows.sh
-# 真网(按模块,不并发;proxy 变量要清掉):
-env -u all_proxy -u http_proxy -u https_proxy \
-  cargo test --features dev-fixtures executor::relay -- --ignored --test-threads=1
-# …同样跑 executor::chain / executor::user_op / wallet::money(到确认页为止)
 cd ../../rust && cargo fmt --all --check \
   && cargo clippy --workspace --all-targets --features vela-core/dev-fixtures -- -D warnings \
   && cargo test -p vela-core --features i18n-all,crux,dev-fixtures
+cd ../app-web/vela-wallet && pnpm check && pnpm lint && pnpm build
 ```
 
-基线(**并入 028、走完 phase 12 之后**):desktop **273 passed(feature on)/ 269(off)· 33 ignored**,
-vela-core **1,282**,fmt clean,clippy `-D warnings` 无话,gallery 36 态全渲染,
-**两种 feature 配置下各 1 个 warning**(`BLE_CHANNEL_SUPPORTED`)。
-桌面数字:并树时删掉的 `executor/contact_io.rs` 带走 6 个测试,
-phase 8 加 2、9 加 2、10 加 2、11 加 4、12 加 2(外加一条 `#[ignore]` 真网)。
-(phase 7 之前 `--tests` 下其实有 3 个 warning,多的两个里一个是真缺陷,见第 6 条教训。)
+**当前基线**:desktop **332 passed(feature on)/ 328(off)· 36 ignored**;
+vela-core **1,304**;web `pnpm check` 0 errors、lint 干净、build 成功。
+**web 的 `pnpm test:unit` 在这棵树里起不来**(vitest 项目初始化阶段
+`Could not resolve 'node:module' in rolldown/runtime.js`,任何测试文件加载之前就失败)
+——环境问题,不是代码,别当成回归。
 
-**动过 `rust/` 就要**:`node rust/scripts/build-web.mjs`(不是 `--check`——指纹一定会动,
-要重建入库)→ `verify-web.mjs` → `gen-onboarding-types.mjs --check`。
-当前 wasm:`1b6c8ce4be03`,**3,725,860 字节**(032 自己那两次是 3,630,664 只改指纹名;
-并入 028 后长了,因为 028 的新事件和拼音首字母表在里面)。
+**动过 `rust/` 就要**:`node rust/scripts/build-web.mjs` → `verify-web.mjs` →
+`gen-core-types.mjs`;web 那边还要 `node scripts/sync-wasm.mjs`。
+当前 wasm:`aaefc6530923`(3,728,061 字节)。
 
-## SC-303:那一推怎么拉(**已拉,2026-09-07**;命令留着,复跑还会再花一次 dust)
+## 这一刀新增的核心机器
 
-```bash
-env -u all_proxy -u http_proxy -u https_proxy VELA_LIVE_SEND=1 VELA_PARALLEL_SPACE=1 \
-  cargo test --features dev-fixtures live_the_golden_safe_reaches_confirm -- --ignored --nocapture
-```
-它会用 fixture #1 签 SafeOp、真提交到 vela-relay、打印 userOpHash;花 0.001 + 0.010 xDAI。
-收据核对:余额差 = 0.011,与屏幕数字逐位对上(026 的 web 巡检就是这个数)。跑完把
-结果写进 SC-303 的判决。**注意** `VELA_PARALLEL_SPACE=1` 是进程级 env,测试里
-`passkey::assert` 靠它路由到固定密钥集;不设它,签名会去找 USB 钥匙。
+`explore_sites`(`vela.explore` 一份文档:收藏/分组/标签),18 条规则各一测试。
+**四端共用**,ts-rs 两套镜像已生成(326 个文件),web 随时可接。
 
-## 还欠的
+## 还欠的(全部,按"卡在什么上"分)
 
-| # | 事 | 状态 |
+| # | 事 | 卡在 |
 |---|---|---|
-| 1 | ~~Phase 5 批量导入~~ | **已交付**(phase 5)。**phase 10 补上样张**:`tests/fixtures/payroll-sample.xlsx` 已提交,workbook 那条路以前一次都没在测试里跑过;两个测试从文件一路走到付款行。**仍欠**:真表格实机点一次(要人点文件对话框) |
-| 2 | **B 组签名面板**(`clear_signing` `approval_guard` `sign_request`,9,362 行) | 图 DCS1–8 画好、33 个手写场景;`user_op::compute_safe_message_hash` 与 `build_eip1271_signature` 已备好。请求来源仍缺(C 组要 web 引擎) |
-| 3 | 真实认证器签一笔发送(USB / caBLE / 平台库) | 本刀没插过钥匙。走的是登录同一条 `passkey::assert` 缝,理论上同路;实机跑一次 |
-| 4 | `SendOperation::AddNetwork` | 答 `Error`(移植的 catch 分支)。锁定请求要加网时应走设置向导 |
-| 5 | `SimulateCalls` | 桌面没有模拟引擎,答 `None` |
-| 6 | 031 留的五件 | **两件已交付**:Windows 日界线(phase 11)、**余额流式**(phase 12,`Answer::Streaming` + 逐链上报,真网验过)。剩三件全部有前置:收藏控件(桌面图里没有星标,**缺图**)、设置页新建/登录账户(**要导航决策**)、扫码(桌面没有相机管线,是新功能不是接线) |
-| 7 | Tempo 提交路径 | 已移植(`submit_tempo`)但没在 Tempo 链上跑过 |
-| 8 | ⇄ 法币/代币切换控件、多币归集(sweep)选择器、拆分行逐行改额 | 桌面**没画**。phase 6 已把 ⇄ 的拒绝理由说出来了(核心的 `denom_toggle_reason`),但控件本身要图 |
-| 9 | ~~设置里加网络向导的 `NetWizardView.{phase,error}`、`NetView.last_added_chain_id`~~ | **已交付**(phase 7):六种状态全说话、对话框按核心的记录关而不是按下就关;新增语料键 0。同一刀顺手修了编译器早就在报的 `AddToken.notice`(phase 6 自己留的) |
-| 10b | ~~`NetNetworkRow.explorer_health`~~ | **已交付**(phase 10):同一个徽章位,RPC 传了、浏览器传的是 `None`。一行 |
-| 10c | **`PaymentRequestView.can_copy` / `can_save`(要创始人定)** | 收款页是活的,但这道"确认过才允许复制/保存"的门桌面没实现。没自作主张加——Receive 的链上门(issue #14)是被判过时关掉的,这道该不该有是产品判断。见 phase 9 |
-| 10d | `FeeView.stale` | 30 秒 TTL 到了没有刷新控件。核心说这是 advisory、提交侧另有硬门;要做得先有图 |
-| 10 | `FeedView.toast`(到账庆祝)、`ContactRecipientView` 的信任行、`PaymentRequestView` 的付款链接面 | 都没图/没入口;普查表在 phase 6b |
+| 1 | 批量授权的**逐腿编辑器**(`GuardView.batch`) | 缺图(两端都没有) |
+| 2 | **到账庆祝** `FeedView.toast` | 缺图 + 没入口;**这是最后一个没被读的核心判断字段** |
+| 3 | **费用报价过期** `FeeView.stale` | 缺图(核心说是 advisory,提交侧另有硬门) |
+| 4 | 设置里**新建/登录另一个账户** | 要导航决策(产品) |
+| 5 | **扫码 DS1** | 桌面没有相机管线(新功能,不是接线) |
+| 6 | 插**实体钥匙**签一笔 | 要人动手 |
+| 7 | 点一次 **xlsx 真表格**文件对话框 | 要人动手 |
+| 8 | **Tempo** 链上跑一次提交 | 要人决定(真链真钱) |
+| 9 | dApp 充值(funding)**完整流程** | 只说了一句话,没有"去充值"的那条路;发送列有一整套可抄 |
 
-## 本刀最值得记的五件事
+**判定不做**:`dapp_session`(WalletPair/远程注入)——创始人 2026-09-08 裁决,
+桌面用内置浏览器注入,不做远程配对。别再把它当欠账捡起来。
 
-1. **`#[allow(dead_code)]` 会把被调用者也标成活的。** 给 `user_op::submit` 加一个
-   allow,`chain.rs` 里十个"never used"一起消失。接线前用它压警告,接线后记得删。
-2. **fee 会话必须只有一个。** `EstimateFee` 由确认卡渲染的同一个 `fee_policy` 会话回答,
-   宿主在它 `busy=false` 时用**它渲染的那个视图**结算——web 记录了四次因为拆成两个对象
-   而失败的集成。`SyncMoney` 测试就是这条规则的无 gpui 版本。
-3. **收据读 `receipt.status`,不读 `tx_status`。** 核心签完名就把 `tx_status` 翻成
-   confirmed;真正追链的是 receipt 自己的状态。读错一个字段就是"钱到了"的谎话。
-4. **gpui 细节两条**:`AsyncApp::update` 直接返回值(不是 Result),`Entity::update`
-   在 AsyncApp 上返回 `()`;`cargo test` 只吃一个过滤词,第二个会被静默丢弃(我以为跑了
-   两组测试,其实一组都没跑)。
-5. **接完线要再自查一遍:界面是不是把核心的判断丢了。** phase 4/5 我把七块屏接活了,
-   phase 6 一查,`SendView` 十六个判断字段一个没读——最糟的是余额不够时按钮不动、屏幕
-   不说,而移植的门偏偏是**按下才拒绝**,那句警告是中间唯一的东西。同类还有手续费币种
-   `insufficient`(画成可选=选了必失败)、`file_error`、`save_error`。**语料通常已经有词**
-   (这十六处新增键 0 个)。判定要逐条看核心意图:`failed_chain_ids` 未读是对的,因为核心
-   给了 `banner_chain_ids`(减去会自愈的限流)。
+## 接手前必读的三条方法(这一刀反复用到)
 
-6. **警告数要按真数字记,别按印象记。** 交接写"1 个既有 warning",`cargo test` 下其实是 3 个;
-   多出来的那两个里有一个(`AddToken.notice` 从来没被画)是 phase 6 自己留下的真缺陷,
-   编译器指着它说了不知道多少遍。压着不看的警告,下一条真的就藏在它后面。
+1. **第一条 grep**:`grep -n 'fixtures::' src/wallet/page.rs` —— 还有哪块界面在画 mock。
+   现在只剩"登录前的占位"和送/扫/加币三处(每处都在代码里点名了)。
+2. **第二条 grep**(每接完一台机器就跑):视图的判断字段 vs 壳读了什么。
+   差集里每一个 `warning`/`can_*`/`error`/`stale`/`notice` 都是核心替人算好、
+   屏幕却不说的一句话。phase 29 一次抓了十一个,其中三个关钱。
+3. **画稿与实景的分叉规矩**:有绑定=真控件,没绑定=画稿那一版
+   (滑块、授权 chip、菜单项、标签条、上限输入全走这条),
+   所以老画态永远"一个像素没动",而 `sweep-gallery.sh` 是它的证据。
 
-## ~~028 合并后要立刻做的~~ — **已并、六步已走完(phase 8,2026-09-07)**
+## GUI 自动化(这台机器上已验证)
 
-> `origin/main` = `61568f22`(PR #186)已并进本分支,`executor/contact_io.rs` 已删,
-> 分组字母归核心。详见上面的 **Phase 8**。下面这份原始清单留着当对照记录。
-> **注意**:029/030/031 仍未单独合并进 main;本分支现在既含它们也含 028。
-
-028 把联系人导入/导出的规则从桌面的 `executor/contact_io.rs` **提进了核心**
-(`app/contacts_io.rs`),并改了 `contacts.rs` 的事件与视图字段。rebase 到含 028 的 main 后:
-
-1. **编译断点(自报)**:`src/contacts/live.rs` 测试辅助函数手写的 `ContactsView` 字面量
-   要补 `import_failure: None, export: None, sections: Vec::new()`。
-2. **编译器看不见的语义偏差**:坏文件(非法 JSON、空表/无地址列的 CSV)在 web 上会被
-   **拒绝**(`ContactsView.import_failure: malformed_json | no_address_column | empty |
-   unknown_group`),在桌面上现在仍是"成功导入 0 条"。修法 = 把 `page.rs` 的
-   `import_contacts` / `export_contacts` 改成派发核心事件
-   `ImportFile { content, filename, into_group, now_ms }` / `ImportAcknowledged` /
-   `ExportRequested { scope, format, exported_at_iso }` / `ExportTaken`(导出文件在
-   `ContactsView.export` 里一次性出现,壳只负责存盘对话框),然后**删掉**
-   `executor/contact_io.rs` 及其测试。028 的 results.md Phase 6b 记了这条偏差,以这个切换为终点。
-3. 新事件 `add_group_members` / `remove_group_member` / `set_contact_groups`——桌面分组
-   的"添加成员"现在走哪条事件,切换时顺手核对。
-4. `send.rs`:`picked_address` 自己关选择器(本刀的 Dsd2e 监听已经"选中 + 关闭"双发,
-   新核心下第二个事件是空操作);`open()` 立刻把 `prefilled_recipient` 放进 `recipient`。
-5. **`rust/pkg-web` 会冲突**:028 重建了 wasm(`08aa37e9ddf9`),032 也重建过(`df236de771e0`)。
-   后合并的一方 `node rust/scripts/build-web.mjs` 重建入库即可,别手动合。028 不动 `ci.yml`。
-6. **分组字母归核心了**:`ContactsView.sections: Vec<ContactSection { letter, addresses }>`
-   (新 `app/contacts_initials.rs`,逐码点拼音首字母表:阿豪→A、妈妈→M、地址→#;A–Z 再 #)。
-   桌面 `contacts/live.rs` 自己的 `section_of` / `sections()` 归档规则应改读 `view.sections`
-   并删掉本地规则——同一个人不能在两端归到不同字母下。
-
-## 每次接手仍要跑的一条 grep
-
-```bash
-grep -n 'fixtures::' src/wallet/page.rs
-```
-本刀新增的 Dsd 臂全部走 `send_views(cx)` 门:有宿主读核心,没宿主画 mock;phase 5 后
-`FlowPanel::Dsd2c` 也读 `batch_view`。已登录能点到的界面里只剩 explore(等 web 引擎)
-和 DS1 扫码(等相机)在画 mock。
-
-**但 031 那条 grep 不够。** 它抓"还在画 mock 的界面";phase 6 抓到的是另一类——
-**界面是活的,却把核心算出的判断丢在地上**。第二条 grep,每接完一台机器就跑:
-
-```bash
-# 视图给了什么(判断字段) vs live 构造器读了什么
-grep -o "    pub [a-z_]*" ../../rust/crates/vela-core/src/app/<machine>.rs
-grep -o "view\.[a-z_]*\|send\.[a-z_]*\|option\.[a-z_]*" src/flows/live.rs | sort -u
-```
-差集里每一个 `warning` / `issue` / `failure` / `can_*` / `insufficient` /
-`*_error`,都是核心替人算好、屏幕却不说的一句话。phase 6 一次找出十六个,
-其中三个(余额警告、手续费币种不可选、文件读不出)直接影响钱。
+- 终端已获**辅助功能**权限,`CGEventPost` 可用;**但窗口不是 key 时只收 hover 不收 click**
+  ——先激活或对新开的窗口点。
+- **合成键盘事件全打成 'a'**(`CGEventKeyboardSetUnicodeString` + keycode 0),
+  中文/长名字要人真敲。
+- 截图:`screencapture -x -o -l <windowId>`;窗口 id 用 Quartz 列窗口按
+  `kCGWindowName == "Vela Wallet"` 找(启动时还有若干 30px 高的辅助窗口,别抓错)。
+- 本地 dApp 探针页在 `<scratchpad>/dapp/index.html` + `python3 -m http.server 8137`;
+  跑 app 用 `VELA_PARALLEL_SPACE=1 VELA_STATE_DIR=<scratchpad>/state`,
+  且**清掉代理变量**(`env -u all_proxy -u http_proxy -u https_proxy`)。
+  真网 pool 现在自己会绕开 loopback 代理(phase 31),但外网调用仍受代理影响。
+- **临时目录会被系统清掉**:state 没了就重新走一遍登录
+  ("I already have a wallet" → "This device",固定密钥集自动答签名)。
