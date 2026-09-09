@@ -8731,6 +8731,16 @@ impl WalletPage {
                 // which was four of the core's six, resolution included. A drawn
                 // swap under a true header is the worst thing this column can say.
                 model.blocks = signing_live::blocks(&host.clear_view, &host.facts, &self.signing);
+                // What the chain says it would MOVE, under what the site says
+                // it would do. Last, because it is the answer to everything
+                // above it — and the one part of this sheet a site cannot
+                // write.
+                model.blocks.extend(signing_live::sim_blocks(
+                    &host.sim,
+                    host.sim_unavailable,
+                    host.chain_id,
+                    &self.signing,
+                ));
                 // …and what the pipeline is doing, under it. Appended rather than
                 // mixed in: what this request IS comes first, what the wallet is
                 // doing about it second.

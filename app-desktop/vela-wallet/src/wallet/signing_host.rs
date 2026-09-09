@@ -92,6 +92,15 @@ pub struct SigningHost {
     channel: Arc<CeremonyChannel>,
     /// The core asked to close the column.
     pub closed: bool,
+    /// What the CHAIN says this request would move, judged by `token_trust`.
+    ///
+    /// Empty until the simulation answers, and empty forever when it cannot —
+    /// the sheet says so rather than showing an empty list as "nothing moves".
+    pub sim: Vec<vela_core::app::token_trust::TrustSimJudgment>,
+    /// The simulation was attempted and could not answer (no `eth_simulateV1`
+    /// on this endpoint, every RPC down, params refused). A different sentence
+    /// from "it ran and found nothing".
+    pub sim_unavailable: bool,
     /// The hash already handed to the tracker. The handoff stays on the view
     /// after it is taken, and the tracker merges by hash anyway, but handing
     /// the same submission over on every render is a poll nobody asked for.
@@ -116,6 +125,8 @@ impl SigningHost {
         let fee = CoreHost::<FeePolicy>::new();
         let fee_view = fee.view();
         let mut host = Self {
+            sim: Vec::new(),
+            sim_unavailable: false,
             origin: request.origin.clone(),
             chain_id: request.chain_id,
             facts: facts_of(&request),
@@ -210,6 +221,11 @@ impl SigningHost {
         if let Some(calls) =
             crate::executor::sign_request::calls_of(&request.method, &request.params_json)
         {
+            // And what it would DO. Asked of the chain, off the main thread,
+            // and judged by `token_trust` before anything reaches the screen —
+            // a simulation is untrusted input, so which deltas may carry a
+            // confident number is never this file's call.
+            self.simulate(request.chain_id, wallet.to_owned(), calls.clone(), cx);
             self.request_quote(request.chain_id, wallet.to_owned(), calls, cx);
         }
 
@@ -290,6 +306,48 @@ impl SigningHost {
     /// rendered — rather than re-asked. A second question would produce a
     /// second number, and the figure somebody agreed to would not be the
     /// figure that gets signed.
+    /// Ask the chain what these calls would move, then ask the core which of
+    /// the answer may be shown as a number.
+    ///
+    /// Both halves are blocking — an RPC round trip and a metadata multicall —
+    /// so both happen on the background executor and the result lands back
+    /// here through the entity, the way every other slow answer in this shell
+    /// does.
+    fn simulate(
+        &mut self,
+        chain_id: u32,
+        wallet: String,
+        calls: Vec<FeeCall>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |host, cx| {
+            let judged = cx
+                .background_executor()
+                .spawn(async move {
+                    let Some(deltas) = crate::executor::sim::simulate(&wallet, &calls, chain_id)
+                    else {
+                        return None;
+                    };
+                    Some(crate::executor::token_trust::judge(
+                        &wallet, chain_id, deltas,
+                    ))
+                })
+                .await;
+            host.update(cx, |host, cx| {
+                match judged {
+                    Some(judgments) => host.sim = judgments,
+                    // Could not ask. NOT "nothing moves" — the sheet has a
+                    // different sentence for each, and conflating them would
+                    // tell somebody a drain is a no-op.
+                    None => host.sim_unavailable = true,
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     pub fn approve(&mut self, cx: &mut Context<Self>) {
         let opts = approve_opts(&self.fee_view, &self.clear_view, &self.guard_view);
         self.dispatch_sign(SignEvent::ApproveTapped { opts }, cx);

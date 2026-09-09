@@ -62,6 +62,7 @@ pub mod send;
 /// The signing panel's seven operations.
 ///
 pub mod sign_request;
+pub mod sim;
 pub mod storage;
 pub mod token_trust;
 pub mod tracker;

@@ -141,6 +141,11 @@ pub struct SigningStrings {
     pub warn_best_effort: SharedString,
     pub warn_verified_abi: SharedString,
     pub warn_sim_unavailable: SharedString,
+    /// The two words the simulated balance block needs beyond its title: what
+    /// an unverified inflow is called (never its amount — a site can emit any
+    /// `Transfer` it likes), and what "it ran and nothing moved" reads as.
+    pub balance_unverified_token: SharedString,
+    pub sim_no_change: SharedString,
     pub warn_drain: SharedString,
     pub ok_self_transfer: SharedString,
     pub ok_no_network_fee: SharedString,
@@ -303,6 +308,8 @@ impl SigningStrings {
             warn_best_effort: s("bestEffortWarning"),
             warn_verified_abi: s("verifiedAbiWarning"),
             warn_sim_unavailable: s("simUnavailableWarning"),
+            balance_unverified_token: s("balanceUnverifiedToken"),
+            sim_no_change: s("simResultNoChange"),
             warn_drain: s("drainWarning"),
             ok_self_transfer: s("balanceSelfTransfer"),
             ok_no_network_fee: s("noNetworkFee"),

@@ -174,6 +174,14 @@ enum Request {
         address: String,
         reply: Sender<Vec<TrustIncomingView>>,
     },
+    /// Judge one simulation's deltas (spec 037). UNTRUSTED input, and the core
+    /// says so in its own header: this path can reach no write at all.
+    Judge {
+        address: String,
+        chain_id: u32,
+        deltas: Vec<vela_core::app::token_trust::TrustAssetDelta>,
+        reply: Sender<Vec<vela_core::app::token_trust::TrustSimJudgment>>,
+    },
 }
 
 static SESSION: OnceLock<Mutex<Sender<Request>>> = OnceLock::new();
@@ -270,6 +278,44 @@ pub fn poll(address: &str) -> Vec<TrustIncomingView> {
     answer.recv().unwrap_or_default()
 }
 
+/// Judge one simulation's deltas. **Blocks** — call it from a worker.
+///
+/// Which of these may be shown with a confident amount is the core's
+/// asymmetric rule (invariant ⑥): an OUTFLOW renders whenever metadata
+/// resolved, because the real token emits its own log and an outflow cannot be
+/// understated; an INFLOW renders a number only when the token is trusted,
+/// because a site can emit any `Transfer` it likes from a contract it controls.
+/// The shell asks and draws; it never decides which side of that line a token
+/// falls on.
+#[must_use]
+pub fn judge(
+    address: &str,
+    chain_id: u32,
+    deltas: Vec<vela_core::app::token_trust::TrustAssetDelta>,
+) -> Vec<vela_core::app::token_trust::TrustSimJudgment> {
+    if deltas.is_empty() {
+        return Vec::new();
+    }
+    let (reply, answer) = channel();
+    {
+        let Ok(tx) = sender().lock() else {
+            return Vec::new();
+        };
+        if tx
+            .send(Request::Judge {
+                address: address.to_owned(),
+                chain_id,
+                deltas,
+                reply,
+            })
+            .is_err()
+        {
+            return Vec::new();
+        }
+    }
+    answer.recv().unwrap_or_default()
+}
+
 fn run(rx: &std::sync::mpsc::Receiver<Request>) {
     let mut host = CoreHost::<TokenTrust>::new();
     while let Ok(request) = rx.recv() {
@@ -282,6 +328,26 @@ fn run(rx: &std::sync::mpsc::Receiver<Request>) {
                 let pending = host.dispatch(Event::PollRequested { address });
                 drain(&mut host, pending);
                 let _ = reply.send(host.view().incoming);
+            }
+            Request::Judge {
+                address,
+                chain_id,
+                deltas,
+                reply,
+            } => {
+                let pending = host.dispatch(Event::SimDeltasComputed {
+                    address,
+                    chain_id,
+                    deltas,
+                });
+                drain(&mut host, pending);
+                let _ = reply.send(
+                    host.view()
+                        .sim
+                        .filter(|sim| sim.ready)
+                        .map(|sim| sim.judgments)
+                        .unwrap_or_default(),
+                );
             }
         }
     }

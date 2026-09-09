@@ -101,6 +101,228 @@ pub fn blocks(clear: &ClearSigningView, facts: &RequestFacts, s: &SigningStrings
     }
 }
 
+/// What the CHAIN said this request would move — the one block on a signing
+/// sheet a malicious site cannot author.
+///
+/// Every other line starts as something the dApp claimed: its calldata, its
+/// intent, the token it names. This starts as the result of running the call.
+/// That is why the deeper degradation rungs promote it from a footnote to the
+/// protagonist, and why it earns a place even when it can only answer
+/// sometimes.
+///
+/// The asymmetry is the CORE's and is not re-decided here (its invariant ⑥):
+///
+/// - an **outflow** renders its amount whenever metadata resolved — the real
+///   token emits its own log, so what leaves cannot be understated;
+/// - an **inflow** renders a number only when the token is trusted. A site can
+///   emit any `Transfer` it likes from a contract it controls, so an
+///   unverified receipt shows its DIRECTION and its name and no figure at all.
+///
+/// `unavailable` is a different sentence from an empty list, and the
+/// difference is the whole point: "it ran and nothing moves" invites a
+/// signature, "it could not be checked" is the corpus's own advice to reject.
+#[must_use]
+pub fn sim_blocks(
+    judgments: &[vela_core::app::token_trust::TrustSimJudgment],
+    unavailable: bool,
+    chain_id: u32,
+    s: &SigningStrings,
+) -> Vec<Block> {
+    use vela_core::app::token_trust::TrustSimJudgment as J;
+
+    if unavailable {
+        return vec![Block::Warning {
+            tone: Tone::Danger,
+            text: s.warn_sim_unavailable.clone(),
+        }];
+    }
+    if judgments.is_empty() {
+        return Vec::new();
+    }
+
+    let native = vela_core::app::network_admin::BUILTIN_CHAINS
+        .iter()
+        .find(|chain| chain.chain_id == chain_id)
+        .map_or_else(|| "—".to_owned(), |chain| chain.native_symbol.to_owned());
+    let rows: Vec<(SharedString, SharedString, Tone)> = judgments
+        .iter()
+        .map(|judgment| match judgment {
+            J::Native { delta } => (
+                SharedString::from(native.clone()),
+                signed_amount(delta, 18),
+                delta_tone(delta),
+            ),
+            J::Erc20Trusted {
+                delta,
+                symbol,
+                decimals,
+                ..
+            } => (
+                SharedString::from(symbol.clone()),
+                signed_amount(delta, *decimals),
+                delta_tone(delta),
+            ),
+            // No attacker-controlled amount on screen. The direction is the
+            // core's and it is safe to state; the figure is not.
+            J::Erc20Unverified { delta, .. } => (
+                s.balance_unverified_token.clone(),
+                SharedString::from(if delta.starts_with('-') { "−" } else { "+" }),
+                Tone::Caution,
+            ),
+        })
+        .collect();
+
+    vec![Block::Balances {
+        title: s.balances_title.clone(),
+        rows,
+        note: None,
+        note_tone: Tone::Neutral,
+    }]
+}
+
+/// `−8,450` / `+2.1`, from a signed base-unit string.
+///
+/// The minus is U+2212, as everywhere else money is negative in this app.
+fn signed_amount(delta: &str, decimals: u32) -> SharedString {
+    let negative = delta.starts_with('-');
+    let digits = delta.trim_start_matches(['-', '+']);
+    let Ok(raw) = digits.parse::<f64>() else {
+        // Unparseable: the direction is still true, and a wrong number is
+        // worse than no number.
+        return SharedString::from(if negative { "−" } else { "+" });
+    };
+    #[allow(clippy::cast_possible_wrap, reason = "token decimals are small")]
+    let amount = raw / 10f64.powi(decimals as i32);
+    SharedString::from(format!(
+        "{}{}",
+        if negative { "\u{2212}" } else { "+" },
+        vela_core::l10n::number::format_token_amount(
+            amount,
+            vela_core::l10n::number::NumberPreset::CommaDot,
+            false,
+        )
+    ))
+}
+
+fn delta_tone(delta: &str) -> Tone {
+    if delta.starts_with('-') {
+        Tone::Neutral
+    } else {
+        Tone::Success
+    }
+}
+
+#[cfg(test)]
+mod sim_block_tests {
+    use super::*;
+    use vela_core::app::token_trust::TrustSimJudgment as J;
+
+    fn strings() -> SigningStrings {
+        SigningStrings::resolve(&crate::loc::Loc::from_env())
+    }
+
+    /// A swap, judged: what LEAVES carries its amount, what ARRIVES carries
+    /// one only because the core said the token is trusted.
+    #[test]
+    fn what_leaves_and_what_arrives_are_not_shown_the_same_way() {
+        let s = strings();
+        let blocks = sim_blocks(
+            &[
+                J::Erc20Trusted {
+                    token: "0xdd".to_owned(),
+                    delta: "-8450000000".to_owned(),
+                    symbol: "USDC".to_owned(),
+                    decimals: 6,
+                },
+                J::Erc20Trusted {
+                    token: "0xa0".to_owned(),
+                    delta: "2100000000000000000".to_owned(),
+                    symbol: "WETH".to_owned(),
+                    decimals: 18,
+                },
+            ],
+            false,
+            100,
+            &s,
+        );
+        let Some(Block::Balances { rows, .. }) = blocks.first() else {
+            unreachable!("a balances block");
+        };
+        assert_eq!(rows[0].0, "USDC");
+        assert_eq!(rows[0].1, "−8,450.00");
+        assert_eq!(rows[1].0, "WETH");
+        assert_eq!(rows[1].1, "+2.1");
+        assert_eq!(rows[1].2, Tone::Success);
+    }
+
+    /// An unverified inflow shows a DIRECTION and never a figure.
+    ///
+    /// This is the whole asymmetry: a site can emit any `Transfer` it likes
+    /// from a contract it controls, so "+1,000,000 SAFEMOON" on a signing
+    /// sheet would be the attacker writing the wallet's own reassurance.
+    #[test]
+    fn an_unverified_inflow_carries_no_number() {
+        let s = strings();
+        let blocks = sim_blocks(
+            &[J::Erc20Unverified {
+                token: Some("0xbad".to_owned()),
+                delta: "1000000000000000000000000".to_owned(),
+            }],
+            false,
+            100,
+            &s,
+        );
+        let Some(Block::Balances { rows, .. }) = blocks.first() else {
+            unreachable!("a balances block");
+        };
+        assert_eq!(rows[0].0, s.balance_unverified_token);
+        assert_eq!(rows[0].1, "+", "a direction, not an amount");
+        assert!(
+            !rows[0].1.contains('1'),
+            "no attacker digits: {}",
+            rows[0].1
+        );
+    }
+
+    /// "Could not check" and "checked, nothing moves" are different sentences,
+    /// and the difference is the point: one invites a signature, the other is
+    /// the corpus's own advice to reject.
+    #[test]
+    fn an_unavailable_simulation_is_not_an_empty_one() {
+        let s = strings();
+        let unavailable = sim_blocks(&[], true, 100, &s);
+        assert!(matches!(
+            unavailable.first(),
+            Some(Block::Warning {
+                tone: Tone::Danger,
+                ..
+            })
+        ));
+        // Nothing to say, so nothing is said — the sheet's other blocks are
+        // the transaction's account of itself.
+        assert!(sim_blocks(&[], false, 100, &s).is_empty());
+    }
+
+    /// The chain's own coin is named from the registry, not from a guess.
+    #[test]
+    fn a_native_move_is_named_by_its_chain() {
+        let s = strings();
+        let blocks = sim_blocks(
+            &[J::Native {
+                delta: "-10000000000000000".to_owned(),
+            }],
+            false,
+            100,
+            &s,
+        );
+        let Some(Block::Balances { rows, .. }) = blocks.first() else {
+            unreachable!("a balances block");
+        };
+        assert_eq!(rows[0].0, "xDAI", "Gnosis' own coin");
+        assert_eq!(rows[0].1, "−0.01");
+    }
+}
+
 /// The gas account cannot pay, drawn IN the sheet.
 ///
 /// The core's own note on this surface: "the in-sheet funding swap (BUG-1:
