@@ -1041,7 +1041,14 @@ function formatTokenAmount(
   const guess = guessTokenDecimals(chainId, tokenAddr);
   const decimals = guess.decimals;
   const verified = guess.verified && !tokenInvalid;
-  const display = formatTokenValue(amount, decimals);
+  // Unverified decimals means the magnitude is unknown, so no number is printed
+  // at all — the em dash this wallet already uses for "no figure here". A
+  // confident wrong number on the one line a person is being asked to judge is
+  // worse than an absence; the flag stays, and the shell that has a phrase for
+  // it says the phrase. The core made this ruling (`UNKNOWN_AMOUNT` in
+  // clear_signing.rs) and the resolve-parity test holds both implementations to
+  // the same string.
+  const display = verified ? formatTokenValue(amount, decimals) : UNKNOWN_AMOUNT;
   // Always show a token identifier — known symbol, abbreviated address, or "tokens"
   const symbol = tokenAddr
     ? (guessTokenSymbol(tokenAddr) ?? `${tokenAddr.slice(0, 6)}...`)
@@ -1065,6 +1072,9 @@ function formatTokenAmount(
     ...(usdValue != null ? { usdValue } : {}),
   };
 }
+
+/** What is printed where a magnitude cannot be computed — mirrors the core. */
+const UNKNOWN_AMOUNT = '—';
 
 /** USD pegged stablecoins we can value at ~$1 with no price lookup. */
 const STABLE_SYMBOLS = new Set(['USDC', 'USDT', 'DAI', 'USDC.e', 'USD₮0', 'BUSD', 'TUSD', 'USDP', 'FRAX', 'LUSD', 'GUSD', 'PYUSD']);

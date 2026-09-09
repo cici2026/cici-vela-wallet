@@ -174,7 +174,11 @@ describe('generated i18n resources', () => {
     // 22,863 = 22,848 plus 028 Phase 8's `history.deleteRecord` × 15: the
     // activity detail's delete, a record the feed tombstones (Expo's
     // swipe-to-delete had no word of its own — the row simply went).
-    expect(total).toBe(22_863);
+    // 22,878 = 22,863 plus 032 phase 25's `componentsUi.signing.amountUnknown`
+    // × 15: where a token's decimals cannot be read the core prints no number
+    // at all (an em dash), and a shell with words available says why the line
+    // is empty instead of leaving the dash to be read as a zero.
+    expect(total).toBe(22_878);
   });
 
   it('preserves load-bearing leading and trailing whitespace', () => {
