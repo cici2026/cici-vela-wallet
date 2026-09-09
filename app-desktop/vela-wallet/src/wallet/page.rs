@@ -177,6 +177,27 @@ enum ContactsMenu {
     /// Spec 032 phase 40 — right-click on a row in Recent. The only way to
     /// reach the core's `DeleteOrigin`, which forgets ONE site.
     Recent,
+    /// Spec 032 phase 41 — "move to a group", listing the person's own
+    /// groups. A menu rather than a new picker component: the question is
+    /// "which of these", which is what a menu is.
+    MoveGroup,
+}
+
+/// What the explore name dialog is asking for.
+#[derive(Clone, Debug)]
+enum ExploreAsk {
+    /// Rename the favourite at this origin.
+    RenameFavorite { origin: String },
+    /// Name a new group. `then_add` is the favourite that opened the picker,
+    /// which is dropped into the group the moment it exists — a person who
+    /// went "move to → new group" meant both halves.
+    NewGroup { then_add: Option<String> },
+}
+
+#[derive(Clone, Debug)]
+struct ExploreForm {
+    ask: ExploreAsk,
+    text: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -343,6 +364,13 @@ pub struct WalletPage {
     signing_host: Option<gpui::Entity<crate::wallet::signing_host::SigningHost>>,
     /// Which favourite the open tile menu is about.
     menu_origin: Option<String>,
+    /// The explore name dialog: renaming a tile, or naming a new group.
+    ///
+    /// One dialog for both, as the contacts one is for its two questions —
+    /// they ask the same thing and differ only in which event takes the
+    /// answer.
+    explore_form: Option<ExploreForm>,
+    explore_form_focus: gpui::FocusHandle,
     /// The cap field's focus, kept on the page so typing survives a redraw.
     cap_focus: FocusHandle,
     /// What the open page last called itself, from the bridge's own report.
@@ -614,6 +642,8 @@ impl WalletPage {
             #[cfg(not(target_os = "linux"))]
             signing_host: None,
             menu_origin: None,
+            explore_form: None,
+            explore_form_focus: cx.focus_handle(),
             browser_title: None,
             cap_focus: cx.focus_handle(),
             #[cfg(not(target_os = "linux"))]
@@ -698,6 +728,190 @@ impl WalletPage {
     /// be able to sign in with from anywhere else yet, which is the one fact
     /// that should give someone pause — so the dialog does not open until the
     /// core has the answer.
+    /// The explore name sheet — renaming a tile, and naming a new group.
+    ///
+    /// The contacts dialog's twin, deliberately: same card, same field, same
+    /// two buttons. Two dialogs that ask for a name should not look like two
+    /// different questions.
+    fn explore_form_dialog(
+        &mut self,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let form = self.explore_form.clone()?;
+        let e = &self.explore;
+        let c = &self.contacts;
+        let title = match form.ask {
+            ExploreAsk::RenameFavorite { .. } => e.rename.clone(),
+            ExploreAsk::NewGroup { .. } => e.new_group.clone(),
+        };
+        // A name that is only spaces is not a name — the core refuses it, and
+        // an armed Save that the core would drop is a button that lies.
+        let can_save = !form.text.trim().is_empty();
+        let hover_accent = theme.accent_hover;
+        let focus = self.explore_form_focus.clone();
+        let strings = crate::ui::NameFieldStrings {
+            label: title.clone(),
+            placeholder: SharedString::from(""),
+            helper: SharedString::from(""),
+            too_long_hint: SharedString::from(""),
+        };
+        let cancel = c.cancel.clone();
+        let save_label = c.save.clone();
+
+        let card = div()
+            .w(px(400.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(28.))
+            .rounded(px(20.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border_card)
+            .child(
+                div()
+                    .text_size(theme::text_panel_title())
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_base)
+                    .child(title),
+            )
+            .child(crate::ui::text_field(
+                "explore-form-name",
+                theme,
+                &strings,
+                &form.text,
+                false,
+                false,
+                &focus,
+                window,
+                {
+                    let page = cx.entity();
+                    move |text: String, _: &mut Window, cx: &mut gpui::App| {
+                        page.update(cx, |this: &mut Self, cx| {
+                            if let Some(form) = this.explore_form.as_mut() {
+                                form.text = text.clone();
+                            }
+                            cx.notify();
+                        });
+                    }
+                },
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .id("explore-form-cancel")
+                            .flex_1()
+                            .h(px(CONTACTS_BUTTON_H))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .border_1()
+                            .border_color(theme.outline_strong)
+                            .text_size(theme::text_row_title())
+                            .text_color(theme.fg_base)
+                            .child(cancel)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.explore_form = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child({
+                        let save = div()
+                            .id("explore-form-save")
+                            .flex_1()
+                            .h(px(CONTACTS_BUTTON_H))
+                            .rounded(px(12.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(theme::text_row_title())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(save_label);
+                        if can_save {
+                            save.cursor_pointer()
+                                .bg(theme.accent)
+                                .hover(move |el| el.bg(hover_accent))
+                                .text_color(theme.fg_inverse)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_explore_form(cx)))
+                        } else {
+                            save.bg(theme.bg_sunken).text_color(theme.fg_subtle)
+                        }
+                    }),
+            );
+
+        Some(
+            div()
+                .id("explore-form-scrim")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.bg_base.opacity(0.55))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// Take the typed name and give it to whichever machine asked.
+    ///
+    /// A new group made from "move to a group" also TAKES the tile: somebody
+    /// who went that way meant both halves, and leaving the group empty would
+    /// make them do the second half again.
+    fn save_explore_form(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.explore_form.take() else {
+            return;
+        };
+        let name = form.text.trim().to_owned();
+        let resident = resident::resident::<ExploreSites>(cx);
+        match form.ask {
+            ExploreAsk::RenameFavorite { origin } => {
+                resident.update(cx, |resident, cx| {
+                    resident.dispatch(
+                        vela_core::app::explore_sites::Event::FavoriteRenamed { origin, name },
+                        cx,
+                    );
+                });
+            }
+            ExploreAsk::NewGroup { then_add } => {
+                resident.update(cx, |resident, cx| {
+                    resident.dispatch(
+                        vela_core::app::explore_sites::Event::GroupCreated {
+                            name,
+                            now_ms: crate::executor::now_ms(),
+                        },
+                        cx,
+                    );
+                });
+                // The id is the core's, so it is read back rather than
+                // guessed: the machine makes it unique against what exists.
+                if let Some(origin) = then_add
+                    && let Some(id) = resident
+                        .read(cx)
+                        .view()
+                        .groups
+                        .last()
+                        .map(|group| group.id.clone())
+                {
+                    resident.update(cx, |resident, cx| {
+                        resident.dispatch(
+                            vela_core::app::explore_sites::Event::GroupMemberAdded { id, origin },
+                            cx,
+                        );
+                    });
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// The group name sheet — 新建分组 and 重命名分组.
     ///
     /// One dialog for both, because they ask the same question and the core
@@ -8113,6 +8327,59 @@ impl WalletPage {
                     cx.notify();
                 })) as contacts_components::MenuAction),
             ],
+            // "Move to a group": the person's own groups, newest last, with
+            // "new group" at the top. The index is the position in the SAME
+            // list the menu was built from — read again here rather than
+            // captured, so a group made in between cannot shift the answer.
+            ContactsMenu::MoveGroup => {
+                let ids: Vec<String> = resident::resident::<ExploreSites>(cx)
+                    .read(cx)
+                    .view()
+                    .groups
+                    .iter()
+                    .map(|group| group.id.clone())
+                    .collect();
+                let mut actions: Vec<Option<contacts_components::MenuAction>> = vec![Some(
+                    Box::new(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        // Name it first; the tile joins it the moment it
+                        // exists.
+                        let origin = this.menu_origin.take();
+                        this.menu = None;
+                        this.explore_form = Some(ExploreForm {
+                            ask: ExploreAsk::NewGroup { then_add: origin },
+                            text: String::new(),
+                        });
+                        window.focus(&this.explore_form_focus, cx);
+                        cx.notify();
+                    })) as contacts_components::MenuAction,
+                )];
+                for id in ids {
+                    actions.push(Some(Box::new(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            let origin = this.menu_origin.take();
+                            this.menu = None;
+                            if let Some(origin) = origin {
+                                resident::resident::<ExploreSites>(cx).update(
+                                    cx,
+                                    |resident, cx| {
+                                        resident.dispatch(
+                                        vela_core::app::explore_sites::Event::GroupMemberAdded {
+                                            id: id.clone(),
+                                            origin,
+                                        },
+                                        cx,
+                                    );
+                                    },
+                                );
+                            }
+                            cx.notify();
+                        },
+                    ))
+                        as contacts_components::MenuAction));
+                }
+                actions
+            }
+
             // A row in Recent: open it in a new tab, pin it, or forget it.
             // All three belong to a core — the tabs', the favourites' and the
             // history's — which is why this menu could be armed the day it
@@ -8179,9 +8446,72 @@ impl WalletPage {
             // and a new tab needs the strip (still owed) — all three stay
             // drawn and inert rather than armed and lying.
             ContactsMenu::Tile => vec![
-                None,
-                None,
-                None,
+                // Open in a new tab — the strip exists now (phase 37).
+                Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                    let origin = this.menu_origin.take();
+                    this.menu = None;
+                    let entry = origin.and_then(|origin| {
+                        resident::resident::<ExploreSites>(cx)
+                            .read(cx)
+                            .view()
+                            .favorites
+                            .iter()
+                            .find(|site| site.origin == origin)
+                            .map(|site| (site.url.clone(), site.name.clone()))
+                    });
+                    if let Some((url, title)) = entry {
+                        resident::resident::<ExploreSites>(cx).update(cx, |resident, cx| {
+                            resident.dispatch(
+                                vela_core::app::explore_sites::Event::TabOpened {
+                                    url: Some(url.clone()),
+                                    title: Some(title),
+                                    now_ms: crate::executor::now_ms(),
+                                },
+                                cx,
+                            );
+                        });
+                        this.browsing = true;
+                        this.browser_home = url.clone();
+                        #[cfg(not(target_os = "linux"))]
+                        crate::webview::navigate(&url);
+                    }
+                    cx.notify();
+                })) as contacts_components::MenuAction),
+                // Rename — the tile's own name, which the core then keeps
+                // against every later visit.
+                Some(
+                    Box::new(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                        let origin = this.menu_origin.take();
+                        this.menu = None;
+                        if let Some(origin) = origin {
+                            let current = resident::resident::<ExploreSites>(cx)
+                                .read(cx)
+                                .view()
+                                .favorites
+                                .iter()
+                                .find(|site| site.origin == origin)
+                                .map(|site| site.name.clone())
+                                .unwrap_or_default();
+                            this.explore_form = Some(ExploreForm {
+                                ask: ExploreAsk::RenameFavorite { origin },
+                                // Prefilled with what it is called now: a
+                                // rename usually edits a name rather than
+                                // replacing it.
+                                text: current,
+                            });
+                            window.focus(&this.explore_form_focus, cx);
+                        }
+                        cx.notify();
+                    })) as contacts_components::MenuAction,
+                ),
+                // Move to a group — the picker, which keeps the origin.
+                Some(
+                    Box::new(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                        this.menu =
+                            Some((ContactsMenu::MoveGroup, event.position(), Anchor::TopLeft));
+                        cx.notify();
+                    })) as contacts_components::MenuAction,
+                ),
                 Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                     let origin = this.menu_origin.take();
                     this.menu = None;
@@ -8206,6 +8536,16 @@ impl WalletPage {
             ContactsMenu::Group => contacts_fixtures::group_context(&self.contacts),
             ContactsMenu::Site => explore_fixtures::site_menu(&self.explore),
             ContactsMenu::Recent => explore_fixtures::recent_menu(&self.explore),
+            ContactsMenu::MoveGroup => explore_fixtures::group_pick_menu(
+                &self.explore,
+                &resident::resident::<ExploreSites>(cx)
+                    .read(cx)
+                    .view()
+                    .groups
+                    .iter()
+                    .map(|group| group.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
             ContactsMenu::Tile => explore_fixtures::tile_menu(&self.explore),
         };
         let actions = self.menu_actions(kind, cx);
@@ -8302,6 +8642,7 @@ impl Render for WalletPage {
         let import_result = self.import_result_dialog(&theme, cx);
         let contact_form = self.contact_form_dialog(&theme, window, cx);
         let group_form = self.group_form_dialog(&theme, window, cx);
+        let explore_form = self.explore_form_dialog(&theme, window, cx);
         let mut root = div()
             .size_full()
             .relative()
@@ -8329,6 +8670,9 @@ impl Render for WalletPage {
         }
         if let Some(contact_form) = contact_form {
             root = root.child(contact_form);
+        }
+        if let Some(explore_form) = explore_form {
+            root = root.child(explore_form);
         }
         if let Some(group_form) = group_form {
             root = root.child(group_form);

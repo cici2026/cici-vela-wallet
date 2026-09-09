@@ -299,6 +299,34 @@ pub fn demo_page() -> DemoPage {
 
 /// DE2's right-click menu on a favourite tile, and the toolbar's ⋯ site menu
 /// (M3). Both ride the spec-018 menu card rather than growing a second one.
+/// "Move to a group": make one, or pick one that exists (spec 032 phase 41).
+///
+/// A menu rather than a new picker: the question is "which of these", which is
+/// what a menu already is. `new group` is FIRST because a wallet with no
+/// groups yet must still be able to start one — the empty list is the common
+/// case on the first use, and a menu whose only item is unreachable is a dead
+/// end.
+pub fn group_pick_menu(strings: &ExploreStrings, groups: &[String]) -> MenuModel {
+    let mut items = vec![MenuItemModel {
+        icon: Icon::FolderPlus,
+        label: strings.new_group.clone(),
+        destructive: false,
+    }];
+    for name in groups {
+        items.push(MenuItemModel {
+            // The same glyph the "new group" item carries: these are the
+            // same kind of thing, and this shell has one folder icon.
+            icon: Icon::FolderPlus,
+            label: SharedString::from(name.clone()),
+            destructive: false,
+        });
+    }
+    MenuModel {
+        divider_after: (!groups.is_empty()).then_some(0),
+        items,
+    }
+}
+
 /// The menu on a row in Recent (spec 032 phase 40).
 ///
 /// History rows had no menu on any client, so the core's `DeleteOrigin` — one
