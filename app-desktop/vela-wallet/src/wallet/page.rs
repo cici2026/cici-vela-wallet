@@ -479,6 +479,8 @@ pub struct WalletPage {
     /// The request sink is installed once per page, not once per frame.
     #[cfg(not(target_os = "linux"))]
     dapp_requests_armed: bool,
+    /// `VELA_BROWSER_URL` is applied once, not on every frame the column draws.
+    browser_url_pinned: bool,
     send_amount_focus: gpui::FocusHandle,
     send_recipient_focus: gpui::FocusHandle,
     /// DSD2cL, live: the rate field's focus.
@@ -856,6 +858,7 @@ impl WalletPage {
             browser_host: None,
             #[cfg(not(target_os = "linux"))]
             dapp_requests_armed: false,
+            browser_url_pinned: false,
             send_amount_focus: cx.focus_handle(),
             send_recipient_focus: cx.focus_handle(),
             send_rate_focus: cx.focus_handle(),
@@ -7444,6 +7447,33 @@ impl WalletPage {
             .map(|entry| (entry.url.clone(), entry.title.clone()))
     }
 
+    /// `VELA_BROWSER_URL=<url>` opens the in-app browser straight onto a site.
+    ///
+    /// Same env-pin family as `VELA_SCAN_FILE`, and the same reason: the
+    /// address bar is a text field, and a headless run — or any screenshot
+    /// pass on a machine where synthetic keystrokes do not land — can never
+    /// type into one. Without this, the whole dApp path (inject → connect →
+    /// signing sheet) can only ever be verified by a person with a keyboard.
+    ///
+    /// Applied once, on the first frame the browser column draws.
+    fn browser_url_from_env(&mut self, cx: &mut Context<Self>) {
+        if self.browser_url_pinned {
+            return;
+        }
+        self.browser_url_pinned = true;
+        let Ok(url) = std::env::var("VELA_BROWSER_URL") else {
+            return;
+        };
+        if url.trim().is_empty() {
+            return;
+        }
+        self.browsing = true;
+        self.browser_home = url.clone();
+        #[cfg(not(target_os = "linux"))]
+        crate::webview::navigate(&url);
+        cx.notify();
+    }
+
     /// Show the tab somebody picked.
     ///
     /// One webview, so a switch is a navigation. A tab with no url is the
@@ -7503,6 +7533,9 @@ impl WalletPage {
     /// the page being browsed. The start page is the same vocabulary the phone
     /// draws — favourites grid, groups of rows — at desktop width.
     fn explore_content(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Div {
+        if self.identity.is_some() {
+            self.browser_url_from_env(cx);
+        }
         let browsing = self.browsing;
         // The person's own tabs once they are signed in. ONE webview serves
         // them all, so switching re-navigates rather than swapping a live
