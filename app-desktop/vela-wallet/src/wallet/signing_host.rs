@@ -193,24 +193,15 @@ impl SigningHost {
 
         // What it does. A transaction decodes from its call; typed data and a
         // plain message are their own rungs of the same ladder.
-        let clear = match request.method.as_str() {
-            "eth_sendTransaction" | "wallet_sendCalls" => {
-                let call = first_call(&request.params_json);
-                Some(ClearEvent::ResolveTransaction {
-                    to: call.as_ref().and_then(|c| c.0.clone()),
-                    data: call.as_ref().and_then(|c| c.1.clone()),
-                    value: call.and_then(|c| c.2),
-                    chain_id: request.chain_id,
-                    locale: vela_core::app::clear_signing::ClearLocale::default(),
-                })
-            }
-            "eth_signTypedData_v4" | "eth_signTypedData" => Some(ClearEvent::ResolveTypedData {
-                typed_data_json: typed_data_of(&request.params_json),
-                chain_id: request.chain_id,
-                locale: vela_core::app::clear_signing::ClearLocale::default(),
-            }),
-            _ => None,
-        };
+        let clear = clear_kickoff(
+            &request.method,
+            &request.params_json,
+            request.chain_id,
+            // The BROWSER's fact about who is asking, never the page's claim
+            // — an empty origin is no origin, which is what the SIWE binding
+            // check treats as unbindable rather than as a match.
+            Some(request.origin.clone()).filter(|origin| !origin.is_empty()),
+        );
         if let Some(event) = clear {
             self.dispatch_clear(event, cx);
         }
@@ -572,6 +563,76 @@ fn facts_of(request: &IncomingRequest) -> crate::signing::live::RequestFacts {
 
 /// A batch decodes from its first leg today, which is what the phone's sheet
 /// shows too; the per-leg panorama (CS26) is a drawn state nobody has wired.
+/// Which rung of the clear-signing ladder a request climbs.
+///
+/// Four methods, three surfaces — and the fourth, `personal_sign`, was the one
+/// this shell never named. The comment above the old match said "typed data
+/// and a plain message are their own rungs of the same ladder" while the match
+/// had no arm for the message: a dApp asking somebody to sign a login had its
+/// text, its SIWE fields, its domain binding and its danger class all computed
+/// by the core and then thrown away, because nothing started the machine.
+///
+/// `eth_sign` is deliberately its own method and NOT the calm message view:
+/// it signs an OPAQUE hash, and the core gives it the hard-warning surface
+/// (its own note, from `SigningSheet.tsx:465-470`).
+///
+/// A function rather than an inline match so the mapping can be tested without
+/// a window, a transport or a dApp.
+#[must_use]
+pub fn clear_kickoff(
+    method: &str,
+    params_json: &str,
+    chain_id: u32,
+    origin: Option<String>,
+) -> Option<ClearEvent> {
+    use vela_core::app::clear_signing::{ClearLocale, ClearSignMethod};
+    match method {
+        "eth_sendTransaction" | "wallet_sendCalls" => {
+            let call = first_call(params_json);
+            Some(ClearEvent::ResolveTransaction {
+                to: call.as_ref().and_then(|c| c.0.clone()),
+                data: call.as_ref().and_then(|c| c.1.clone()),
+                value: call.and_then(|c| c.2),
+                chain_id,
+                locale: ClearLocale::default(),
+            })
+        }
+        "eth_signTypedData_v4" | "eth_signTypedData" => Some(ClearEvent::ResolveTypedData {
+            typed_data_json: typed_data_of(params_json),
+            chain_id,
+            locale: ClearLocale::default(),
+        }),
+        "personal_sign" | "eth_sign" => Some(ClearEvent::MessagePresented {
+            method: if method == "eth_sign" {
+                ClearSignMethod::EthSign
+            } else {
+                ClearSignMethod::PersonalSign
+            },
+            // The params AS SENT. The core does the hex/text split, the SIWE
+            // parse and the binding check; a shell that pre-decoded here would
+            // be deciding what the person is being shown.
+            params: string_params(params_json),
+            request_origin: origin,
+        }),
+        _ => None,
+    }
+}
+
+/// A request's params as the strings the site sent, in order.
+///
+/// Anything that is not a string is dropped rather than stringified: the
+/// message machine reads `params[0]`/`params[1]` positionally, and an object
+/// coerced into that list would shift the message and the address by one.
+fn string_params(params_json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(params_json)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.as_str().map(str::to_owned))
+        .collect()
+}
+
 fn first_call(params_json: &str) -> Option<(Option<String>, Option<String>, Option<String>)> {
     let params: serde_json::Value = serde_json::from_str(params_json).ok()?;
     let first = params.get(0)?;
@@ -673,6 +734,91 @@ mod tests {
         assert_eq!(typed_data_of(object), r#"{"primaryType":"Permit"}"#);
 
         assert_eq!(typed_data_of("[]"), "", "nothing to decode is not a panic");
+    }
+}
+
+#[cfg(test)]
+mod kickoff_tests {
+    use super::*;
+    use vela_core::app::clear_signing::ClearSignMethod;
+
+    /// Every method this sheet can be opened with reaches its own rung.
+    ///
+    /// `personal_sign` is the one that did not. The core computes a message's
+    /// text, its SIWE fields, its domain binding and its danger class — and
+    /// this shell drew all of it (`ClearSurface::MessageSign` has rendered
+    /// since spec 022) while never starting the machine that fills it. A
+    /// person asked to sign a login saw the raw request instead of the
+    /// analysis of it.
+    #[test]
+    fn a_plain_message_reaches_the_message_rung() {
+        let params = r#"["0x48656c6c6f","0xabc"]"#;
+        match clear_kickoff(
+            "personal_sign",
+            params,
+            1,
+            Some("https://app.uniswap.org".into()),
+        ) {
+            Some(ClearEvent::MessagePresented {
+                method,
+                params,
+                request_origin,
+            }) => {
+                assert_eq!(method, ClearSignMethod::PersonalSign);
+                // As sent, in order: the machine reads them positionally.
+                assert_eq!(params, vec!["0x48656c6c6f", "0xabc"]);
+                assert_eq!(request_origin.as_deref(), Some("https://app.uniswap.org"));
+            }
+            other => unreachable!("a message, not {other:?}"),
+        }
+    }
+
+    /// `eth_sign` signs an OPAQUE hash, so it is its own method and gets the
+    /// hard warning — never the calm message view.
+    #[test]
+    fn eth_sign_is_not_the_calm_view() {
+        match clear_kickoff("eth_sign", r#"["0xabc","0xdead"]"#, 1, None) {
+            Some(ClearEvent::MessagePresented { method, .. }) => {
+                assert_eq!(method, ClearSignMethod::EthSign);
+            }
+            other => unreachable!("a message, not {other:?}"),
+        }
+    }
+
+    /// The other rungs still go where they went, and an unknown method starts
+    /// nothing rather than guessing a surface.
+    #[test]
+    fn the_other_rungs_are_unchanged() {
+        assert!(matches!(
+            clear_kickoff("eth_sendTransaction", "[]", 100, None),
+            Some(ClearEvent::ResolveTransaction { .. })
+        ));
+        assert!(matches!(
+            clear_kickoff("eth_signTypedData_v4", "[]", 1, None),
+            Some(ClearEvent::ResolveTypedData { .. })
+        ));
+        assert!(clear_kickoff("eth_chainId", "[]", 1, None).is_none());
+    }
+
+    /// A params list that is not all strings loses the non-strings rather than
+    /// stringifying them: the machine reads `params[0]` and `params[1]` by
+    /// POSITION, and an object coerced into that list would shift the message
+    /// and the address by one.
+    #[test]
+    fn only_strings_survive_the_params_list() {
+        let mixed = r#"["0x48656c6c6f",{"junk":1},"0xabc"]"#;
+        match clear_kickoff("personal_sign", mixed, 1, None) {
+            Some(ClearEvent::MessagePresented { params, .. }) => {
+                assert_eq!(params, vec!["0x48656c6c6f", "0xabc"]);
+            }
+            other => unreachable!("a message, not {other:?}"),
+        }
+        // Not a list at all: no params, still a message — the core's own
+        // refusal is better than a shell that declines to open the sheet.
+        match clear_kickoff("personal_sign", "{}", 1, None) {
+            Some(ClearEvent::MessagePresented { params, .. }) => assert!(params.is_empty()),
+            other => unreachable!("a message, not {other:?}"),
+        }
     }
 }
 
