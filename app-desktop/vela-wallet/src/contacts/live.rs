@@ -41,22 +41,24 @@ fn display_name(contact: &Contact) -> SharedString {
         )
 }
 
-/// The membership set one tap produces: every group this contact is in, with
-/// the tapped one flipped.
+/// The set one tap produces: everything currently in it, with the tapped key
+/// flipped.
 ///
-/// The core offers one event (`SetContactGroups`, carrying the WHOLE set), so
-/// "add to this group" and "take out of this group" are the same call with a
-/// different answer. Written here rather than inline in the menu's closure
-/// because the thing that goes wrong is silent: a toggle that rebuilt the set
-/// from the tapped group alone would take the contact out of every OTHER group
-/// it is in, and the screen that shows those groups is the one being covered
-/// by the menu.
+/// Both directions of group membership go through this. The core offers ONE
+/// event for each — `SetContactGroups` (which groups hold this contact) and
+/// `SetGroupMembers` (which contacts this group holds) — and both carry the
+/// WHOLE set, so "add" and "remove" are the same call with a different answer.
+///
+/// Written here rather than inline in the menus because the thing that goes
+/// wrong is silent: a toggle that rebuilt the set from the tapped key alone
+/// would empty every OTHER membership, and the menu is covering the rows that
+/// would have shown it.
 #[must_use]
-pub fn groups_after_toggle(groups: &[(String, bool)], tapped: &str) -> Vec<String> {
-    groups
+pub fn set_after_toggle(current: &[(String, bool)], tapped: &str) -> Vec<String> {
+    current
         .iter()
-        .filter(|(id, member)| if id == tapped { !member } else { *member })
-        .map(|(id, _)| id.clone())
+        .filter(|(key, member)| if key == tapped { !member } else { *member })
+        .map(|(key, _)| key.clone())
         .collect()
 }
 
@@ -307,23 +309,20 @@ mod tests {
         ];
 
         // Joining one: the two it was already in survive.
-        let joined = groups_after_toggle(&groups, "payroll");
+        let joined = set_after_toggle(&groups, "payroll");
         assert_eq!(joined, vec!["family", "payroll", "friends"]);
 
         // Leaving one: only that one goes.
-        let left = groups_after_toggle(&groups, "family");
+        let left = set_after_toggle(&groups, "family");
         assert_eq!(left, vec!["friends"]);
 
         // Leaving the last one is an empty set, not "leave it alone" — the
         // core reads the set it is given.
         let one = vec![("family".to_owned(), true)];
-        assert!(groups_after_toggle(&one, "family").is_empty());
+        assert!(set_after_toggle(&one, "family").is_empty());
 
         // A group nobody tapped changes nothing.
-        assert_eq!(
-            groups_after_toggle(&groups, "nope"),
-            vec!["family", "friends"]
-        );
+        assert_eq!(set_after_toggle(&groups, "nope"), vec!["family", "friends"]);
     }
 
     /// A contact saved without a name shows the identity the core resolved for

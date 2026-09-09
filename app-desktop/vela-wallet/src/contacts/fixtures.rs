@@ -329,18 +329,26 @@ pub fn contact_context(s: &ContactsStrings) -> MenuModel {
 /// the WHOLE membership back (`SetContactGroups`), which is the event the core
 /// offers and the shape it normalises.
 pub fn contact_group_pick(groups: &[(SharedString, bool)]) -> MenuModel {
+    pick_menu(groups, Icon::UsersRound)
+}
+
+/// Which contacts this group holds — the same menu the other way round.
+///
+/// One shape for both directions, because they are one question asked from two
+/// screens, and two shapes would be two places to get the tick wrong.
+pub fn group_member_pick(contacts: &[(SharedString, bool)]) -> MenuModel {
+    pick_menu(contacts, Icon::UserRoundPlus)
+}
+
+fn pick_menu(rows: &[(SharedString, bool)], unpicked: Icon) -> MenuModel {
     MenuModel {
         divider_after: None,
-        items: groups
+        items: rows
             .iter()
             .map(|(name, member)| MenuItemModel {
-                // The tick IS the state. `UsersRound` for a group this contact
-                // is not in yet, `Check` for one it is.
-                icon: if *member {
-                    Icon::Check
-                } else {
-                    Icon::UsersRound
-                },
+                // The tick IS the state: `Check` for a row that is in the set,
+                // the neutral glyph for one that is not.
+                icon: if *member { Icon::Check } else { unpicked },
                 label: name.clone(),
                 destructive: false,
             })

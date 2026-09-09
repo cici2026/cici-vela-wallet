@@ -188,6 +188,9 @@ enum ContactsMenu {
     /// Spec 034 — right-click on a contact row. Drawn since spec 018, opened
     /// by nothing until now.
     Contact,
+    /// Spec 034 — which contacts this group holds, ticked. The same question
+    /// as `ContactGroups`, asked from the group's screen.
+    GroupMembers,
     /// Spec 034 — which groups this contact is in, ticked. A menu rather than
     /// a dialog for the same reason the explore one is: the question is
     /// "which of these", and the answer is visible on every row.
@@ -2513,6 +2516,28 @@ impl WalletPage {
             .collect()
     }
 
+    /// Every contact, and whether the open group holds it.
+    ///
+    /// The book's own order, so the menu reads like the list behind it.
+    fn group_member_state(&mut self, cx: &mut Context<Self>) -> Vec<(SharedString, bool)> {
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        let Some(group) = self.group.and_then(|index| view.groups.get(index)) else {
+            return Vec::new();
+        };
+        let members: Vec<String> = group
+            .members
+            .iter()
+            .map(|member| member.address.to_lowercase())
+            .collect();
+        contacts_live::rows(&view)
+            .into_iter()
+            .map(|row| {
+                let address = row.address_full.to_string().to_lowercase();
+                (row.name.clone(), members.contains(&address))
+            })
+            .collect()
+    }
+
     /// Tell the hero which accounts are on screen — once per opening.
     ///
     /// The core fetches a total for each while the switcher is open and stops
@@ -2863,12 +2888,21 @@ impl WalletPage {
         }
         column
             .child(row_divider(theme))
-            .child(ghost_add_row(
-                "group-add-member",
-                theme,
-                &mut self.icons,
-                add_member,
-            ))
+            // 添加成员 has been drawn on this screen since spec 018 with no
+            // listener — the other half of the membership question phase 2
+            // answered from the contact's side.
+            .child(
+                ghost_add_row("group-add-member", theme, &mut self.icons, add_member).on_click(
+                    cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
+                        this.menu = Some((
+                            ContactsMenu::GroupMembers,
+                            event.position(),
+                            Anchor::TopLeft,
+                        ));
+                        cx.notify();
+                    }),
+                ),
+            )
             .child(
                 div()
                     .pt(px(12.))
@@ -9496,12 +9530,60 @@ impl WalletPage {
                         Some(
                             Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
                                 this.menu = None;
-                                let group_ids = contacts_live::groups_after_toggle(&groups, &id);
+                                let group_ids = contacts_live::set_after_toggle(&groups, &id);
                                 resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
                                     resident.dispatch(
                                         ContactEvent::SetContactGroups {
                                             address: address.clone(),
                                             group_ids,
+                                        },
+                                        cx,
+                                    );
+                                });
+                                cx.notify();
+                            })) as contacts_components::MenuAction,
+                        )
+                    })
+                    .collect()
+            }
+
+            // The same toggle from the group's side. One tap sends the whole
+            // membership back — `SetGroupMembers` carries the set, and the
+            // core normalises it.
+            ContactsMenu::GroupMembers => {
+                let view = resident::resident::<Contacts>(cx).read(cx).view();
+                let Some(group) = self.group.and_then(|index| view.groups.get(index)) else {
+                    return Vec::new();
+                };
+                let id = group.id.clone();
+                let members: Vec<String> = group
+                    .members
+                    .iter()
+                    .map(|member| member.address.to_lowercase())
+                    .collect();
+                let current: Vec<(String, bool)> = contacts_live::rows(&view)
+                    .into_iter()
+                    .map(|row| {
+                        let address = row.address_full.to_string();
+                        let member = members.contains(&address.to_lowercase());
+                        (address, member)
+                    })
+                    .collect();
+                current
+                    .iter()
+                    .map(|(address, _)| {
+                        let id = id.clone();
+                        let address = address.clone();
+                        let current = current.clone();
+                        Some(
+                            Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.menu = None;
+                                let members = contacts_live::set_after_toggle(&current, &address);
+                                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                                    resident.dispatch(
+                                        ContactEvent::SetGroupMembers {
+                                            id: id.clone(),
+                                            members,
                                         },
                                         cx,
                                     );
@@ -9732,6 +9814,9 @@ impl WalletPage {
             ContactsMenu::Contact => contacts_fixtures::contact_context(&self.contacts),
             ContactsMenu::ContactGroups => {
                 contacts_fixtures::contact_group_pick(&self.contact_group_state(cx))
+            }
+            ContactsMenu::GroupMembers => {
+                contacts_fixtures::group_member_pick(&self.group_member_state(cx))
             }
         };
         let actions = self.menu_actions(kind, cx);

@@ -94,3 +94,45 @@ desktop **345 / 341**(+1 测试),fmt clean,画廊全渲染,Windows 通过。
 而会出错的那条规则由上面那条测试守着。
 
 desktop **346 / 342**(+1 测试),fmt clean,画廊全渲染,Windows 通过。
+
+---
+
+## Phase 3 — 从分组这一侧,把同一个问题问一遍
+
+重跑对照(见下)后剩下的"强"差集里,`SetGroupMembers` 是唯一一件真活:
+分组屏上那行 **"添加成员" 从 spec 018 起就画着,没有监听器**。phase 2 从联系人那侧
+解决了成员关系,这一刀从分组那侧。
+
+**一个形状,两个方向**:两边都是"这些里面哪些",两边都是一次点击送回**整份集合**
+(`SetContactGroups` / `SetGroupMembers`),所以菜单是同一个 `pick_menu`,
+翻转规则是同一个 `set_after_toggle`(改名自 phase 2 的那个)——
+两份形状就是两处可以把勾画错的地方。
+
+### 实机(真的动了数据)
+
+Family 分组 → 添加成员 → 菜单里 Alice / Bob 各一行 → 点 Alice:
+左边导轨的计数变 1、标题变 `1 members`、Alice 出现在成员列表里,
+`wallet.json` 的 `vela.contactGroups` 里 family 的 members 真的多了那个地址。
+
+desktop **346 / 342**,fmt clean,画廊全渲染。
+
+---
+
+## 这一刀结束时的重跑对照
+
+把方法又跑了一遍,这次**把可达性判定写进了脚本**:web 的 dispatch 落在
+`routes/` 或 `.svelte` 里 = 强(有界面点得到),只落在 `lib/**/core/*.ts` 里 = 弱
+(要人去查有没有调用者)。
+
+**42 → 15**,其中强的只剩 5 条:
+
+| 事件 | 判定 |
+|---|---|
+| `contacts.SetGroupMembers` | ✅ 本 phase 做掉 |
+| `send.OpenScanner` / `CloseScanner` / `ScanResolved` | 扫码 —— 桌面没有相机管线,**平台功能不是接线** |
+| `sign_request.RejectTapped` | ❌ **不是差集,是故意的偏差**:桌面的签名词汇表里**没有拒绝按钮**,关掉这一列就是拒绝(`signing/fixtures.rs` 自己写着),而那个 X 发的是 `SwipeDismissed` —— 核心按阶段路由它(未提交→拒绝 4001、已提交/出错→仅关闭、充值页→取消充值),**比一个硬拒绝更准**。 |
+
+弱的 10 条里,已经查过并撤下的:历史行删除、自定义代币删除、报价过期 `Requote`、
+交易模拟 `SimDeltasComputed`。剩下 `LeaveConfirm` / `MessagePresented` / `LinkOpened` /
+`FundingCancelled` / `PopupRequest` / `Abort` —— 前面几个要逐个查调用者,
+`PopupRequest` 是扩展专用,`Abort` 是拆卸时的内部事件。
