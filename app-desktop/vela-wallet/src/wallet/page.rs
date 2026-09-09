@@ -218,6 +218,33 @@ struct ExploreForm {
     text: String,
 }
 
+/// The frame the viewfinder is showing, and the discipline that keeps its
+/// texture from leaking.
+///
+/// `RenderImage::new` mints a fresh `ImageId` and the renderer caches one GPU
+/// texture per id, so a preview that published a frame without releasing its
+/// predecessor would leak one texture per frame — thirty a second, invisible
+/// on screen. `contracts/desktop-frame-pump.md` wrote the rule for the launch
+/// animation; a camera is the second thing in this app that needs it.
+#[derive(Default)]
+struct ScanPreview {
+    slot: Option<std::sync::Arc<gpui::RenderImage>>,
+}
+
+impl ScanPreview {
+    /// Put a frame on screen and hand back the one it replaced.
+    fn replace(
+        &mut self,
+        image: std::sync::Arc<gpui::RenderImage>,
+    ) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        self.slot.replace(image)
+    }
+
+    fn take(&mut self) -> Option<std::sync::Arc<gpui::RenderImage>> {
+        self.slot.take()
+    }
+}
+
 /// The receive card's facts, owned so the composer can borrow them.
 struct ShareCardFacts {
     headline: String,
@@ -461,6 +488,11 @@ pub struct WalletPage {
     split_focuses: Vec<gpui::FocusHandle>,
     /// DSD2fL is the page's own overlay: the core has no flag for it.
     send_fee_picker: bool,
+    /// The scanner's camera, alive only while DS1 is on screen — a capture
+    /// nobody stops is a webcam light nobody turned off.
+    scan_camera: Option<crate::executor::camera::Session>,
+    /// The one preview frame currently on screen, and the texture behind it.
+    scan_preview: ScanPreview,
     /// SD1b: the token picker is in sweep mode. The page's, not the core's —
     /// `multi_select_mode` turns on when the selection is CONFIRMED, so before
     /// that nothing in the view says whether the ticks are showing.
@@ -818,6 +850,8 @@ impl WalletPage {
             split_focuses: Vec::new(),
             send_fee_picker: false,
             send_sweeping: false,
+            scan_camera: None,
+            scan_preview: ScanPreview::default(),
             window_handle: crate::onboarding::native_window_handle(window),
             endpoint_focuses: Vec::new(),
             settings_probed_network: None,
@@ -9092,10 +9126,19 @@ impl WalletPage {
         )
     }
 
-    fn scan_overlay(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn scan_overlay(
+        &mut self,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         if self.flows.last() != Some(&FlowPanel::Ds1) {
+            // Left the scanner: the camera goes with it, and so does the frame
+            // still holding a texture.
+            self.stop_camera(window);
             return None;
         }
+        self.pump_camera(window, cx);
         let flow_fixtures::FlowBody::Scan(model) =
             flow_fixtures::body(FlowPanel::Ds1, &self.flow_strings)
         else {
@@ -9111,7 +9154,14 @@ impl WalletPage {
             })) as panels::Click),
             None,
         ];
-        let card = panels::scan_modal(&model, theme, &mut self.icons, tools);
+        // The camera, when this platform has one and the person let us. The
+        // frame is published under the same rule the launch animation's pump
+        // follows (`contracts/desktop-frame-pump.md`): one `RenderImage` on
+        // screen at a time, and the evicted one HANDED BACK so its GPU texture
+        // cannot be forgotten — a preview mints one per frame, so leaking them
+        // would be ~30 textures a second.
+        let preview = self.scan_preview.slot.clone();
+        let card = panels::scan_modal(&model, theme, &mut self.icons, tools, preview);
         Some(
             div()
                 .id("scan-scrim")
@@ -9141,6 +9191,78 @@ impl WalletPage {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Keep the viewfinder fed while the scanner is open.
+    ///
+    /// Started on the first frame DS1 draws rather than on the click that
+    /// opened it, because the scanner can also be reached by a restored flow
+    /// stack (`VELA_FLOW=DS1`) where no click happened.
+    fn pump_camera(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scan_camera.is_none() {
+            self.scan_camera = Some(crate::executor::camera::start());
+            // The camera has its own thread and no way to reach this window;
+            // this asks for a repaint at roughly the rate a preview needs one,
+            // and stops the moment the scanner is gone.
+            cx.spawn(async move |page, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(60))
+                        .await;
+                    let alive = page
+                        .update(cx, |this, cx| {
+                            let alive = this.scan_camera.is_some();
+                            if alive {
+                                cx.notify();
+                            }
+                            alive
+                        })
+                        .unwrap_or(false);
+                    if !alive {
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
+
+        let Some(session) = self.scan_camera.as_ref() else {
+            return;
+        };
+        // A code the camera saw. Taken once, so one QR held up to the lens
+        // starts one send.
+        if let Some(text) = session.take_payload() {
+            self.stop_camera(window);
+            self.scan_resolved(text, cx);
+            return;
+        }
+        let (frame, _failed) = session.snapshot();
+        let Some(frame) = frame else {
+            return;
+        };
+        // `RenderImage` wants premultiplied BGRA; the camera hands over RGBA.
+        // Swapping in place is two moves per pixel and keeps the one copy this
+        // path already makes.
+        let (width, height) = frame.dimensions();
+        let mut bytes = frame.into_raw();
+        for pixel in bytes.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        let Some(bgra) = image::RgbaImage::from_raw(width, height, bytes) else {
+            return;
+        };
+        let image = std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(bgra)]));
+        if let Some(evicted) = self.scan_preview.replace(image) {
+            let _ = window.drop_image(evicted);
+        }
+    }
+
+    /// Stop the capture and release the frame on screen. Idempotent.
+    fn stop_camera(&mut self, window: &mut Window) {
+        self.scan_camera = None;
+        if let Some(evicted) = self.scan_preview.take() {
+            let _ = window.drop_image(evicted);
+        }
     }
 
     /// A QR code out of a picture on this machine.
@@ -10061,7 +10183,7 @@ impl Render for WalletPage {
             crate::executor::balance_dashboard::refresh(cx);
         }
 
-        let scan = self.scan_overlay(&theme, cx);
+        let scan = self.scan_overlay(&theme, window, cx);
         let toast = self.receipt_toast(&theme, window, cx);
         let send_prompt = self.send_prompts(&theme, window, cx);
         let menu = self.menu_overlay(&theme, cx);

@@ -246,6 +246,15 @@ wry = "0.56"
 # is CoreBluetooth via objc2 (macOS only). Pinned to the exact versions gpui
 # already pulls, so no second copy of any objc2 crate enters the tree.
 [target.'cfg(target_os = "macos")'.dependencies]
+# The camera, for the scanner's live half (spec 036 phase 2). macOS only ON
+# PURPOSE: the file path (phase 1) works on all three desktops and stays the
+# scanner's floor, so a platform without a capture backend loses the preview
+# and keeps the feature. `input-avfoundation` is the only backend named — the
+# v4l and Media Foundation ones would pull Linux and Windows system headers
+# into a target that does not build them.
+nokhwa = { version = "0.10", default-features = false, features = [
+    "input-avfoundation",
+] }
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = [
     "NSStream",

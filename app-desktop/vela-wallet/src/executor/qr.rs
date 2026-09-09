@@ -34,6 +34,21 @@ pub fn decode_all(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// A QR in a frame the camera just handed over.
+///
+/// Separate from [`decode_all`] because a camera frame is already decoded
+/// pixels — going back through PNG bytes to reach the same decoder would cost
+/// an encode per frame for nothing.
+#[must_use]
+pub fn decode_luma(rgb: &image::RgbImage) -> Option<String> {
+    let luma = image::DynamicImage::ImageRgb8(rgb.clone()).to_luma8();
+    let mut prepared = rqrr::PreparedImage::prepare(luma);
+    prepared
+        .detect_grids()
+        .into_iter()
+        .find_map(|grid| grid.decode().ok().map(|(_, content)| content))
+}
+
 /// The first payload, if the picture holds one.
 #[must_use]
 pub fn decode_first(bytes: &[u8]) -> Option<String> {

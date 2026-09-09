@@ -1885,6 +1885,7 @@ pub fn scan_modal(
     theme: &Theme,
     icons: &mut IconCache,
     mut tool_actions: Vec<Option<Click>>,
+    preview: Option<std::sync::Arc<gpui::RenderImage>>,
 ) -> Div {
     let mut tools = div().flex().gap(px(8.));
     let mut bound = tool_actions.drain(..);
@@ -1920,12 +1921,25 @@ pub fn scan_modal(
         )
         .child(
             // The viewfinder is landscape, not square — roughly what a webcam
-            // hands you, and what DS1L measures.
-            div()
-                .w_full()
-                .h(px(336.))
-                .rounded(px(8.))
-                .bg(theme.bg_sunken),
+            // hands you, and what DS1L measures. With a camera running it
+            // holds the camera; without one it stays the empty well it has
+            // always been, and the toolbar's other door still works.
+            {
+                let well = div()
+                    .w_full()
+                    .h(px(336.))
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .bg(theme.bg_sunken);
+                match preview {
+                    Some(image) => well.child(
+                        gpui::img(gpui::ImageSource::Render(image))
+                            .w_full()
+                            .h(px(336.)),
+                    ),
+                    None => well,
+                }
+            },
         )
         .child(
             div()
