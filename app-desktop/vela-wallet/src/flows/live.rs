@@ -824,9 +824,9 @@ fn send_token_row(
     }
 }
 
-/// DSD1L — which token to send. The rows are the core's holdings.
-#[must_use]
-/// The picker, in one of its two modes.
+/// DSD1L — which token to send, in one of the picker's two modes.
+///
+/// The rows are the core's holdings.
 ///
 /// `sweeping` is the SHELL's flag, and deliberately: the core's
 /// `multi_select_mode` flips only when a selection is CONFIRMED, so before
