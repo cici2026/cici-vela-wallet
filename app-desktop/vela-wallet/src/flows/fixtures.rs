@@ -387,6 +387,10 @@ pub struct SendNotice {
     /// or the top-up address.
     pub detail: Option<SharedString>,
     pub action: Option<SharedString>,
+    /// The way out of the notice itself, when it has one — today only the
+    /// relay-treasury stop, whose "Close" puts a person back on the form
+    /// instead of leaving them staring at a top-up address until it clears.
+    pub dismiss: Option<SharedString>,
     /// Red rather than amber: the person cannot proceed as things stand.
     pub error: bool,
 }

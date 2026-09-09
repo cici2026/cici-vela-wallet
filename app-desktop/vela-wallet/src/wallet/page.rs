@@ -3717,6 +3717,7 @@ impl WalletPage {
             batch_rate_field: None,
             batch_rate_reset: None,
             notice_action: None,
+            notice_dismiss: None,
             pick_group_rows: Vec::new(),
         };
         // DR1L, live: one listener per network row, each remembering WHICH
@@ -3836,6 +3837,11 @@ impl WalletPage {
             // The way out the core's own refusal offered. `EditAmount` is its
             // recovery from a blocked confirmation; the other two are the
             // retries it defines.
+            // Leaving the treasury stop. The core has had this event since
+            // the machine was written and nothing ever sent it, so the only
+            // way out of "the relay cannot pay on this chain" was closing the
+            // whole journey.
+            actions.notice_dismiss = Some(to_host(SendEvent::DismissTreasurySheet));
             actions.notice_action = send.way_out.map(|way_out| match way_out {
                 flows_live::NoticeWayOut::RetryAfterBootstrap => {
                     to_host(SendEvent::RetryAfterBootstrap)

@@ -39,7 +39,7 @@ cluster). This cut takes the money ones.
 | # | What | Core events / view fields the desktop does not read |
 |---|---|---|
 | 1 | **Sweep** — send several tokens to one address in one operation | `ToggleMultiToken` `ToggleAllMultiTokens` `SetMultiNetwork` `ConfirmMultiSelection`; `multi_select_mode` `multi_selected_ids` `multi_valuable_ids` `multi_chain_id` `multi_specs` |
-| 2 | **A fee quote that went stale** | `fee_policy::Requote`, `FeeView.stale` |
+| 2 | ~~A fee quote that went stale~~ | **撤下(phase 2 复核)**:`FeeQuote.requote()` 在 web 里没有任何调用点,`FeeView.stale` 也没有任何 live 模型读它 —— 两端都没有,做就是新功能 |
 | 3 | **The relayer's treasury is empty** | `send::DismissTreasurySheet` and the sheet it dismisses |
 | 4 | **Split rows edited as a set** | `send::RecipientsChanged` |
 
@@ -76,14 +76,12 @@ amounts are the core's `multi_specs` — no amount the shell computed.
 3. **Given** a selection is confirmed, **Then** the form's per-token rows are
    `multi_specs`, and the fee is quoted once for the whole batch.
 
-### User Story 2 — The quote went stale while you were reading it (Priority: P2)
+### ~~User Story 2 — The quote went stale~~ (retired in phase 2)
 
-A person who left the confirm screen open long enough for gas to move is told
-the quote is old and can ask for a new one.
-
-**Independent Test**: with a fee session live, `FeeView.stale` renders a
-presentation whose action dispatches `Requote`, and the confirm gate stays the
-core's (`can_confirm`), not the shell's opinion of freshness.
+The reachability check retired it: the web's `FeeQuote` class HAS a `requote()`
+method and nothing calls it, and no live model reads `FeeView.stale`. So a
+stale-quote affordance is missing from both shells. Recorded as a shared gap,
+not built here.
 
 ### User Story 3 — The relayer cannot pay (Priority: P2)
 

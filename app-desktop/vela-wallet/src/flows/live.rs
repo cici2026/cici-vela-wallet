@@ -488,6 +488,7 @@ pub fn add_token(view: &MtokView, s: &FlowStrings) -> crate::flows::fixtures::Ad
         // The write failed — the core raises the flag and the corpus has the
         // sentence; without it the button simply does nothing, twice.
         notice: view.save_error.then(|| SendNotice {
+            dismiss: None,
             title: Some(s.add_token_error_title.clone()),
             body: s.add_token_error_save.clone(),
             detail: None,
@@ -1033,6 +1034,69 @@ mod sweep_tests {
     }
 }
 
+#[cfg(test)]
+mod treasury_tests {
+    use super::*;
+    use crate::core_host::CoreHost;
+    use vela_core::app::send::{
+        Send as SendMachine, SendTreasuryAsset, SendTreasuryStatus, SendView,
+    };
+
+    /// The relay cannot pay on this chain — and there is now a way out of
+    /// saying so.
+    ///
+    /// The notice itself has been right since 032 phase 31: the address to
+    /// fund, the shortfall, and a retry. What it never had was a way to leave
+    /// it. `DismissTreasurySheet` has been in the machine since it was written
+    /// and nothing in this shell ever sent it, so the only exit from a stop
+    /// that clears on its own schedule was abandoning the send.
+    #[test]
+    fn the_treasury_stop_can_be_left() {
+        crate::executor::storage::tests::with_temp_state("treasury-notice", || {
+            let s = FlowStrings::resolve(&crate::loc::Loc::from_env());
+            let wallet = crate::wallet::WalletStrings::resolve(&crate::loc::Loc::from_env());
+            let fee = CoreHost::<vela_core::app::fee_policy::FeePolicy>::new().view();
+            let host = CoreHost::<SendMachine>::new();
+            let view = SendView {
+                treasury_bootstrap: Some(SendTreasuryStatus {
+                    chain_id: 100,
+                    address: "0xTreasury".to_owned(),
+                    asset: SendTreasuryAsset::Native,
+                    // Raw base units, as the relay reports them: a 0.02 xDAI
+                    // floor against an empty float.
+                    balance: "0".to_owned(),
+                    floor: "20000000000000000".to_owned(),
+                    bootstrap_needed: true,
+                }),
+                ..host.view()
+            };
+            let inputs = SendInputs {
+                send: &view,
+                fee: &fee,
+                s: &s,
+                wallet: &wallet,
+                locale: "en-US",
+                identity_name: "MultiTest",
+                identity_address: "0x88cCA0EeDbF2C4426110bbFc998F048689266894",
+            };
+
+            let notice = send_notice(&inputs, false).unwrap_or_else(|| unreachable!("a stop"));
+            // The retry the core offers, and now the way out of the card.
+            assert_eq!(notice.action.as_ref(), Some(&s.funding_check_now));
+            assert_eq!(notice.dismiss.as_ref(), Some(&s.funding_close));
+            assert_eq!(
+                notice_way_out(&inputs, false),
+                Some(NoticeWayOut::RetryAfterBootstrap)
+            );
+            // And it still says WHERE to send and HOW much — a dismiss that
+            // cost the facts would be a worse screen, not a kinder one.
+            let detail = notice.detail.unwrap_or_default();
+            assert!(detail.contains("0xTreasury"), "{detail}");
+            assert!(detail.contains("0.02"), "{detail}");
+        });
+    }
+}
+
 /// The token ids in the order `send_pick` draws them — the page binds one
 /// listener per row from this, so row N selects token N.
 #[must_use]
@@ -1167,6 +1231,10 @@ fn build_notice(
         #[allow(clippy::cast_precision_loss, reason = "a displayed top-up figure")]
         let short = short as f64 / 10f64.powi(decimals);
         let notice = SendNotice {
+            // The way out of the stop itself. Without it the only exit from a
+            // treasury that cannot pay is closing the whole journey — the core
+            // has had `DismissTreasurySheet` since 026 and nothing sent it.
+            dismiss: Some(s.funding_close.clone()),
             title: Some(s.funding_title.clone()),
             body: fill(&s.funding_lead, "symbol", &symbol).into(),
             detail: Some(
@@ -1210,6 +1278,7 @@ fn build_notice(
             SendLockError::Token => None,
         };
         let notice = SendNotice {
+            dismiss: None,
             title: Some(title),
             body,
             detail,
@@ -1240,6 +1309,7 @@ fn build_notice(
             &issue.symbol,
         );
         let notice = SendNotice {
+            dismiss: None,
             title: Some(fill(&s.same_fee_title, "symbol", &issue.symbol).into()),
             body: body.into(),
             detail: Some(
@@ -1259,6 +1329,7 @@ fn build_notice(
     // The split rows add up to more than the balance.
     if send.split_over_balance {
         let notice = SendNotice {
+            dismiss: None,
             title: Some(s.insufficient_title.clone()),
             body: s.insufficient_body.clone(),
             detail: None,
@@ -1273,6 +1344,7 @@ fn build_notice(
     // field, and the slide disarms with nothing said.
     if confirming && let Some(issue) = &send.confirm_amount_issue {
         let notice = SendNotice {
+            dismiss: None,
             title: None,
             body: cannot_convert(issue, s),
             detail: None,
@@ -1296,6 +1368,7 @@ fn build_notice(
         })?;
     Some((
         SendNotice {
+            dismiss: None,
             title: None,
             body,
             detail: None,
@@ -1524,6 +1597,7 @@ pub fn send_confirm(i: &SendInputs<'_>) -> SendConfirm {
     // cannot carry one.
     let notice = send_notice(i, true).or_else(|| {
         tx_error_text(send, s).map(|body| SendNotice {
+            dismiss: None,
             title: None,
             body,
             detail: None,
@@ -1840,6 +1914,7 @@ pub fn batch_import(view: &BatchView, symbol: &str, s: &FlowStrings) -> BatchImp
         // indistinguishable from one that is broken.
         notice: if view.file_error {
             Some(SendNotice {
+                dismiss: None,
                 title: Some(s.batch_import_failed_title.clone()),
                 body: s.batch_import_failed_body.clone(),
                 detail: None,
@@ -1848,6 +1923,7 @@ pub fn batch_import(view: &BatchView, symbol: &str, s: &FlowStrings) -> BatchImp
             })
         } else if view.over_balance {
             Some(SendNotice {
+                dismiss: None,
                 title: None,
                 body: s.batch_over_balance.clone(),
                 // The figure the refusal is about — no key needed for a number.
@@ -1857,6 +1933,7 @@ pub fn batch_import(view: &BatchView, symbol: &str, s: &FlowStrings) -> BatchImp
             })
         } else if view.over_cap {
             Some(SendNotice {
+                dismiss: None,
                 title: None,
                 body: s.batch_over_cap.clone(),
                 detail: None,

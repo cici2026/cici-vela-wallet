@@ -391,6 +391,10 @@ pub struct FlowStrings {
     pub funding_address_label: SharedString,
     pub funding_amount_label: SharedString,
     pub funding_check_now: SharedString,
+    /// "Not now" — the phone's own word for leaving this stop. The desktop
+    /// draws the stop inline rather than as a sheet, so this is the way back
+    /// to the form.
+    pub funding_close: SharedString,
     /// A locked payment request that cannot be fulfilled.
     pub lock_net_title: SharedString,
     pub lock_net_body: String,
@@ -591,6 +595,7 @@ impl FlowStrings {
             funding_address_label: s("componentsUi.funding.addressLabel"),
             funding_amount_label: s("componentsUi.funding.amountLabel"),
             funding_check_now: s("componentsUi.funding.checkNow"),
+            funding_close: s("componentsUi.funding.cancel"),
             lock_net_title: s("send.lock.netTitle"),
             lock_net_body: raw("send.lock.netBody"),
             lock_token_title: s("send.lock.tokenTitle"),

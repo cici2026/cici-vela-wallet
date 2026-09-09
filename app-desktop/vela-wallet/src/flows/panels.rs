@@ -111,6 +111,8 @@ pub struct PanelActions {
     /// DSD2L / DSD3L, live: the way out the core's refusal offers — edit the
     /// amount, add the network, check the top-up again.
     pub notice_action: Option<Click>,
+    /// The relay-treasury stop's "Not now" — the core's `DismissTreasurySheet`.
+    pub notice_dismiss: Option<Click>,
     /// DSD2eL, live: one listener per GROUP row — a whole group seeds a split.
     pub pick_group_rows: Vec<Click>,
 }
@@ -222,6 +224,7 @@ pub fn render(
             identicons,
             actions.advance,
             actions.notice_action,
+            actions.notice_dismiss,
         ),
         FlowBody::SendReceipt(model) => send_receipt(model, theme, icons, actions.advance),
         // The page routes this away before it gets here; a column-shaped
@@ -748,7 +751,7 @@ fn add_token(
     // dead-code warning nobody read. Same defect as the picker that eats a
     // file: the core said no and the screen went on looking fine.
     if let Some(notice) = &model.notice {
-        col = col.child(notice_card(notice, theme, None));
+        col = col.child(notice_card(notice, theme, None, None));
     }
 
     col.child(clickable(
@@ -763,7 +766,12 @@ fn add_token(
 /// Amber while they are still typing, red when nothing can proceed as things
 /// stand. The action is the way out the CORE offered — never a button this
 /// file invented.
-fn notice_card(notice: &SendNotice, theme: &Theme, action: Option<Click>) -> Div {
+fn notice_card(
+    notice: &SendNotice,
+    theme: &Theme,
+    action: Option<Click>,
+    dismiss: Option<Click>,
+) -> Div {
     let (tint, border) = if notice.error {
         (theme.error_soft, theme.error_base)
     } else {
@@ -805,14 +813,33 @@ fn notice_card(notice: &SendNotice, theme: &Theme, action: Option<Click>) -> Div
                 .child(detail.clone()),
         );
     }
-    match (&notice.action, action) {
-        (Some(label), action) => card.child(div().flex().child(clickable(
+    // Two ways out of the same card: the retry the core offered, and — where
+    // the stop has one — leaving it. Side by side, the retry first, because
+    // that is the one a person came here to press.
+    let mut row = div().flex().gap(px(8.));
+    let mut any = false;
+    if let Some(label) = &notice.action {
+        any = true;
+        row = row.child(clickable(
             "flow-notice-action",
             action,
             pill(theme, label.clone()),
-        ))),
-        (None, _) => card,
+        ));
     }
+    if let Some(label) = &notice.dismiss {
+        any = true;
+        row = row.child(clickable(
+            "flow-notice-dismiss",
+            dismiss,
+            div()
+                .px(px(12.))
+                .py(px(6.))
+                .text_size(theme::text_row_sub())
+                .text_color(theme.fg_muted)
+                .child(label.clone()),
+        ));
+    }
+    if any { card.child(row) } else { card }
 }
 
 /// The panel's CTA in the state the core put it in. A shut button is drawn
@@ -1179,7 +1206,12 @@ fn send_form(
     }
 
     if let Some(notice) = &model.notice {
-        col = col.child(notice_card(notice, theme, actions.notice_action.take()));
+        col = col.child(notice_card(
+            notice,
+            theme,
+            actions.notice_action.take(),
+            actions.notice_dismiss.take(),
+        ));
     }
     col.child(clickable(
         "flow-fee-row",
@@ -1634,7 +1666,7 @@ fn batch_import(
             .child(model.rejected.clone()),
     );
     if let Some(notice) = &model.notice {
-        col = col.child(notice_card(notice, theme, None));
+        col = col.child(notice_card(notice, theme, None, None));
     }
     // Bad rows are marked and skipped, never silently dropped, and the CTA
     // counts only the good ones — a button that says "Import 3" and imports 2
@@ -1655,6 +1687,7 @@ fn send_confirm(
     identicons: &mut IdenticonCache,
     advance: Option<Click>,
     notice_action: Option<Click>,
+    notice_dismiss: Option<Click>,
 ) -> Div {
     let mut col = column().child(
         div()
@@ -1724,7 +1757,7 @@ fn send_confirm(
     }
 
     if let Some(notice) = &model.notice {
-        col = col.child(notice_card(notice, theme, notice_action));
+        col = col.child(notice_card(notice, theme, notice_action, notice_dismiss));
     }
     // Per the SPEC sheet this is the ONE accent CTA in the whole send journey.
     col.child(cta_button(
