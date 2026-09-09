@@ -274,6 +274,41 @@ mod tests {
         }
     }
 
+    /// A contact saved without a name shows the identity the core resolved for
+    /// it — which is the whole point of asking.
+    ///
+    /// This precedence has been implemented since 031 and, until spec 034, was
+    /// unreachable: nothing in this shell ever dispatched `InspectRecipient`,
+    /// so `resolved_name` was never written and the middle branch never ran.
+    /// The book showed `0x1234…5678` for an address the network could have
+    /// named.
+    #[test]
+    fn an_unnamed_contact_shows_the_name_the_core_resolved() {
+        const ADDR: &str = "0xaaaa000000000000000000000000000000000001";
+
+        // Nothing known: the address, shortened.
+        let bare = display_name(&contact(ADDR, None, None));
+        assert!(bare.contains('…'), "{bare}");
+
+        // Resolved: the identity, which is what the inspection writes back.
+        assert_eq!(
+            display_name(&contact(ADDR, None, Some("vitalik.eth"))),
+            "vitalik.eth"
+        );
+
+        // The person's own label still wins — the core states that precedence
+        // and states it as the shell's job.
+        assert_eq!(
+            display_name(&contact(ADDR, Some("Dad"), Some("vitalik.eth"))),
+            "Dad"
+        );
+
+        // An empty string is not a name. Both fields can arrive empty rather
+        // than absent from a store another client wrote.
+        let empty = display_name(&contact(ADDR, Some(""), Some("")));
+        assert!(empty.contains('…'), "{empty}");
+    }
+
     /// The letter now comes from spec 028's per-codepoint table, so a Chinese
     /// name files under its pinyin initial. This shell's own rule filed 阿豪
     /// under `#`, which is the same person in a different place on two

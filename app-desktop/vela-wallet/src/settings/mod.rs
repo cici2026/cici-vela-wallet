@@ -36,6 +36,10 @@ pub struct SettingsStrings {
     pub nav_storage: SharedString,
     pub nav_about: SharedString,
     // account panel
+    /// "Total {{amount}}" — the second half of the summary. The count template
+    /// ends in "· ", and the live panel printed that dangling separator with
+    /// nothing after it until spec 034, because this half needs per-account
+    /// balances nobody had asked the core for.
     pub accounts_total: String,
     pub accounts_count: String,
     pub account_create: SharedString,

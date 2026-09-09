@@ -534,6 +534,12 @@ pub struct WalletPage {
     group: Option<usize>,
     /// Which contact the third column shows (index into the canon roster).
     contact: usize,
+    /// The address the core was last asked to inspect, so opening a panel that
+    /// redraws every frame asks once.
+    inspected_contact: Option<String>,
+    /// The accounts the switcher last announced. `None` = it is not on screen,
+    /// and the core has been told so.
+    switcher_addresses: Option<Vec<String>>,
     /// DC3: the fixture roster is empty.
     contacts_empty: bool,
     /// Open anchored menu: which fixture feeds it, the window-coordinate
@@ -825,6 +831,8 @@ impl WalletPage {
             settings_open_dropdown: None,
             group: None,
             contact: 0,
+            inspected_contact: None,
+            switcher_addresses: None,
             contacts_empty: false,
             menu: None,
             tab: match section {
@@ -1859,6 +1867,10 @@ impl WalletPage {
             );
             nav_col = nav_col.child(match destination {
                 Some(destination) => row.on_click(cx.listener(move |this, _, _, cx| {
+                    if destination != Section::Settings {
+                        // Leaving 设置 leaves the accounts panel with it.
+                        this.close_switcher(cx);
+                    }
                     this.section = destination;
                     this.panel = PanelId::None;
                     this.menu = None;
@@ -2376,6 +2388,32 @@ impl WalletPage {
         if !view.loaded {
             return None;
         }
+        // Opening an entry is what asks the core to look the address up. The
+        // web dispatches the same event on the same gesture; nothing here ever
+        // did, so a contact somebody saved WITHOUT a name stayed nameless
+        // forever — the core writes the resolved identity back onto exactly
+        // that contact (its `RecipientTrust` write-back), and this shell has
+        // been reading `resolved_name` since 031 with nobody filling it.
+        //
+        // Chain 1 for the classification, as the web says in the same words:
+        // mainnet until a send flow names one. Deduped by address here because
+        // this runs once per frame; the core dedupes and caches too, and both
+        // guards are cheap.
+        if let Some(row) = contacts_live::rows(&view).into_iter().nth(self.contact) {
+            let address = row.address_full.to_string();
+            if self.inspected_contact.as_deref() != Some(address.as_str()) {
+                self.inspected_contact = Some(address.clone());
+                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                    resident.dispatch(
+                        ContactEvent::InspectRecipient {
+                            chain_id: 1,
+                            address,
+                        },
+                        cx,
+                    );
+                });
+            }
+        }
         let hidden = resident::resident::<BalanceDashboard>(cx)
             .read(cx)
             .view()
@@ -2439,6 +2477,44 @@ impl WalletPage {
             );
         });
         cx.notify();
+    }
+
+    /// Tell the hero which accounts are on screen — once per opening.
+    ///
+    /// The core fetches a total for each while the switcher is open and stops
+    /// when it closes, so this is a subscription and not a query: opening asks,
+    /// leaving must say so, or the app keeps reading other accounts' balances
+    /// forever.
+    fn sync_switcher(
+        &mut self,
+        session: &vela_core::app::session::SessionView,
+        cx: &mut Context<Self>,
+    ) {
+        let addresses: Vec<String> = session
+            .accounts
+            .iter()
+            .map(|row| row.account.address.clone())
+            .collect();
+        if self.switcher_addresses.as_ref() == Some(&addresses) {
+            return;
+        }
+        self.switcher_addresses = Some(addresses.clone());
+        crate::executor::balance_dashboard::dispatch(
+            vela_core::app::balance_dashboard::Event::SwitcherOpened { addresses },
+            cx,
+        );
+    }
+
+    /// The switcher left the screen. Idempotent, and called from every path
+    /// that can leave it — a subscription nobody closes is a poll.
+    fn close_switcher(&mut self, cx: &mut Context<Self>) {
+        if self.switcher_addresses.take().is_none() {
+            return;
+        }
+        crate::executor::balance_dashboard::dispatch(
+            vela_core::app::balance_dashboard::Event::SwitcherClosed,
+            cx,
+        );
     }
 
     /// Tell the feed what the hero is doing about privacy, when it changes.
@@ -5016,6 +5092,11 @@ impl WalletPage {
                 page == current,
             );
             col = col.child(row.on_click(cx.listener(move |this, _, _, cx| {
+                if page != SettingsPage::Account {
+                    // The switcher left the screen. A subscription nobody
+                    // closes is a poll of every account's balances.
+                    this.close_switcher(cx);
+                }
                 this.settings_page = page;
                 this.settings_dialog = None;
                 // Leaving a service panel forgets that it announced itself, so
@@ -5249,25 +5330,85 @@ impl WalletPage {
         session: &vela_core::app::session::SessionView,
         cx: &mut Context<Self>,
     ) -> Div {
+        let accounts_count = self.settings.accounts_count.clone();
+        let accounts_total = self.settings.accounts_total.clone();
+        self.sync_switcher(session, cx);
         let s = &self.settings;
         // The COUNT is real; the total beside it is not stated at all, because
         // the switcher's cached per-account totals are a `balance_dashboard`
         // read this panel does not do. A figure that covers one account and is
         // labelled "total" would be worse than no figure.
-        let summary = gpui::SharedString::from(crate::wallet::fill(
-            &s.accounts_count,
+        // Opening this panel IS the switcher opening: the core refreshes every
+        // listed account's total while it is up and answers in
+        // `switcher.balances`. Nobody ever told it, so this panel could only
+        // say how MANY accounts there were — and its sentence ended on a
+        // dangling "·" waiting for the half this adds.
+        let summary_count = crate::wallet::fill(
+            &accounts_count,
             "count",
             &session.accounts.len().to_string(),
-        ));
+        );
         let sign_out = s.sign_out_button.clone();
         let sign_out_desc = s.sign_out_desc.clone();
         let erase_title = s.erase_title.clone();
         let erase_subtitle = s.erase_subtitle.clone();
         let erase_confirm = s.erase_confirm.clone();
 
+        let switcher = resident::resident::<BalanceDashboard>(cx)
+            .read(cx)
+            .view()
+            .switcher;
+        // "1 accounts · Total $0.75". The sum is over what is actually KNOWN —
+        // an account with no cached figure contributes nothing rather than
+        // making the sentence wait for it.
+        let known_total: f64 = session
+            .accounts
+            .iter()
+            .filter_map(|row| {
+                switcher
+                    .balances
+                    .iter()
+                    .find(|entry| entry.address.eq_ignore_ascii_case(&row.account.address))
+                    .map(|entry| entry.usd)
+            })
+            .sum();
+        let summary = gpui::SharedString::from(format!(
+            "{summary_count}{}",
+            crate::wallet::fill(
+                &accounts_total,
+                "amount",
+                &vela_core::l10n::currency::format_fiat(
+                    known_total,
+                    "USD",
+                    "$",
+                    &self.locale,
+                    vela_core::l10n::currency::FiatOptions::default(),
+                ),
+            )
+        ));
         let mut list = div().flex().flex_col();
         for row in &session.accounts {
             let active = row.index == session.active_index;
+            // This account's own total, when the core has one for it. A row
+            // with no cached figure says nothing rather than $0 — the hero's
+            // invariant ② applies to every account, not just the active one.
+            let total = switcher
+                .balances
+                .iter()
+                .find(|entry| entry.address.eq_ignore_ascii_case(&row.account.address))
+                .map(|entry| {
+                    // USD, like every other total this shell prints. The
+                    // display-currency machine owns conversion and its rate can
+                    // be `None` — which is NOT 1 — so a converted figure here
+                    // would be the one place in the app that guessed.
+                    gpui::SharedString::from(vela_core::l10n::currency::format_fiat(
+                        entry.usd,
+                        "USD",
+                        "$",
+                        &self.locale,
+                        vela_core::l10n::currency::FiatOptions::default(),
+                    ))
+                });
             // The core's own index, not the loop's: it survives a display
             // reorder, which is exactly what invariant ⑦ is about.
             let index = row.index;
@@ -5300,6 +5441,14 @@ impl WalletPage {
                                 .child(gpui::SharedString::from(display)),
                         ),
                 );
+            if let Some(total) = total {
+                card = card.child(
+                    div()
+                        .text_size(theme::text_row_sub())
+                        .text_color(theme.fg_muted)
+                        .child(total),
+                );
+            }
             if active {
                 card = card.child(icon_img(
                     &mut self.icons,
