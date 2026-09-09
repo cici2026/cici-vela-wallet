@@ -46,6 +46,13 @@ use crate::flows::fixtures::{
 use crate::wallet::fixtures::{AssetRowModel, Fiat, MASK};
 
 /// A chain's colour, from the one table every surface reads.
+/// A chain's colour, for anything drawn outside this module — the share
+/// card's network pill, today.
+#[must_use]
+pub fn chain_tint(chain_id: u32) -> Hsla {
+    tint(chain_id)
+}
+
 fn tint(chain_id: u32) -> Hsla {
     gpui::rgb(crate::settings::model::chain_tint(u64::from(chain_id)).unwrap_or(0x8A_8F_98)).into()
 }

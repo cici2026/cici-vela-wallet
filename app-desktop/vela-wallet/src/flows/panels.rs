@@ -46,6 +46,8 @@ pub struct PanelActions {
     /// DR2L: "I Understand" on the pre-receive warning — the gate that has to
     /// be passed once per account before the address is handed over.
     pub acknowledge: Option<Click>,
+    /// DR2L: 保存图片 — the share card as a PNG.
+    pub save_image: Option<Click>,
     /// DR1L, live: one listener per network row. Empty falls back to `open_qr`.
     pub open_qr_rows: Vec<Click>,
     /// DA1L: a row opens its transaction.
@@ -164,9 +166,14 @@ pub fn render(
         FlowBody::Receive(model) => {
             receive(model, theme, icons, actions.open_qr, actions.open_qr_rows)
         }
-        FlowBody::ReceiveQr(model) => {
-            receive_qr(model, theme, icons, identicons, actions.acknowledge)
-        }
+        FlowBody::ReceiveQr(model) => receive_qr(
+            model,
+            theme,
+            icons,
+            identicons,
+            actions.acknowledge,
+            actions.save_image,
+        ),
         FlowBody::History(groups) => {
             history(groups, theme, icons, actions.open_tx, actions.open_tx_rows)
         }
@@ -255,6 +262,7 @@ fn receive_qr(
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
     acknowledge: Option<Click>,
+    save_image: Option<Click>,
 ) -> Div {
     let mut col = column().child(
         div()
@@ -334,7 +342,11 @@ fn receive_qr(
             .text_color(theme.fg_subtle)
             .child(model.warning.clone()),
     )
-    .child(ghost_button(theme, model.save_image.clone()))
+    .child(clickable(
+        "receive-save-image",
+        save_image,
+        ghost_button(theme, model.save_image.clone()),
+    ))
     .child(ghost_button(theme, model.view_on_explorer.clone()))
     .children(deposit_section(&model.deposits, theme))
 }

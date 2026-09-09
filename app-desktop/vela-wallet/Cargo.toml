@@ -43,7 +43,17 @@ vela-core = { path = "../../rust/crates/vela-core", features = [
 # Icon rasterization (spec 015 research.md D2): the 24×24 corpus SVGs are tinted
 # by string substitution and rasterized per (icon, color, size). Same crate the
 # vela-core feature already brings in — no new renderer.
-resvg = { version = "0.45", default-features = false }
+#
+# `text` and `system-fonts` are on for ONE surface: the receive share card
+# (spec 032 phase 42), whose whole point is a picture carrying an address a
+# person can read. Without them usvg drops every `<text>` silently, which
+# would save a card with a code and no words on it — the failure nobody
+# notices until somebody has already shared one. Icons and identicons are
+# shapes and do not care either way.
+resvg = { version = "0.45", default-features = false, features = [
+    "text",
+    "system-fonts",
+] }
 
 # Lottie playback for the launch animation (spec 012). Three things about this
 # line are load-bearing — see specs/012-launch-animation-lottie/research.md D2:

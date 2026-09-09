@@ -200,6 +200,36 @@ struct ExploreForm {
     text: String,
 }
 
+/// The receive card's facts, owned so the composer can borrow them.
+struct ShareCardFacts {
+    headline: String,
+    payload: String,
+    name: String,
+    lines: (String, String),
+    network_note: String,
+    network_ticker: String,
+    network_tint: gpui::Hsla,
+    seed: String,
+    wordmark: String,
+    file_name: String,
+}
+
+impl ShareCardFacts {
+    fn as_card(&self) -> crate::flows::share_card::ShareCard<'_> {
+        crate::flows::share_card::ShareCard {
+            headline: &self.headline,
+            payload: &self.payload,
+            name: &self.name,
+            lines: (&self.lines.0, &self.lines.1),
+            network_note: &self.network_note,
+            network_ticker: &self.network_ticker,
+            network_tint: self.network_tint,
+            seed: &self.seed,
+            wordmark: &self.wordmark,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GalleryTab {
     D1,
@@ -728,6 +758,81 @@ impl WalletPage {
     /// be able to sign in with from anywhere else yet, which is the one fact
     /// that should give someone pause — so the dialog does not open until the
     /// core has the answer.
+    /// What the open receive screen would save.
+    ///
+    /// Built from the SAME facts the panel is drawing — the identity, the
+    /// chain and the core's `qr_value` — so the picture and the screen cannot
+    /// disagree about an address. `None` when there is nobody to receive as,
+    /// or nothing to encode yet.
+    fn receive_share_card(&mut self, cx: &mut Context<Self>) -> Option<ShareCardFacts> {
+        let identity = self.identity.clone()?;
+        let pay = resident::resident::<PaymentRequest>(cx).read(cx).view();
+        // The gate: no card before the warning has been read, for the same
+        // reason there is no address on screen (phase 38). A saved picture is
+        // the address handed over in the most copyable form there is.
+        if pay.qr_value.is_empty() || !pay.can_save {
+            return None;
+        }
+        let lines = flow_fixtures::address_lines(&identity.address);
+        let network = crate::flows::live::chain_name(self.receive_chain);
+        Some(ShareCardFacts {
+            headline: self.flow_strings.share_card_headline.to_string(),
+            payload: pay.qr_value.clone(),
+            name: identity.name.to_string(),
+            lines,
+            // The web's own pill string — "{{network}} payments only" — not
+            // the screen's long sentence: a pill holds a label, and the two
+            // shells' cards should read the same.
+            network_note: crate::wallet::fill(
+                &self.flow_strings.share_card_note,
+                "network",
+                &network,
+            ),
+            // "Vela Wallet", as the web's card signs itself.
+            network_ticker: network.chars().take(3).collect::<String>().to_uppercase(),
+            network_tint: flows_live::chain_tint(self.receive_chain),
+            seed: identity.address.to_string(),
+            wordmark: "Vela Wallet".to_owned(),
+            // The address is in the NAME as well as the picture: a folder of
+            // these is unreadable if every one is called vela.png.
+            file_name: format!(
+                "vela-{}.png",
+                &identity.address[..10.min(identity.address.len())]
+            ),
+        })
+    }
+
+    /// 保存图片 — the receive card, composed and written where they say.
+    ///
+    /// The picture is built from what the screen is already showing, so the
+    /// saved card and the open screen cannot disagree about an address. The
+    /// dialog opens in the home directory for the reason the contacts export
+    /// does: `.` is wherever the binary was launched from, which on a
+    /// double-click is nowhere useful.
+    fn save_share_card(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.receive_share_card(cx) else {
+            return;
+        };
+        let theme = Theme::of(self.theme_mode());
+        let png = crate::flows::share_card::render_png(&model.as_card(), &theme);
+        // Composed BEFORE the dialog: a picture that fails to render must not
+        // ask somebody where to put it first.
+        let Some(png) = png else {
+            return;
+        };
+        let directory = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        let target = cx.prompt_for_new_path(&directory, Some(&model.file_name));
+        cx.spawn(async move |_, _| {
+            let Ok(Ok(Some(path))) = target.await else {
+                return;
+            };
+            // Best effort, like every other write in this shell: a refused
+            // disk is not something to interrupt a receive screen over.
+            let _ = std::fs::write(&path, &png);
+        })
+        .detach();
+    }
+
     /// The explore name sheet — renaming a tile, and naming a new group.
     ///
     /// The contacts dialog's twin, deliberately: same card, same field, same
@@ -3183,6 +3288,9 @@ impl WalletPage {
                     resident.dispatch(vela_core::app::payment_request::Event::Acknowledge, cx);
                 });
                 cx.notify();
+            })) as panels::Click),
+            save_image: Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                this.save_share_card(cx);
             })) as panels::Click),
             open_qr_rows: Vec::new(),
             open_tx: bind(FlowStep::TxDetail, cx),

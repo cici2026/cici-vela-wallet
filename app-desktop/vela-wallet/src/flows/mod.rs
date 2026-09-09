@@ -15,6 +15,7 @@ pub mod components;
 pub mod fixtures;
 pub mod live;
 pub mod panels;
+pub mod share_card;
 
 use gpui::SharedString;
 
