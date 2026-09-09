@@ -185,6 +185,13 @@ enum ContactsMenu {
     /// Spec 032 phase 40 — right-click on a row in Recent. The only way to
     /// reach the core's `DeleteOrigin`, which forgets ONE site.
     Recent,
+    /// Spec 034 — right-click on a contact row. Drawn since spec 018, opened
+    /// by nothing until now.
+    Contact,
+    /// Spec 034 — which groups this contact is in, ticked. A menu rather than
+    /// a dialog for the same reason the explore one is: the question is
+    /// "which of these", and the answer is visible on every row.
+    ContactGroups,
     /// Spec 032 phase 41 — "move to a group", listing the person's own
     /// groups. A menu rather than a new picker component: the question is
     /// "which of these", which is what a menu is.
@@ -2479,6 +2486,33 @@ impl WalletPage {
         cx.notify();
     }
 
+    /// Every group, and whether the open contact is in it.
+    ///
+    /// The pair is what the menu draws AND what the next tap sends back, so
+    /// the tick a person sees and the set the core is given cannot disagree.
+    fn contact_group_state(&mut self, cx: &mut Context<Self>) -> Vec<(SharedString, bool)> {
+        let view = resident::resident::<Contacts>(cx).read(cx).view();
+        let Some(address) = contacts_live::rows(&view)
+            .into_iter()
+            .nth(self.contact)
+            .map(|row| row.address_full.to_string().to_lowercase())
+        else {
+            return Vec::new();
+        };
+        view.groups
+            .iter()
+            .map(|group| {
+                (
+                    SharedString::from(group.name.clone()),
+                    group
+                        .members
+                        .iter()
+                        .any(|member| member.address.to_lowercase() == address),
+                )
+            })
+            .collect()
+    }
+
     /// Tell the hero which accounts are on screen — once per opening.
     ///
     /// The core fetches a total for each while the switcher is open and stops
@@ -2722,7 +2756,21 @@ impl WalletPage {
                         this.panel = PanelId::ContactDetail;
                         this.menu = None;
                         cx.notify();
-                    })),
+                    }))
+                    // The contact menu has been drawn since spec 018 and lived
+                    // only on the component board. It is the desktop's entry
+                    // to 移入分组 — DC2's own comment says so — so without it
+                    // groups could be created, renamed and deleted and never
+                    // filled.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.contact = at;
+                            this.menu =
+                                Some((ContactsMenu::Contact, event.position, Anchor::TopLeft));
+                            cx.notify();
+                        }),
+                    ),
                 );
                 if i != last {
                     list = list.child(row_divider(theme));
@@ -9318,6 +9366,153 @@ impl WalletPage {
             // "new group" at the top. The index is the position in the SAME
             // list the menu was built from — read again here rather than
             // captured, so a group made in between cannot shift the answer.
+            // The contact's own menu, in the order it is drawn: send, receive,
+            // copy, edit, move to a group, delete. Every one of them has
+            // somewhere to go on this shell — which is why it is opened at
+            // last.
+            ContactsMenu::Contact => {
+                let view = resident::resident::<Contacts>(cx).read(cx).view();
+                let Some(row) = contacts_live::rows(&view).into_iter().nth(self.contact) else {
+                    return Vec::new();
+                };
+                let address = row.address_full.to_string();
+                let name = row.name.to_string();
+                let send_to = address.clone();
+                let copy_me = address.clone();
+                let edit_address = address.clone();
+                let delete_address = address.clone();
+                vec![
+                    // 转账 — the send flow, opened with this person in the
+                    // recipient field. The core takes the prefill; the shell
+                    // does not type into its own screen.
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.menu = None;
+                            this.section = Section::Wallet;
+                            this.send_sweeping = false;
+                            this.flows = FlowPanel::entry(FlowEntry::Send);
+                            this.panel = PanelId::Flow;
+                            this.open_send(
+                                SendOpenParams {
+                                    prefilled_recipient: Some(send_to.clone()),
+                                    ..SendOpenParams::default()
+                                },
+                                cx,
+                            );
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                    // 收款 — my own address, which is what a person needs when
+                    // the answer to "how do I pay you" is asked of them.
+                    Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                        this.menu = None;
+                        this.section = Section::Wallet;
+                        this.enter_flow(FlowEntry::Receive, cx);
+                        cx.notify();
+                    })) as contacts_components::MenuAction),
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.menu = None;
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_me.clone()));
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                    // 编辑 — the same sheet 新建联系人 opens, with the address
+                    // fixed: the address IS the identity, and an edit that
+                    // changed it would be a delete and an add wearing one
+                    // button.
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, window, cx| {
+                            this.menu = None;
+                            this.contact_form = Some(ContactForm {
+                                address: edit_address.clone(),
+                                name: name.clone(),
+                                editing: true,
+                            });
+                            window.focus(&this.contact_form_name_focus, cx);
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                    // 移入分组 — the picker this shell has been pointing at
+                    // since spec 018 (DC2's comment) and never opened.
+                    Some(
+                        Box::new(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                            this.menu = Some((
+                                ContactsMenu::ContactGroups,
+                                event.position(),
+                                Anchor::TopLeft,
+                            ));
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                    Some(
+                        Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.menu = None;
+                            resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                                resident.dispatch(
+                                    ContactEvent::Delete {
+                                        address: delete_address.clone(),
+                                        now_ms: crate::executor::now_ms(),
+                                    },
+                                    cx,
+                                );
+                            });
+                            cx.notify();
+                        })) as contacts_components::MenuAction,
+                    ),
+                ]
+            }
+
+            // One tap per group: the whole membership goes back, with this one
+            // flipped. The core normalises the set — a shell that sent "add"
+            // and "remove" separately would be inventing two events where the
+            // machine offers one.
+            ContactsMenu::ContactGroups => {
+                let view = resident::resident::<Contacts>(cx).read(cx).view();
+                let Some(row) = contacts_live::rows(&view).into_iter().nth(self.contact) else {
+                    return Vec::new();
+                };
+                let address = row.address_full.to_string();
+                let lower = address.to_lowercase();
+                let groups: Vec<(String, bool)> = view
+                    .groups
+                    .iter()
+                    .map(|group| {
+                        (
+                            group.id.clone(),
+                            group
+                                .members
+                                .iter()
+                                .any(|member| member.address.to_lowercase() == lower),
+                        )
+                    })
+                    .collect();
+                groups
+                    .iter()
+                    .map(|(id, _member)| {
+                        let address = address.clone();
+                        let id = id.clone();
+                        let groups = groups.clone();
+                        Some(
+                            Box::new(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                                this.menu = None;
+                                let group_ids = contacts_live::groups_after_toggle(&groups, &id);
+                                resident::resident::<Contacts>(cx).update(cx, |resident, cx| {
+                                    resident.dispatch(
+                                        ContactEvent::SetContactGroups {
+                                            address: address.clone(),
+                                            group_ids,
+                                        },
+                                        cx,
+                                    );
+                                });
+                                cx.notify();
+                            })) as contacts_components::MenuAction,
+                        )
+                    })
+                    .collect()
+            }
+
             ContactsMenu::MoveGroup => {
                 let ids: Vec<String> = resident::resident::<ExploreSites>(cx)
                     .read(cx)
@@ -9534,6 +9729,10 @@ impl WalletPage {
                     .collect::<Vec<_>>(),
             ),
             ContactsMenu::Tile => explore_fixtures::tile_menu(&self.explore),
+            ContactsMenu::Contact => contacts_fixtures::contact_context(&self.contacts),
+            ContactsMenu::ContactGroups => {
+                contacts_fixtures::contact_group_pick(&self.contact_group_state(cx))
+            }
         };
         let actions = self.menu_actions(kind, cx);
         let card = menu_card(theme, &mut self.icons, &model, actions);

@@ -321,6 +321,33 @@ pub fn contact_context(s: &ContactsStrings) -> MenuModel {
     }
 }
 
+/// Which groups this contact is in — the answer visible on every row.
+///
+/// A menu rather than a dialog with a Save button, for the reason the explore
+/// one is a menu: the question is "which of these", and a tick per row is the
+/// shortest way to both ask it and show the current answer. Every tap sends
+/// the WHOLE membership back (`SetContactGroups`), which is the event the core
+/// offers and the shape it normalises.
+pub fn contact_group_pick(groups: &[(SharedString, bool)]) -> MenuModel {
+    MenuModel {
+        divider_after: None,
+        items: groups
+            .iter()
+            .map(|(name, member)| MenuItemModel {
+                // The tick IS the state. `UsersRound` for a group this contact
+                // is not in yet, `Check` for one it is.
+                icon: if *member {
+                    Icon::Check
+                } else {
+                    Icon::UsersRound
+                },
+                label: name.clone(),
+                destructive: false,
+            })
+            .collect(),
+    }
+}
+
 // -- assembled labels ---------------------------------------------------------
 
 /// `3 位成员` (dc4 content header).
