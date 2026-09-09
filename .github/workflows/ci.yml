@@ -336,6 +336,12 @@ jobs:
       run:
         working-directory: app-desktop/vela-wallet
     steps:
+      # Checkout FIRST. Every `run` in this job inherits the working-directory
+      # above, and a step that runs before the checkout has no directory to
+      # start bash in — the job died on step 2 with "No such file or directory"
+      # and never reached a single line of Rust. apt does not care where it is
+      # run from, so the fix is the order, not an override.
+      - uses: actions/checkout@v4
       - name: Install the gpui build dependencies
         # Lifted from desktop-linux-packages.yml minus the packaging tools. The
         # app cannot be cross-checked (its tree compiles ThorVG, resvg and
@@ -347,7 +353,6 @@ jobs:
             git ca-certificates curl file \
             libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libfontconfig-dev libasound2-dev libssl-dev libzstd-dev
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.97.1
