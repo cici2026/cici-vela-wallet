@@ -115,6 +115,10 @@ pub struct PanelActions {
     pub notice_dismiss: Option<Click>,
     /// DSD2eL, live: one listener per GROUP row — a whole group seeds a split.
     pub pick_group_rows: Vec<Click>,
+    /// DSD2bL, live: each split row's own amount field and its remove — in the
+    /// order the rows draw, so row N edits payee N.
+    pub split_amount_fields: Vec<AddressField>,
+    pub remove_recipient_rows: Vec<Click>,
 }
 
 /// An editable field the page owns the state of.
@@ -130,11 +134,7 @@ pub struct AddressField {
 /// The listener is MOVED in: each affordance is rendered once per pass, and an
 /// action with no listener renders as a plain element rather than as a
 /// cursor-pointer that does nothing.
-pub(crate) fn clickable(
-    id: impl Into<ElementId>,
-    action: Option<Click>,
-    body: impl IntoElement,
-) -> Div {
+pub fn clickable(id: impl Into<ElementId>, action: Option<Click>, body: impl IntoElement) -> Div {
     // The wrapper stays a plain `Div` so callers can keep composing columns;
     // the identified element lives inside it, because `.id()` changes the type.
     let wrap = div().flex().flex_col();
@@ -1150,8 +1150,21 @@ fn send_form(
         ));
     }
 
-    for recipient in &model.recipients {
-        col = col.child(recipient_card(theme, icons, identicons, recipient));
+    let mut amounts = actions.split_amount_fields.drain(..);
+    let mut removes = actions.remove_recipient_rows.drain(..);
+    for (index, recipient) in model.recipients.iter().enumerate() {
+        col = col.child(recipient_card(
+            theme,
+            icons,
+            identicons,
+            recipient,
+            index,
+            crate::flows::components::RecipientRowActions {
+                amount: amounts.next(),
+                remove: removes.next(),
+            },
+            window,
+        ));
     }
 
     if !model.recipient_actions.is_empty() {

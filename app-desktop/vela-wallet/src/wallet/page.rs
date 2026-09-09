@@ -446,6 +446,9 @@ pub struct WalletPage {
     send_recipient_focus: gpui::FocusHandle,
     /// DSD2cL, live: the rate field's focus.
     send_rate_focus: gpui::FocusHandle,
+    /// DSD2bL, live: one focus handle per split row, made on first use. A
+    /// shared handle would send every keystroke to whichever row drew last.
+    split_focuses: Vec<gpui::FocusHandle>,
     /// DSD2fL is the page's own overlay: the core has no flag for it.
     send_fee_picker: bool,
     /// SD1b: the token picker is in sweep mode. The page's, not the core's —
@@ -581,6 +584,12 @@ struct SendBindings {
     sweeping: bool,
     token_chain_ids: Vec<u32>,
     multi_chain_id: Option<u32>,
+    /// DSD2bL: the split rows as the core holds them. Every edit sends the
+    /// WHOLE list back (`RecipientsChanged`), because that is the event the
+    /// machine offers — there is no per-row patch, and inventing one here
+    /// would be a second opinion about what a row is.
+    recipients: Vec<SendRecipientDraft>,
+    split_focuses: Vec<gpui::FocusHandle>,
     /// What the notice's way-out means on THIS panel — derived by the same
     /// traversal that wrote the sentence, so the button and the words cannot
     /// disagree about what they are offering.
@@ -790,6 +799,7 @@ impl WalletPage {
             send_amount_focus: cx.focus_handle(),
             send_recipient_focus: cx.focus_handle(),
             send_rate_focus: cx.focus_handle(),
+            split_focuses: Vec::new(),
             send_fee_picker: false,
             send_sweeping: false,
             window_handle: crate::onboarding::native_window_handle(window),
@@ -3260,7 +3270,7 @@ impl WalletPage {
     }
 
     /// What the live send panels bind to.
-    fn send_bindings(&self, panel: FlowPanel, cx: &mut Context<Self>) -> Option<SendBindings> {
+    fn send_bindings(&mut self, panel: FlowPanel, cx: &mut Context<Self>) -> Option<SendBindings> {
         let host = self.send_host.clone()?;
         let (view, fee) = self.send_views(cx)?;
         let contact_addresses = if panel == FlowPanel::Dsd2e {
@@ -3305,6 +3315,16 @@ impl WalletPage {
             rate_focus: self.send_rate_focus.clone(),
             group_members,
             way_out,
+            split_focuses: {
+                // One per row, made on first use and kept: focus is which box
+                // the keystrokes go into, and a row that lost its handle
+                // between frames would lose the caret mid-amount.
+                while self.split_focuses.len() < view.recipients.len() {
+                    self.split_focuses.push(cx.focus_handle());
+                }
+                self.split_focuses[..view.recipients.len()].to_vec()
+            },
+            recipients: view.recipients.clone(),
             sweeping: self.send_sweeping,
             token_chain_ids: view.tokens.iter().map(|token| token.chain_id).collect(),
             multi_chain_id: view.multi_chain_id,
@@ -3719,6 +3739,8 @@ impl WalletPage {
             notice_action: None,
             notice_dismiss: None,
             pick_group_rows: Vec::new(),
+            split_amount_fields: Vec::new(),
+            remove_recipient_rows: Vec::new(),
         };
         // DR1L, live: one listener per network row, each remembering WHICH
         // chain it opened. The fixture keeps its single first-row listener,
@@ -3926,6 +3948,70 @@ impl WalletPage {
                     });
                 }
                 FlowPanel::Dsd2 | FlowPanel::Dsd2b => {
+                    // DSD2bL: a split row's own amount, and the X that has
+                    // been drawn on that card since spec 021 with nothing
+                    // behind it. Every edit sends the WHOLE list back, because
+                    // `RecipientsChanged` is the event the machine offers.
+                    for (index, focus) in send.split_focuses.iter().enumerate() {
+                        let rows = send.recipients.clone();
+                        actions.split_amount_fields.push(panels::AddressField {
+                            focus: focus.clone(),
+                            value: rows
+                                .get(index)
+                                .map(|r| r.amount.clone())
+                                .unwrap_or_default(),
+                            placeholder: SharedString::from("0"),
+                            on_change: Box::new({
+                                let host = host.clone();
+                                move |amount: String, _: &mut Window, cx: &mut gpui::App| {
+                                    let next = flows_live::split_amount_edited(
+                                        &rows,
+                                        index,
+                                        amount.clone(),
+                                    );
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch(
+                                            SendEvent::RecipientsChanged { recipients: next },
+                                            cx,
+                                        );
+                                    });
+                                }
+                            }),
+                        });
+                        let rows = send.recipients.clone();
+                        actions.remove_recipient_rows.push({
+                            let host = host.clone();
+                            Box::new(
+                                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                    let next = flows_live::split_row_removed(&rows, index);
+                                    host.update(cx, |host, cx| {
+                                        host.dispatch(
+                                            SendEvent::RecipientsChanged { recipients: next },
+                                            cx,
+                                        );
+                                    });
+                                },
+                            ) as panels::Click
+                        });
+                    }
+                    // "+ 添加收款人" in split mode appends a BLANK row rather
+                    // than stepping panels — the same words do the same thing
+                    // on the web, and the core assigns the row's id.
+                    if !send.recipients.is_empty() {
+                        let rows = send.recipients.clone();
+                        let host = host.clone();
+                        actions.add_recipient = Some(Box::new(
+                            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
+                                let next = flows_live::split_row_appended(&rows);
+                                host.update(cx, |host, cx| {
+                                    host.dispatch(
+                                        SendEvent::RecipientsChanged { recipients: next },
+                                        cx,
+                                    );
+                                });
+                            },
+                        ) as panels::Click);
+                    }
                     actions.amount_field = Some(panels::AddressField {
                         focus: send.amount_focus,
                         value: send.amount,

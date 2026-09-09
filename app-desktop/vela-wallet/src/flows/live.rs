@@ -34,7 +34,8 @@ use vela_core::app::contacts::ContactsView;
 use vela_core::app::fee_policy::{FeeAssetView, FeeEstimateView, FeeView};
 use vela_core::app::send::{
     SendAddNetworkMsg, SendAmountWarning, SendHoldReason, SendLockError, SendReceiptStatus,
-    SendStage, SendToken, SendTreasuryAsset, SendTxStatus, SendUnitIssue, SendView,
+    SendRecipientDraft, SendStage, SendToken, SendTreasuryAsset, SendTxStatus, SendUnitIssue,
+    SendView,
 };
 
 use crate::flows::fixtures::{
@@ -1094,6 +1095,105 @@ mod treasury_tests {
             assert!(detail.contains("0xTreasury"), "{detail}");
             assert!(detail.contains("0.02"), "{detail}");
         });
+    }
+}
+
+/// The three edits a split screen can make to its rows.
+///
+/// The core offers ONE event for all of them — `RecipientsChanged`, carrying
+/// the whole list — so each of these is "the list, with one thing different".
+/// They are functions rather than closures inline in the page because the thing
+/// that would go wrong is invisible: a rebuild that dropped a row's `id` or its
+/// `name` would silently unname a payee and re-key a row the contact picker is
+/// aiming at, and nothing downstream would complain.
+#[must_use]
+pub fn split_amount_edited(
+    rows: &[SendRecipientDraft],
+    index: usize,
+    amount: String,
+) -> Vec<SendRecipientDraft> {
+    let mut next = rows.to_vec();
+    if let Some(row) = next.get_mut(index) {
+        row.amount = amount;
+    }
+    next
+}
+
+#[must_use]
+pub fn split_row_removed(rows: &[SendRecipientDraft], index: usize) -> Vec<SendRecipientDraft> {
+    rows.iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(_, row)| row.clone())
+        .collect()
+}
+
+/// A blank row. The id is EMPTY on purpose: the core assigns its own
+/// deterministic `rcpt_{n}` (its ported `makeRecipientId`), and a shell-minted
+/// id would be a second naming scheme for the same thing.
+#[must_use]
+pub fn split_row_appended(rows: &[SendRecipientDraft]) -> Vec<SendRecipientDraft> {
+    let mut next = rows.to_vec();
+    next.push(SendRecipientDraft {
+        id: String::new(),
+        address: String::new(),
+        amount: String::new(),
+        name: None,
+    });
+    next
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    fn row(id: &str, address: &str, amount: &str, name: Option<&str>) -> SendRecipientDraft {
+        SendRecipientDraft {
+            id: id.to_owned(),
+            address: address.to_owned(),
+            amount: amount.to_owned(),
+            name: name.map(str::to_owned),
+        }
+    }
+
+    /// One row changes; every other row survives byte for byte.
+    ///
+    /// Ids and names are the part worth pinning. The contact picker aims at a
+    /// row BY ID (`picker_target`), and the payroll importer is where the names
+    /// come from — so a rebuild that regenerated ids would point the picker at
+    /// a row that no longer exists, and one that dropped names would quietly
+    /// turn "Alice" back into an address.
+    #[test]
+    fn editing_one_split_row_leaves_the_others_alone() {
+        let rows = vec![
+            row("rcpt_1", "0xAAA", "1", Some("Alice")),
+            row("rcpt_2", "0xBBB", "2", None),
+            row("rcpt_3", "0xCCC", "3", Some("Cara")),
+        ];
+
+        let edited = split_amount_edited(&rows, 1, "7.5".to_owned());
+        assert_eq!(edited.len(), 3);
+        assert_eq!(edited[1].amount, "7.5");
+        assert_eq!(edited[1].id, "rcpt_2", "the row keeps its identity");
+        assert_eq!(edited[0], rows[0]);
+        assert_eq!(edited[2], rows[2]);
+
+        // An index nobody has is not a reason to lose the list.
+        assert_eq!(split_amount_edited(&rows, 9, "1".to_owned()), rows);
+
+        let removed = split_row_removed(&rows, 1);
+        assert_eq!(removed.len(), 2);
+        assert_eq!(removed[0].id, "rcpt_1");
+        assert_eq!(removed[1].id, "rcpt_3");
+        assert_eq!(removed[1].name.as_deref(), Some("Cara"));
+
+        let appended = split_row_appended(&rows);
+        assert_eq!(appended.len(), 4);
+        assert!(
+            appended[3].id.is_empty(),
+            "the core mints the id, not the shell"
+        );
+        assert!(appended[3].address.is_empty() && appended[3].amount.is_empty());
     }
 }
 

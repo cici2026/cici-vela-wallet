@@ -6,6 +6,7 @@
 //! `asset_row`, `token_icon`, `identicon_avatar` and `empty_state` all come
 //! from next door. What is here is what those did not already cover.
 
+use gpui::IntoElement as _;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Div, Hsla, InteractiveElement as _, ParentElement, SharedString,
@@ -612,12 +613,26 @@ pub fn fee_row(theme: &Theme, icons: &mut IconCache, fee: &FeeRow) -> Div {
 }
 
 /// DSD2bL's split row: one of N people, what they get, and the way to drop them.
+/// One payee in a split, with the two things that make a split editable: the
+/// amount THIS row gets, and the way to drop it.
+///
+/// `None` for either draws the mock's read-only card — which is what the
+/// gallery gets, and what this screen was on the desktop until spec 033.
+pub struct RecipientRowActions {
+    pub amount: Option<crate::flows::panels::AddressField>,
+    pub remove: Option<crate::flows::panels::Click>,
+}
+
 pub fn recipient_card(
     theme: &Theme,
     icons: &mut IconCache,
     identicons: &mut IdenticonCache,
     recipient: &RecipientCard,
+    index: usize,
+    row: RecipientRowActions,
+    window: &gpui::Window,
 ) -> Div {
+    let RecipientRowActions { amount, remove } = row;
     div()
         .flex()
         .items_center()
@@ -646,13 +661,47 @@ pub fn recipient_card(
                         .child(recipient.name.clone()),
                 ),
         )
-        .child(
-            div()
+        .child(match amount {
+            // Live: this row's own amount, typed. A split whose rows cannot be
+            // given amounts is a screen that can be filled in and never sent.
+            Some(field) => div()
+                .w(px(120.))
+                .flex_none()
+                .child(crate::ui::text_field(
+                    gpui::ElementId::from(("split-amount", index)),
+                    theme,
+                    &crate::ui::NameFieldStrings {
+                        label: gpui::SharedString::from(""),
+                        placeholder: field.placeholder.clone(),
+                        helper: gpui::SharedString::from(""),
+                        too_long_hint: gpui::SharedString::from(""),
+                    },
+                    &field.value,
+                    false,
+                    false,
+                    &field.focus,
+                    window,
+                    field.on_change,
+                ))
+                .into_any_element(),
+            None => div()
                 .text_size(theme::text_row_title())
                 .text_color(theme.fg_base)
-                .child(recipient.amount.clone()),
-        )
-        .child(icon_img(icons, Icon::X, false, theme.fg_subtle, 14.))
+                .child(recipient.amount.clone())
+                .into_any_element(),
+        })
+        // The X has been drawn on this card since spec 021 and did nothing.
+        .child(crate::flows::panels::clickable(
+            gpui::ElementId::from(("split-remove", index)),
+            remove,
+            div().p(px(4.)).rounded(px(6.)).child(icon_img(
+                icons,
+                Icon::X,
+                false,
+                theme.fg_subtle,
+                14.,
+            )),
+        ))
 }
 
 /// The send form's token card: which token, off which chain, out of how much.
