@@ -12,6 +12,7 @@
 //! title, and a chevron has to lead somewhere.
 
 pub mod components;
+pub mod eip681;
 pub mod fixtures;
 pub mod live;
 pub mod panels;

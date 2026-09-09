@@ -53,6 +53,7 @@ pub mod payment_request;
 mod platform_macos;
 pub mod pool;
 pub mod proxy;
+pub mod qr;
 pub mod receive_watch;
 pub mod registry;
 pub mod relay;

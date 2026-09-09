@@ -9101,7 +9101,17 @@ impl WalletPage {
         else {
             return None;
         };
-        let card = panels::scan_modal(&model, theme, &mut self.icons);
+        // Two tools: a picture off the disk, and flipping a camera this
+        // desktop does not have yet. The first is live; the second is drawn
+        // and inert rather than armed and lying — the rule the site menu's
+        // three unowned items already follow.
+        let tools: Vec<Option<panels::Click>> = vec![
+            Some(Box::new(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                this.scan_from_file(cx);
+            })) as panels::Click),
+            None,
+        ];
+        let card = panels::scan_modal(&model, theme, &mut self.icons, tools);
         Some(
             div()
                 .id("scan-scrim")
@@ -9116,9 +9126,148 @@ impl WalletPage {
                     this.panel = PanelId::None;
                     cx.notify();
                 }))
-                .child(card)
+                .child(
+                    // The card is not the scrim. Without this, a click on
+                    // anything IN the modal — its tools included — bubbled to
+                    // the scrim's dismiss and closed the scanner: the tool
+                    // fired, and then the screen it opened was cleared behind
+                    // it. Every other overlay in this page already stops the
+                    // press here; this one was drawn before it had anything to
+                    // press.
+                    div()
+                        .id("scan-card")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(card),
+                )
                 .into_any_element(),
         )
+    }
+
+    /// A QR code out of a picture on this machine.
+    ///
+    /// The desktop's scanner has been a drawing since spec 021: a viewfinder
+    /// and a "from gallery" button with nothing behind either. This is the half
+    /// that needs no camera — a screenshot, a saved share card, a photo
+    /// somebody sent — and the half that works on Windows and Linux too.
+    ///
+    /// What the code MEANS is not decided here. The shell tokenizes
+    /// (`eip681::parse`, ported with both of its refusals) and the core rules:
+    /// inside a live send, `ScanResolved` decides whether the screen locks and
+    /// to what; from the home there is no session yet, so the code OPENS one,
+    /// prefilled and locked exactly when the request names a chain to lock to.
+    fn scan_from_file(&mut self, cx: &mut Context<Self>) {
+        // `VELA_SCAN_FILE=<path>` skips the dialog — the same env-seam family
+        // as `VELA_GALLERY_TAB` and `VELA_FLOW`, and for the same reason: a
+        // file dialog is a system window this app cannot drive, so without it
+        // no screenshot pass and no headless run can ever reach the far side
+        // of a scan.
+        if let Ok(path) = std::env::var("VELA_SCAN_FILE") {
+            if let Ok(bytes) = std::fs::read(&path)
+                && let Some(text) = crate::executor::qr::decode_first(&bytes)
+            {
+                self.scan_resolved(text, cx);
+            }
+            return;
+        }
+        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: None,
+        });
+        cx.spawn(async move |page, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let Ok(bytes) = std::fs::read(&path) else {
+                return;
+            };
+            let Some(text) = crate::executor::qr::decode_first(&bytes) else {
+                // No code in that picture. The modal stays up: a person who
+                // picked the wrong file wants to pick another one, not to be
+                // returned to the wallet.
+                return;
+            };
+            page.update(cx, |this, cx| this.scan_resolved(text, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// What a scanned string does, in the two places a scan can happen.
+    fn scan_resolved(&mut self, text: String, cx: &mut Context<Self>) {
+        use vela_core::app::send::SendScan;
+        let request = crate::flows::eip681::parse(&text);
+        self.flows.retain(|panel| *panel != FlowPanel::Ds1);
+
+        // Inside a live send the CORE rules on it — the shell only tokenizes.
+        if let Some(host) = self.send_host.clone() {
+            let scan = match request {
+                Some(request) => SendScan::Request {
+                    recipient: request.recipient,
+                    chain_id: request.chain_id,
+                    token_address: request.token_address,
+                    amount_base_units: request.amount_base_units,
+                },
+                None => SendScan::Text { data: text },
+            };
+            host.update(cx, |host, cx| {
+                host.dispatch(SendEvent::ScanResolved { scan }, cx);
+            });
+            if self.flows.is_empty() {
+                self.flows = FlowPanel::entry(FlowEntry::Send);
+            }
+            self.panel = PanelId::Flow;
+            cx.notify();
+            return;
+        }
+
+        // From the home there is no session yet. A request that names a chain
+        // opens Send LOCKED to it; anything else opens Send with the recipient
+        // filled in and editable.
+        let (params, recipient) = match request {
+            Some(request) => {
+                let locked = request.chain_id.is_some();
+                (
+                    SendOpenParams {
+                        prefilled_recipient: Some(request.recipient.clone()),
+                        prefilled_chain_id: request.chain_id.map(|id| id.to_string()),
+                        prefilled_token_address: request.token_address,
+                        prefilled_amount_base: request.amount_base_units,
+                        locked,
+                        ..SendOpenParams::default()
+                    },
+                    request.recipient,
+                )
+            }
+            None => {
+                let address = text.trim().to_owned();
+                if !crate::flows::eip681::is_hex_address(&address) {
+                    // Not a payment and not an address: nothing to open. The
+                    // scanner closes rather than starting a send to a string.
+                    self.panel = PanelId::None;
+                    cx.notify();
+                    return;
+                }
+                (
+                    SendOpenParams {
+                        prefilled_recipient: Some(address.clone()),
+                        ..SendOpenParams::default()
+                    },
+                    address,
+                )
+            }
+        };
+        let _ = recipient;
+        self.section = Section::Wallet;
+        self.send_sweeping = false;
+        self.flows = FlowPanel::entry(FlowEntry::Send);
+        self.panel = PanelId::Flow;
+        self.open_send(params, cx);
+        cx.notify();
     }
 
     /// Read an address-book backup and hand it to the core.

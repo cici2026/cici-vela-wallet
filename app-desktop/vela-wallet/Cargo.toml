@@ -198,6 +198,12 @@ btleplug = "0.11"
 tokio = { version = "1", default-features = false, features = ["rt", "time", "macros", "net"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 qrcode = { version = "0.14", default-features = false }
+# The other direction: a QR code READ out of a picture. Pure Rust (no zbar, no
+# C toolchain), which is what keeps the Windows and Linux builds honest — the
+# scanner's file path has to work on every desktop even where the camera one
+# does not. `image` is already here for the identicon raster, and rqrr takes
+# its `GrayImage` directly.
+rqrr = "0.9"
 # btleplug keys its service-data map by `uuid::Uuid`; name the type to match
 # on the caBLE service UUIDs. Same major as btleplug pulls, so no second copy.
 uuid = "1"

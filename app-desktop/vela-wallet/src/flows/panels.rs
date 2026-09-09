@@ -1880,10 +1880,20 @@ fn scan_placeholder(model: &ScanModal, theme: &Theme) -> Div {
 ///
 /// A scanner is a viewfinder and a 400px column is the wrong shape for one, so
 /// this is the single flow the third column does not host.
-pub fn scan_modal(model: &ScanModal, theme: &Theme, icons: &mut IconCache) -> Div {
+pub fn scan_modal(
+    model: &ScanModal,
+    theme: &Theme,
+    icons: &mut IconCache,
+    mut tool_actions: Vec<Option<Click>>,
+) -> Div {
     let mut tools = div().flex().gap(px(8.));
-    for label in &model.tools {
-        tools = tools.child(ghost_button(theme, label.clone()));
+    let mut bound = tool_actions.drain(..);
+    for (i, label) in model.tools.iter().enumerate() {
+        tools = tools.child(clickable(
+            ElementId::from(("scan-tool", i)),
+            bound.next().flatten(),
+            ghost_button(theme, label.clone()),
+        ));
     }
 
     div()
