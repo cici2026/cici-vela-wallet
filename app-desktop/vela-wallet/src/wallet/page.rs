@@ -8886,6 +8886,13 @@ impl WalletPage {
                 // so a keystroke it rejected never appears as though it had
                 // been taken, and every keystroke goes back to the machine
                 // that validates it.
+                // Same platform pair as `cap_text` and `chip_modes` above: on
+                // Linux there is no signing host, so there is nothing to type
+                // into — the block draws the way the gallery draws it, without
+                // a field that would swallow keystrokes.
+                #[cfg(target_os = "linux")]
+                let field: Option<panels::AddressField> = None;
+                #[cfg(not(target_os = "linux"))]
                 let field = matches!(
                     item,
                     signing_fixtures::Block::Allowance {

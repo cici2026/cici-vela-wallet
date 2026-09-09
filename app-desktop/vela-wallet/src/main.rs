@@ -32,6 +32,11 @@ mod ui;
 mod wallet;
 #[cfg(not(target_os = "linux"))]
 mod webview;
+// Same name, no browser behind it: see the file's own header for why the Linux
+// build gets a module rather than a `cfg` in every caller.
+#[cfg(target_os = "linux")]
+#[path = "webview_absent.rs"]
+mod webview;
 mod window_frame;
 
 use gallery::GalleryView;
